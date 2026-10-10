@@ -744,6 +744,7 @@ template<class T> void NesPpu<T>::LoadSprite(uint8_t spriteY, uint8_t tileIndex,
 	}
 
 	NesSpriteInfo& info = _spriteTiles[_spriteIndex];
+	if(_metaFrame && !extraSprite) { _metaFetchedSpriteIds[_spriteIndex] = _metaSecondarySpriteIds[_spriteIndex]; }
 	info.BackgroundPriority = backgroundPriority;
 	info.PaletteOffset = ((attributes & 0x03) << 2) | 0x10;
 	if(extraSprite) {
@@ -764,6 +765,18 @@ template<class T> void NesPpu<T>::LoadSprite(uint8_t spriteY, uint8_t tileIndex,
 		}
 
 		((T*)this)->StoreSpriteInformation(horizontalMirror, verticalMirror, tileAddr, rangeResult, info); //Used by HD packs
+		if(_metaFrame && _scanline >= 0 && _scanline < 239 && _metaFetchedSpriteIds[_spriteIndex] >= 0) {
+			MetaSpriteRow row;
+			row.Sprite = (uint16_t)_metaFetchedSpriteIds[_spriteIndex];
+			row.X = spriteX; row.Y = (int16_t)spriteY + 1; row.Scanline = _scanline + 1;
+			row.Height = spriteSizeMask + 1; row.PatternAddress = tileAddr;
+			// Fetched bytes have already been mirrored into left-to-right shifter order.
+			row.LowByte = info.LowByte; row.HighByte = info.HighByte;
+			for(int color = 0; color < 4; color++) {
+				row.Palette[color] = (_paletteRam[info.PaletteOffset + color] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+			}
+			_metaFrame->NesRows.push_back(row);
+		}
 
 		if(!extraSprite) {
 			_spriteShifterList[_spriteIndex] = (((uint16_t)spriteX + 1) << 4) | _spriteIndex;
@@ -816,6 +829,7 @@ template<class T> void NesPpu<T>::LoadExtraSprites()
 			for(uint32_t i = (_lastVisibleSpriteAddr + 4) & 0xFC; i != (uint32_t)(_firstVisibleSpriteAddr & 0xFC); i = (i + 4) & 0xFC) {
 				uint8_t spriteY = _spriteRam[i];
 				if(_scanline >= spriteY && _scanline < spriteY + (_control.LargeSprites ? 16 : 8)) {
+					if(_metaFrame) { _metaFetchedSpriteIds[_spriteIndex] = i >> 2; }
 					LoadSprite(spriteY, _spriteRam[i + 1], _spriteRam[i + 2], _spriteRam[i + 3], true);
 				}
 			}
@@ -855,6 +869,14 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 	}
 
 	int8_t spriteIndex = -1;
+	MetaSpritePixel* captured = nullptr;
+	if(_metaFrame && _scanline >= 0 && _scanline < 240 && _cycle >= 1 && _cycle <= 256) {
+		captured = &_metaFrame->Pixels[_scanline * 256 + _cycle - 1];
+		uint8_t bgIndex = ((offset + ((_cycle - 1) & 7) < 8) ? _previousTilePalette : _currentTilePalette) + backgroundColor;
+		captured->BackgroundColorIndex = backgroundColor;
+		captured->BackgroundColor = (_paletteRam[backgroundColor ? bgIndex : 0] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+		captured->VisibleSprite = -1;
+	}
 	uint8_t spriteColor = 0;
 	if(_processSprites && _prevRenderingEnabled) {
 		//If the dot is skipped, all sprite shifters are active on the first dot of the scanline.
@@ -914,6 +936,11 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 
 				if(_emulatorSpritesEnabled && (backgroundColor == 0 || !_spriteTiles[spriteIndex].BackgroundPriority)) {
 					//Check sprite priority
+					if(captured) {
+						captured->VisibleSprite = _metaFetchedSpriteIds[spriteIndex];
+						captured->SpriteColorIndex = spriteColor;
+						captured->SpriteColor = (_paletteRam[_spriteTiles[spriteIndex].PaletteOffset + spriteColor] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+					}
 					return _spriteTiles[spriteIndex].PaletteOffset + spriteColor;
 				}
 			}
@@ -1083,6 +1110,7 @@ template<class T> void NesPpu<T>::ProcessSpriteEvaluationStart()
 	_secondaryOamAddr = 0;
 
 	_overflowBugCounter = 0;
+	if(_metaFrame) { std::fill(std::begin(_metaSecondarySpriteIds), std::end(_metaSecondarySpriteIds), -1); }
 
 	_oamCopyDone = false;
 
@@ -1152,6 +1180,9 @@ template<class T> void NesPpu<T>::ProcessSpriteEvaluation()
 				if(_secondaryOamAddr < 0x20) {
 					//Copy 1 byte to secondary OAM
 					_secondarySpriteRam[_secondaryOamAddr] = _oamCopybuffer;
+					if(_metaFrame && (_secondaryOamAddr & 3) == 0) {
+						_metaSecondarySpriteIds[_secondaryOamAddr >> 2] = spriteAddrL == 0 && !_oamCopyDone ? spriteAddrH : -1;
+					}
 
 					if(_spriteInRange) {
 						if(_cycle == 66) {
@@ -1314,6 +1345,9 @@ template<class T> void NesPpu<T>::SendFrame()
 
 	RenderedFrame frame(_currentOutputBuffer, NesConstants::ScreenWidth, NesConstants::ScreenHeight, 1.0, _frameCount, _console->GetControlManager()->GetPortStates(), videoPhase);
 	frame.Data = frameData; //HD packs
+	if(_metaFrame && !frameData && !_console->GetVsMainConsole() && !_console->GetVsSubConsole()) {
+		_metaFrame->FrameNumber = _frameCount; frame.MetaSprites = _metaFrame;
+	}
 
 	if(_console->GetVsMainConsole() || _console->GetVsSubConsole()) {
 		SendFrameVsDualSystem(frame);
@@ -1430,6 +1464,7 @@ template<class T> void NesPpu<T>::ProcessScanlineFirstCycle()
 	if(++_scanline > _vblankEnd) {
 		_lastUpdatedPixel = -1;
 		_scanline = -1;
+		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(256, 240) : nullptr;
 
 		//Force prerender scanline sprite fetches to load the dummy $FF tiles (fixes shaking in Ninja Gaiden 3 stage 1 after beating boss)
 		_spriteCount = 0;
@@ -1638,6 +1673,7 @@ template<class T> uint32_t NesPpu<T>::GetPixelBrightness(uint8_t x, uint8_t y)
 
 template<class T> void NesPpu<T>::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) { _metaFrame.reset(); }
 	SVArray(_paletteRam, 0x20);
 	SVArray(_spriteRam, 0x100);
 	SVArray(_secondarySpriteRam, 0x20);

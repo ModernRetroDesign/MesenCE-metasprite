@@ -16,6 +16,7 @@ namespace Mesen.Debugger.Windows
 	public class SpriteViewerWindow : MesenWindow, INotificationHandler
 	{
 		private SpriteViewerViewModel _model;
+		private PixelPoint? _metaDragStart;
 
 		[Obsolete("For designer only")]
 		public SpriteViewerWindow() : this(CpuType.Snes) { }
@@ -39,6 +40,7 @@ namespace Mesen.Debugger.Windows
 
 			MouseViewerModelEvents.InitEvents(_model, this, picViewer);
 			picViewer.PositionClicked += PicViewer_PositionClicked;
+			picViewer.PointerReleased += OnMetaSelectionReleased;
 		}
 
 		private void InitializeComponent()
@@ -54,6 +56,7 @@ namespace Mesen.Debugger.Windows
 			}
 
 			_model.RefreshData();
+			_model.LoadMetaGroups();
 		}
 
 		protected override void OnClosing(WindowClosingEventArgs e)
@@ -65,8 +68,29 @@ namespace Mesen.Debugger.Windows
 
 		private void PicViewer_PositionClicked(object? sender, PositionClickedEventArgs e)
 		{
+			if(_model.SelectMetaRectangle && e.Properties.IsLeftButtonPressed) {
+				if(e.OriginalEvent is PointerPressedEventArgs && sender is PictureViewer viewer) {
+					_metaDragStart = e.Position;
+					_model.MetaSelectionDragging = true;
+					e.OriginalEvent.Pointer.Capture(viewer);
+				}
+				if(_metaDragStart is PixelPoint start) {
+					_model.SelectionRect = new Rect(Math.Min(start.X, e.Position.X), Math.Min(start.Y, e.Position.Y), Math.Abs(start.X - e.Position.X) + 1, Math.Abs(start.Y - e.Position.Y) + 1);
+				}
+				e.Handled = true;
+				return;
+			}
+			if(e.OriginalEvent is not PointerPressedEventArgs) {
+				e.Handled = true;
+				return;
+			}
 			PixelPoint p = e.Position;
-			SpritePreviewModel? sprite = _model.GetMatchingSprite(p, out _);
+			SpritePreviewModel? sprite = _model.GetMatchingSprite(p, out Rect clickedRect);
+			if(sprite != null && e.Properties.IsLeftButtonPressed && e.OriginalEvent.KeyModifiers.HasFlag(KeyModifiers.Control)) {
+				_model.ToggleMetaSprite(sprite, clickedRect);
+				e.Handled = true;
+				return;
+			}
 			_model.SelectedSprite = sprite;
 			_model.UpdateSelection(sprite);
 			e.Handled = true;
@@ -75,6 +99,53 @@ namespace Mesen.Debugger.Windows
 		private void OnSettingsClick(object sender, RoutedEventArgs e)
 		{
 			_model.Config.ShowSettingsPanel = !_model.Config.ShowSettingsPanel;
+		}
+
+		private void OnCreateMetaGroup(object? sender, RoutedEventArgs e) => _model.CreateMetaGroup();
+		private void OnCreateMetaPose(object? sender, RoutedEventArgs e) => _model.CreateMetaGroup(true);
+		private void OnMoveMetaGroupEarlier(object? sender, RoutedEventArgs e) => _model.MoveMetaGroup(-1);
+		private void OnMoveMetaGroupLater(object? sender, RoutedEventArgs e) => _model.MoveMetaGroup(1);
+		private void OnAlignMetaPoseOrigins(object? sender, RoutedEventArgs e) => _model.AlignMetaPoseOrigins();
+		private void OnRemoveMetaGroup(object? sender, RoutedEventArgs e) => _model.RemoveMetaGroup();
+		private void OnUndoRemoveMetaGroup(object? sender, RoutedEventArgs e) => _model.UndoRemoveMetaGroup();
+		private void OnApplyMetaReplacements(object? sender, RoutedEventArgs e) => _model.SaveMetaGroups();
+		private void OnClearMetaSelection(object? sender, RoutedEventArgs e) => _model.ClearMetaSelection();
+		private void OnMetaSelectionReleased(object? sender, PointerReleasedEventArgs e)
+		{
+			if(_metaDragStart == null) { return; }
+			_metaDragStart = null;
+			_model.MetaSelectionDragging = false;
+			_model.SelectMetaSprites(_model.SelectionRect);
+			e.Pointer.Capture(null);
+			e.Handled = true;
+		}
+		private void OnSaveMetaGroups(object? sender, RoutedEventArgs e)
+		{
+			_model.SaveMetaGroups();
+			RefreshMetaBindings();
+		}
+		private async void OnExportMetaGroup(object? sender, RoutedEventArgs e) => await _model.ExportMetaGroup(this);
+		private async void OnLoadMetaReplacement(object? sender, RoutedEventArgs e) => await _model.LoadMetaReplacement(this);
+		private void OnMetaOriginPressed(object? sender, PointerPressedEventArgs e)
+		{
+			if(!_model.SetMetaOrigin || _model.SelectedMetaGroup == null || sender is not Canvas canvas || !e.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) { return; }
+			Point position = e.GetPosition(canvas);
+			if(_model.PreviewUsesReplacement) {
+				_model.SelectedMetaGroup.ReplacementOriginX = (int)Math.Round(position.X);
+				_model.SelectedMetaGroup.ReplacementOriginY = (int)Math.Round(position.Y);
+			} else {
+				_model.SelectedMetaGroup.OriginX = (int)Math.Round(position.X);
+				_model.SelectedMetaGroup.OriginY = (int)Math.Round(position.Y);
+			}
+			_model.SaveMetaGroups();
+			RefreshMetaBindings();
+			e.Handled = true;
+		}
+		private void RefreshMetaBindings()
+		{
+			var group = _model.SelectedMetaGroup;
+			_model.SelectedMetaGroup = null;
+			_model.SelectedMetaGroup = group;
 		}
 
 		public void ProcessNotification(NotificationEventArgs e)

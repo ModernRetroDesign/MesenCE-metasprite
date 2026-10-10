@@ -1,0 +1,156 @@
+using System;
+using System.IO;
+using System.Linq;
+using Mesen.Debugger.Utilities;
+
+static void Check(bool condition, string message)
+{
+	if(!condition) { throw new Exception(message); }
+}
+
+static MetaSpriteMember Sprite(int x, int y, uint color) => new() { X = x, Y = y, Width = 1, Height = 1, Pixels = new[] { color } };
+
+MetaSpriteGroup group = new() { Id = 7, Name = "Standing", Width = 2, Height = 1, OriginX = 1, OriginY = 1 };
+group.Enabled = true;
+MetaSpriteGroup pose = new() { Id = 8, Width = 6, Height = 5 };
+pose.LinkAsPoseOf(group);
+pose.PoseName = "Walking";
+Check(group.PoseFamilyId == 7 && pose.PoseFamilyId == 7, "Animation poses must share a persistent family.");
+Check(pose.OriginX == 3 && pose.OriginY == 5, "Different pose bounds must preserve the bottom-center anchor offset.");
+var anchor = new MetaSpriteGroup { Id = 20, PoseFamilyId = 20, Width = 9, Height = 12, OriginX = 2, OriginY = 10 };
+var sibling = new MetaSpriteGroup { Id = 21, PoseFamilyId = 20, Width = 14, Height = 8, ReplacementOriginX = 9, ReplacementOriginY = 11 };
+var unrelated = new MetaSpriteGroup { Id = 22, PoseFamilyId = 22, OriginX = 3, OriginY = 4 };
+var alignmentPack = new MetaSpritePack { Groups = new() { anchor, sibling, unrelated } };
+Check(alignmentPack.AlignPoseOrigins(anchor) == 1 && sibling.OriginX == 5 && sibling.OriginY == 6,
+	"Editing a family anchor must preserve its bottom-center offset across different pose bounds.");
+Check(unrelated.OriginX == 3 && unrelated.OriginY == 4 && sibling.ReplacementOriginX == 9 && sibling.ReplacementOriginY == 11,
+	"Pose alignment must preserve other families and independent artwork anchors.");
+Check(alignmentPack.AlignPoseOrigins(new MetaSpriteGroup { PoseFamilyId = 20 }) == 0,
+	"An external group must not change a pack's pose origins.");
+group.Members.Add(Sprite(0, 0, 0xFF102030));
+group.Members.Add(Sprite(1, 0, 0xFF405060));
+var candidates = new[] { Sprite(101, 50, 0xFF405060), Sprite(100, 50, 0xFF102030), Sprite(200, 60, 0xFF102030), Sprite(201, 60, 0xFF405060) };
+var matches = MetaSpriteMatcher.FindMatches(group, candidates);
+group.ReplacementOriginX = 4;
+group.ReplacementOriginY = 6;
+Check(MetaSpritePlacement.GetTopLeft(group, 101, 51, 3) == (291, 135), "Larger replacement artwork must align its own origin at output scale.");
+MetaSpritePlacement.ValidateCanvas(48, 64, 2);
+bool badScale = false;
+try { MetaSpritePlacement.ValidateCanvas(49, 64, 2); } catch(InvalidDataException) { badScale = true; }
+Check(badScale, "Fractional native canvas dimensions must be rejected.");
+Check(matches.Count == 2, "Must recognize two instances with reordered hardware indices.");
+Check(matches[0].X == 101 && matches[0].Y == 51 && matches[0].Members.SequenceEqual(new[] { 1, 0 }), "Origin or member mapping incorrect.");
+Check(MetaSpriteMatcher.FindMatches(group, new[] { candidates[0] }).Count == 0, "Partial groups must not match.");
+Check(MetaSpriteMatcher.FindMatches(group, new[] { candidates[1], Sprite(102, 50, 0xFF405060) }).Count == 0, "Incorrect arrangement must not match.");
+Check(MetaSpriteMatcher.FindMatches(group, new[] { candidates[1], Sprite(101, 50, 0xFF405061) }).Count == 0, "Changed graphic must not match.");
+var wrappedCandidates = new[] { Sprite(100, 50, 0xFF102030), Sprite(101, 50, 0xFF405060) };
+wrappedCandidates[0].RuntimeSpriteIndex = 3;
+wrappedCandidates[1].RuntimeSpriteIndex = 3;
+Check(MetaSpriteMatcher.FindMatches(group, wrappedCandidates).Count == 0, "Wrapped copies of one hardware sprite must not satisfy two members.");
+wrappedCandidates[1].RuntimeSpriteIndex = 12;
+Check(MetaSpriteMatcher.FindMatches(group, wrappedCandidates).Count == 1, "Distinct hardware sprites must match regardless of their indices.");
+
+string directory = Path.Combine(Path.GetTempPath(), "mesen-meta-tests-" + Guid.NewGuid().ToString("N"));
+string path = Path.Combine(directory, "groups.json");
+try {
+	MetaSpritePack pack = new() { RomHash = "test-rom", System = "Gameboy", NextGroupId = 1 };
+	pack.Groups.Add(group);
+	var background = new MetaBackgroundLayer { Id = 1, NativeLayer = 1, ArtworkPath = "background.png", ArtworkWidth = 64, ArtworkHeight = 32, ArtworkScale = 2, X = 3, Y = 5, WrapX = true };
+	pack.BackgroundLayers.Add(background);
+	pack.Save(path);
+	Check(!File.ReadAllText(path).Contains("RuntimeSpriteIndex"), "Transient hardware indices must never enter saved recognition definitions.");
+	var loaded = MetaSpritePack.Load(path, "test-rom", "Gameboy");
+	Check(loaded.BackgroundLayers.Count == 1 && loaded.BackgroundLayers[0].ArtworkPath == "background.png" && loaded.BackgroundLayers[0].NativeLayer == 1,
+		"Background layer definitions must persist per game with artwork and hardware layer selection.");
+	Check(background.TryGetArtworkPixel(0, 0, 0, 5, out int bx, out int by) && bx == 58 && by == 0,
+		"Negative horizontal scroll coordinates must wrap within the scaled PNG canvas.");
+	Check(!background.TryGetArtworkPixel(0, 0, 0, 4, out _, out _), "Unwrapped vertical coordinates must clip outside the artwork.");
+	background.FollowScroll = false;
+	Check(background.TryGetArtworkPixel(3, 5, int.MaxValue, int.MinValue, out bx, out by) && bx == 0 && by == 0,
+		"Screen-locked layers must ignore hardware scrolling.");
+	background.FollowScroll = true;
+	background.WrapY = true;
+	Check(background.TryGetArtworkPixel(int.MaxValue, int.MinValue, int.MaxValue, int.MinValue, out bx, out by) && bx >= 0 && bx < 64 && by >= 0 && by < 32,
+		"Wrapping must remain valid for extreme signed scroll values without overflow.");
+	for(int sy = 0; sy < 3; sy++) {
+		for(int sx = 0; sx < 3; sx++) {
+			Check(background.TryGetArtworkPixel(3, 5, 0, 0, sx, sy, 3, out bx, out by) && bx == sx * 2 / 3 && by == sy * 2 / 3,
+				"Artwork detail must use nearest samples when output scale differs from PNG scale.");
+		}
+	}
+	Check(background.TryGetArtworkPixel(2, 4, 0, 0, 1, 1, 2, out bx, out by) && bx == 63 && by == 31,
+		"HD samples at a negative wrapped seam must reach the last PNG pixel.");
+	bool invalidSample = false;
+	try { background.TryGetArtworkPixel(0, 0, 0, 0, 2, 0, 2, out _, out _); } catch(ArgumentOutOfRangeException) { invalidSample = true; }
+	Check(invalidSample, "Subpixels outside the output pixel must be rejected.");
+	Check(loaded.NextGroupId == 8, "IDs must stay above saved IDs.");
+	Check(loaded.Groups[0].Enabled, "Enabled state must persist for automatic game-load application.");
+	Check(loaded.Groups[0].PoseFamilyId == 7, "Pose families must persist with reflection-free serialization.");
+	pose.Members.Add(Sprite(0, 0, 0xFF112233));
+	pack.Groups.Add(pose);
+	pack.Save(path);
+	var posePack = MetaSpritePack.Load(path, "test-rom", "Gameboy");
+	Check(posePack.Groups[1].PoseName == "Walking" && posePack.Groups[1].PoseFamilyId == 7 && posePack.Groups[1].OriginY == 5,
+		"Named animation poses and their independent anchors must survive save/load.");
+	pack.Groups.Remove(pose);
+	Check(loaded.Groups[0].OriginY == 1 && loaded.Groups[0].Members[1].Pixels[0] == 0xFF405060, "Snapshot must round-trip with reflection disabled.");
+	bool rejected = false;
+	try { MetaSpritePack.Load(path, "other-rom", "Gameboy"); } catch(InvalidDataException) { rejected = true; }
+	Check(rejected, "Must reject a different ROM.");
+	group.ReplacementPath = "meta-007-replacement.png";
+	group.ReplacementWidth = 0;
+	group.ReplacementOriginX = 0;
+	group.ReplacementOriginY = 0;
+	pack.Save(path);
+	var migrated = MetaSpritePack.Load(path, "test-rom", "Gameboy");
+	Check(migrated.Groups[0].ReplacementOriginX == group.OriginX && migrated.Groups[0].ReplacementOriginY == group.OriginY,
+		"Earlier replacement definitions must retain their original alignment.");
+	group.ReplacementWidth = 8;
+	group.ReplacementHeight = 8;
+	group.ReplacementOriginX = 4;
+	group.ReplacementOriginY = 6;
+	pack.Save(path);
+	loaded = MetaSpritePack.Load(path, "test-rom", "Gameboy");
+	Check(loaded.Groups[0].ReplacementOriginX == 4 && loaded.Groups[0].ReplacementOriginY == 6, "Independent replacement origins must persist.");
+	group.Members[0].Pixels = Array.Empty<uint>();
+	pack.Save(path);
+	rejected = false;
+	try { MetaSpritePack.Load(path, "test-rom", "Gameboy"); } catch(InvalidDataException) { rejected = true; }
+	Check(rejected, "Must reject corrupt pixel buffers before rendering.");
+} finally {
+	if(File.Exists(path)) { File.Delete(path); }
+	if(Directory.Exists(directory)) { Directory.Delete(directory); }
+}
+Console.WriteLine("PASS: instance matching, independent artwork origins and scale, origin migration, reordered indices, incomplete/incorrect groups, persistence, ID allocation, ROM isolation, corrupt data rejection.");
+
+MetaSpritePack runtimePack = new();
+var runtimeGroup = new MetaSpriteGroup { Id = 22, Width = 8, Height = 8, Enabled = true };
+runtimeGroup.Members.Add(new() { Width = 8, Height = 8, Pixels = Enumerable.Repeat(0xFFFF0000u, 64).ToArray() });
+runtimePack.Groups.Add(runtimeGroup);
+runtimePack.Groups.Add(new() { Id = 23, Enabled = false });
+byte[] runtimePacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => (8, 8, Enumerable.Repeat(0xFF00FF00u, 64).ToArray()));
+using(var reader = new BinaryReader(new MemoryStream(runtimePacket))) {
+	Check(reader.ReadUInt32() == MetaSpriteRuntimePacket.Magic && reader.ReadInt32() == 1 && reader.ReadInt32() == 22,
+		"Runtime packet must contain only enabled groups and use the agreed little-endian header.");
+}
+if(args.Length > 0) { File.WriteAllBytes(args[0], runtimePacket); }
+Console.WriteLine("PASS: enabled-group packet serialization.");
+var priorityPack = new MetaSpritePack { Groups = new() {
+	new MetaSpriteGroup { Id = 90, Enabled = true },
+	new MetaSpriteGroup { Id = 12, Enabled = false },
+	new MetaSpriteGroup { Id = 3, Enabled = true }
+} };
+var loadedOrder = new System.Collections.Generic.List<int>();
+MetaSpriteRuntimePacket.Create(priorityPack, g => { loadedOrder.Add(g.Id); return (1, 1, new[] { 0xFFFFFFFFu }); });
+Check(loadedOrder.SequenceEqual(new[] { 90, 3 }), "Gameplay priority must follow pack order rather than numerical group IDs, excluding disabled groups.");
+priorityPack.Groups.Reverse();
+loadedOrder.Clear();
+MetaSpriteRuntimePacket.Create(priorityPack, g => { loadedOrder.Add(g.Id); return (1, 1, new[] { 0xFFFFFFFFu }); });
+Check(loadedOrder.SequenceEqual(new[] { 3, 90 }), "Reordering definitions must update gameplay priority.");
+runtimeGroup.Enabled = false;
+byte[] disabledPacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => throw new Exception("Disabled groups must not load PNG assets."));
+Check(disabledPacket.Length == 8 && BitConverter.ToInt32(disabledPacket, 4) == 0, "An all-disabled pack must clear native definitions without reading artwork.");
+Console.WriteLine("PASS: all-disabled pack clears runtime definitions without loading PNG assets.");
+if(args.Length >= 3 && args[1] == "--gameplay") {
+	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}

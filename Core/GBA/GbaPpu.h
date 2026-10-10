@@ -5,6 +5,9 @@
 #include "Shared/EventType.h"
 #include "Utilities/Timer.h"
 #include "Utilities/ISerializable.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
+#include <memory>
 
 class Emulator;
 class GbaConsole;
@@ -77,6 +80,7 @@ struct GbaSpriteRendererData
 
 struct GbaPixelData
 {
+	int16_t Sprite = -1; // Transient capture identity; not part of serialized emulation state.
 	uint16_t Color = 0;
 	uint8_t Priority = 0xFF;
 	uint8_t Layer = 5;
@@ -102,6 +106,8 @@ private:
 	static constexpr uint16_t WhiteColor = 0x7FFF;
 
 	GbaPpuState _state = {};
+	std::atomic<bool> _metaCaptureRequested{false};
+	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 
 	uint16_t _vblankStartScanline = 160;
 	uint16_t _lastScanline = 227;
@@ -195,6 +201,7 @@ private:
 	void SetWindowActiveLayers(int window, uint8_t cfg);
 
 	void SendFrame();
+	void CaptureSpritePixel(const GbaSpriteRendererData& sprite, uint32_t color);
 
 	template<int i, bool mosaic, bool bpp8> __forceinline void PushBgPixels(int renderX);
 	template<int i, bool mosaic, bool bpp8, bool mirror> __forceinline void PushBgPixels(int renderX);
@@ -232,6 +239,7 @@ private:
 	template<int i> void UpdateLayerTransform();
 
 public:
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 	void Init(Emulator* emu, GbaConsole* console, GbaMemoryManager* memoryManager);
 	~GbaPpu();
 

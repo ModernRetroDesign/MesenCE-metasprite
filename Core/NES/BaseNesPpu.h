@@ -3,6 +3,9 @@
 #include "NES/INesMemoryHandler.h"
 #include "Utilities/ISerializable.h"
 #include "NES/NesTypes.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
+#include <memory>
 
 enum class ConsoleRegion;
 
@@ -15,6 +18,10 @@ class EmuSettings;
 class BaseNesPpu : public INesMemoryHandler, public ISerializable
 {
 protected:
+	std::atomic<bool> _metaCaptureRequested {false};
+	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	int16_t _metaSecondarySpriteIds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+	int16_t _metaFetchedSpriteIds[64] = {};
 	uint64_t _masterClock = 0;
 	uint32_t _cycle = 0;
 	int16_t _scanline = 0;
@@ -129,6 +136,7 @@ protected:
 	void UpdateMinimumDrawCycles();
 
 public:
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 	virtual void Reset(bool softReset) = 0;
 	virtual void Run(uint64_t runTo) = 0;
 

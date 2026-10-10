@@ -572,6 +572,7 @@ void SmsVdp::DrawPixel()
 	_currentOutputBuffer[_state.Scanline * 256 + GetVisiblePixelIndex()] = GetPixelColor();
 	if(_needCramDot) {
 		_currentOutputBuffer[_state.Scanline * 256 + GetVisiblePixelIndex()] = _cramDotColor;
+		if(_metaFrame) { _metaFrame->Pixels[(_state.Scanline + GetViewportYOffset()) * 256 + GetVisiblePixelIndex()].VisibleSprite = -1; }
 	}
 	_bgShifters[0] <<= 1;
 	_bgShifters[1] <<= 1;
@@ -646,6 +647,7 @@ void SmsVdp::ProcessEndOfScanline()
 		_emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::PpuFrameDone);
 
 		RenderedFrame frame(_currentOutputBuffer, 256, 240, 1.0, _state.FrameCount, _console->GetControlManager()->GetPortStates());
+		if(_metaFrame) { _metaFrame->FrameNumber = _state.FrameCount; frame.MetaSprites = _metaFrame; }
 		bool rewinding = _emu->GetRewindManager()->IsRewinding();
 		_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
 
@@ -655,6 +657,7 @@ void SmsVdp::ProcessEndOfScanline()
 		_console->ProcessEndOfFrame();
 	} else if(_state.Scanline >= _scanlineCount) {
 		_state.Scanline = 0;
+		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(256, 240) : nullptr;
 		_state.VerticalScrollLatch = _state.VerticalScroll;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Sms);
 		_currentOutputBuffer = _currentOutputBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
@@ -757,6 +760,7 @@ void SmsVdp::ProcessSpriteEvaluation()
 				}
 			}
 			_spriteShifters[_inRangeSpriteCount].SpriteRow = (scanline - sprY) >> (uint8_t)_state.EnableDoubleSpriteSize;
+			_spriteShifters[_inRangeSpriteCount].EvaluatedDisplayRow = scanline - sprY;
 		}
 
 		_inRangeSprites[_inRangeSpriteCount] = i;
@@ -828,6 +832,7 @@ void SmsVdp::LoadSpriteTilesSms()
 			//Load sprite N tile (2nd word)
 			_spriteShifters[_spriteCount].TileData[2] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount].TileData[3] = ReadVram(_spriteShifters[_spriteCount].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
+			CaptureFetchedSprite(_spriteCount);
 			if(_state.ShiftSpritesLeft) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSprite(_spriteCount);
@@ -850,6 +855,7 @@ void SmsVdp::LoadSpriteTilesSms()
 			//Load sprite N+1 tile (2nd word)
 			_spriteShifters[_spriteCount + 1].TileData[2] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 2, SmsVdpMemAccess::SpriteLoadTile);
 			_spriteShifters[_spriteCount + 1].TileData[3] = ReadVram(_spriteShifters[_spriteCount + 1].TileAddr + 3, SmsVdpMemAccess::SpriteLoadTile);
+			CaptureFetchedSprite(_spriteCount + 1);
 			if(_state.ShiftSpritesLeft) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSprite(_spriteCount + 1);
@@ -889,6 +895,7 @@ void SmsVdp::LoadExtraSpritesSms()
 		_spriteShifters[i].TileData[1] = _videoRam[sprTileAddr + 1];
 		_spriteShifters[i].TileData[2] = _videoRam[sprTileAddr + 2];
 		_spriteShifters[i].TileData[3] = _videoRam[sprTileAddr + 3];
+		CaptureFetchedSprite(i);
 		_spriteShifters[i].HardwareSprite = false;
 		_spriteCount++;
 
@@ -1073,6 +1080,15 @@ void SmsVdp::LoadExtraSpritesSg()
 	}
 }
 
+void SmsVdp::CaptureFetchedSprite(uint8_t sprIndex)
+{
+	auto& sprite = _spriteShifters[sprIndex];
+	std::copy(sprite.TileData, sprite.TileData + 4, sprite.CapturedTileData);
+	sprite.CapturedX = sprite.SpriteX - (_state.ShiftSpritesLeft ? 8 : 0);
+	sprite.CapturedDisplayRow = sprite.EvaluatedDisplayRow;
+	sprite.CapturedSprite = _inRangeSprites[sprIndex];
+}
+
 void SmsVdp::ShiftSprite(uint8_t sprIndex)
 {
 	_spriteShifters[sprIndex].SpriteX -= 8;
@@ -1116,6 +1132,25 @@ uint16_t SmsVdp::GetPixelColor()
 	bool spriteDrawn = false;
 	uint8_t spritePixelColor = 0;
 	uint16_t xPos = GetVisiblePixelIndex();
+	if(_metaFrame && xPos == 0 && _state.UseMode4) {
+		for(int i = 0; i < _spriteCount; i++) {
+			auto& fetched = _spriteShifters[i];
+			MetaSpriteDecodedRow row;
+			row.Sprite = fetched.CapturedSprite; row.X = fetched.CapturedX;
+			row.Row = fetched.CapturedDisplayRow; row.Y = _state.Scanline + GetViewportYOffset() - row.Row;
+			int horizontalScale = IsZoomedSpriteAllowed(i) ? 2 : 1;
+			row.Width = 8 * horizontalScale; row.Height = (_state.UseLargeSprites ? 16 : 8) << (uint8_t)_state.EnableDoubleSpriteSize;
+			for(int x = 0; x < row.Width; x++) {
+				int color = 0;
+				for(int plane = 0; plane < 4; plane++) { color |= ((fetched.CapturedTileData[plane] >> (7 - x / horizontalScale)) & 1) << plane; }
+				uint16_t rgb = _internalPaletteRam[0x10 + color];
+				auto channel = [](int v) { return (v << 3) | (v >> 2); };
+				row.Pixels.push_back(color ? 0xFF000000u | (channel(rgb & 31) << 16) | (channel((rgb >> 5) & 31) << 8) | channel((rgb >> 10) & 31) : 0);
+			}
+			_metaFrame->DecodedRows.push_back(std::move(row));
+		}
+	}
+	int visibleSprite = -1;
 	for(int i = 0; i < _spriteCount; i++) {
 		if(xPos >= _spriteShifters[i].SpriteX && xPos < _spriteShifters[i].SpriteX + (8 << (uint8_t)IsZoomedSpriteAllowed(i))) {
 			if(_state.UseMode4) {
@@ -1138,6 +1173,7 @@ uint16_t SmsVdp::GetPixelColor()
 						continue;
 					} else {
 						spritePixelColor = sprColor;
+						visibleSprite = _spriteShifters[i].CapturedSprite;
 						spriteDrawn = true;
 					}
 				}
@@ -1174,6 +1210,14 @@ uint16_t SmsVdp::GetPixelColor()
 		((_bgShifters[3] >> 20) & 0x08);
 
 	bool highPriority = (_bgPriority & 0x800000);
+	if(_metaFrame && _state.UseMode4) {
+		auto& pixel = _metaFrame->Pixels[(_state.Scanline + GetViewportYOffset()) * 256 + xPos];
+		pixel.BackgroundColor = _internalPaletteRam[((_bgPalette & 0x800000) ? 0x10 : 0) + color];
+		pixel.BackgroundColorIndex = color;
+		pixel.VisibleSprite = spriteDrawn && !(highPriority && color != 0) && !_disableSprites ? visibleSprite : -1;
+		pixel.SpriteColorIndex = spritePixelColor;
+		pixel.SpriteColor = _internalPaletteRam[0x10 + spritePixelColor];
+	}
 	if(!spriteDrawn || (highPriority && color != 0) || _disableSprites) {
 		uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;
 		if(_state.UseMode4) {
@@ -1500,6 +1544,7 @@ void SmsVdp::InitGgPowerOnState()
 
 void SmsVdp::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) { _metaFrame.reset(); }
 	SVArray(_videoRam, 0x4000);
 	SVArray(_paletteRam, 0x40);
 	SVArray(_internalPaletteRam, 0x20);

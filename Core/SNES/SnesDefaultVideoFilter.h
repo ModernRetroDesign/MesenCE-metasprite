@@ -31,4 +31,8 @@ public:
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
 	OverscanDimensions GetOverscan() override;
+	bool SupportsMetaSprites() const {
+		return !_forceFixedRes && _colorCorrection == SnesColorCorrectionMode::None
+			&& _videoConfig.Hue == 0 && _videoConfig.Saturation == 0 && _videoConfig.Brightness == 0 && _videoConfig.Contrast == 0;
+	}
 };

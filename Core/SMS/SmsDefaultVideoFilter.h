@@ -1,6 +1,7 @@
 #pragma once
 #include "pch.h"
 #include "SMS/SmsConsole.h"
+#include "SMS/SmsVdp.h"
 #include "SMS/SmsTypes.h"
 #include "Shared/Video/BaseVideoFilter.h"
 #include "Shared/EmuSettings.h"
@@ -57,6 +58,7 @@ protected:
 	}
 
 public:
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color & 0x7FFF]; }
 	SmsDefaultVideoFilter(Emulator* emu, SmsConsole* console) : BaseVideoFilter(emu)
 	{
 		_console = console;

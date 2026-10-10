@@ -32,6 +32,9 @@
     <ClInclude Include="Shared\Movies\BizHawkMovie.h" />
     <ClInclude Include="Shared\Utilities\S3511ARtc.h" />
     <ClInclude Include="Shared\Video\BlendFilter.h" />
+    <ClInclude Include="Shared\Video\MetaSpriteFrame.h" />
+    <ClInclude Include="Shared\Video\MetaSpriteCompositor.h" />
+    <ClInclude Include="Shared\Video\MetaSpritePacket.h" />
     <ClInclude Include="Shared\Video\DrawPixelsCommand.h" />
     <ClInclude Include="SNES\Input\AsciiTurboFileTwinStf.h" />
     <ClInclude Include="SNES\Input\AsciiTurboFileTwinTf2.h" />

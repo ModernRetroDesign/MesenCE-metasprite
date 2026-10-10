@@ -386,6 +386,11 @@ void PceVdc::ProcessSpriteEvaluation()
 			_sprites[_spriteCount].ForegroundPriority = (flags & 0x80) != 0;
 			_sprites[_spriteCount].Palette = (flags & 0x0F);
 			_sprites[_spriteCount].LoadSp23 = loadSp23;
+			_sprites[_spriteCount].CapturedY = y;
+			_sprites[_spriteCount].CapturedRow = spriteRow;
+			_sprites[_spriteCount].CapturedWidth = width;
+			_sprites[_spriteCount].CapturedHeight = height;
+			_sprites[_spriteCount].CapturedOffsetX = x;
 			_spriteCount++;
 		}
 	}
@@ -511,6 +516,7 @@ uint16_t PceVdc::ReadVram(uint16_t addr)
 
 void PceVdc::LoadSpriteTiles()
 {
+	_metaSpriteRows.clear();
 	_drawSpriteCount = 0;
 	_rowHasSprite0 = false;
 
@@ -563,6 +569,22 @@ void PceVdc::LoadSpriteTiles()
 			spr.TileData[2] = 0;
 			spr.TileData[3] = 0;
 			hasSprite0 |= spr.Index == 0;
+		}
+	}
+
+	if(_metaCaptureRequested.load()) {
+		auto& palette = _emu->GetSettings()->GetPcEngineConfig().Palette;
+		for(int i = 0; i < _totalSpriteCount; i++) {
+			const auto& sprite = _drawSprites[i];
+			MetaSpriteDecodedRow row;
+			row.Sprite = sprite.Index; row.X = sprite.X - sprite.CapturedOffsetX; row.Y = sprite.CapturedY;
+			row.Width = sprite.CapturedWidth; row.Height = sprite.CapturedHeight;
+			row.Row = sprite.CapturedRow; row.OffsetX = sprite.CapturedOffsetX;
+			for(int x = 0; x < 16; x++) {
+				uint8_t color = GetSpritePixelColor(sprite.TileData, sprite.HorizontalMirroring ? x : 15 - x);
+				row.Pixels.push_back(color ? palette[_vce->GetPalette(256 + sprite.Palette * 16 + color) & 0x1FF] : 0);
+			}
+			_metaSpriteRows.push_back(std::move(row));
 		}
 	}
 
@@ -878,8 +900,11 @@ void PceVdc::InternalDrawScanline()
 	uint16_t pixelsToDraw = (_state.HClock - _lastDrawHClock) / GetClockDivider();
 	uint16_t xStart = _xStart;
 	uint16_t xMax = _xStart + pixelsToDraw;
+	bool capture = !skipRender && _metaCaptureRequested.load();
+	if(capture) { std::fill(_metaRow + xStart, _metaRow + xMax, MetaSpritePixel{}); }
 
 	bool inPicture = _hMode == PceVdcModeH::Hdw && _tileCount > 0;
+	if(capture && inPicture) { _metaPictureX = (int)xStart - _screenOffsetX; }
 
 	if(inPicture && (_state.BackgroundEnabled || _state.SpritesEnabled)) {
 		PcEngineConfig& cfg = _emu->GetSettings()->GetPcEngineConfig();
@@ -890,6 +915,9 @@ void PceVdc::InternalDrawScanline()
 		uint16_t outColor = 0;
 		uint8_t bgColor = 0;
 		for(; xStart < xMax; xStart++) {
+			int visibleSprite = -1;
+			uint8_t visibleSpriteColor = 0;
+			uint16_t backgroundColor = 0;
 			if constexpr(!skipRender) {
 				outColor = PceVpc::TransparentPixelFlag | _vce->GetPalette(0);
 				bgColor = 0;
@@ -903,6 +931,7 @@ void PceVdc::InternalDrawScanline()
 				}
 			}
 
+			if(capture) { backgroundColor = (outColor & 0x1FF) | grayscaleBit; }
 			if constexpr(hasSprites) {
 				if(_state.SpritesEnabled && _xPosHasSprite[_screenOffsetX + 32]) {
 					uint8_t sprColor;
@@ -927,6 +956,8 @@ void PceVdc::InternalDrawScanline()
 									} else {
 										if(sprEnabled && (bgColor == 0 || _drawSprites[i].ForegroundPriority)) {
 											outColor = PceVpc::SpritePixelFlag | _vce->GetPalette(256 + _drawSprites[i].Palette * 16 + sprColor);
+											visibleSprite = _drawSprites[i].Index;
+											visibleSpriteColor = sprColor;
 										}
 									}
 
@@ -938,6 +969,8 @@ void PceVdc::InternalDrawScanline()
 								} else {
 									if(sprEnabled && (bgColor == 0 || _drawSprites[i].ForegroundPriority)) {
 										outColor = PceVpc::SpritePixelFlag | _vce->GetPalette(256 + _drawSprites[i].Palette * 16 + sprColor);
+										visibleSprite = _drawSprites[i].Index;
+										visibleSpriteColor = sprColor;
 									}
 									break;
 								}
@@ -949,6 +982,14 @@ void PceVdc::InternalDrawScanline()
 
 			if constexpr(!skipRender) {
 				out[xStart] = outColor | grayscaleBit;
+				if(capture) {
+					auto& pixel = _metaRow[xStart];
+					pixel.VisibleSprite = visibleSprite;
+					pixel.BackgroundColor = backgroundColor;
+					pixel.BackgroundColorIndex = bgColor;
+					pixel.SpriteColor = (outColor & 0x1FF) | grayscaleBit;
+					pixel.SpriteColorIndex = visibleSpriteColor;
+				}
 			}
 			_screenOffsetX++;
 		}
@@ -958,6 +999,7 @@ void PceVdc::InternalDrawScanline()
 			for(; xStart < xMax; xStart++) {
 				//In picture, but BG is not enabled, draw bg color
 				out[xStart] = PceVpc::TransparentPixelFlag | color;
+				if(capture) { _metaRow[xStart].BackgroundColor = color; }
 			}
 		}
 	} else {
@@ -966,6 +1008,7 @@ void PceVdc::InternalDrawScanline()
 			for(; xStart < xMax; xStart++) {
 				//Output hasn't started yet, display overscan color
 				out[xStart] = PceVpc::TransparentPixelFlag | color;
+				if(capture) { _metaRow[xStart].BackgroundColor = color; }
 			}
 		}
 	}
@@ -1350,6 +1393,10 @@ void PceVdc::WriteRegister(uint16_t addr, uint8_t value)
 
 void PceVdc::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) {
+		std::fill(std::begin(_metaRow), std::end(_metaRow), MetaSpritePixel{});
+		_metaSpriteRows.clear();
+	}
 	SVArray(_vram, 0x8000);
 	SVArray(_spriteRam, 0x100);
 	SVArray(_rowBuffer, PceConstants::MaxScreenWidth);

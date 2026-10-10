@@ -30,4 +30,6 @@ public:
 	WsDefaultVideoFilter(Emulator* emu, WsConsole* console, bool applyNtscFilter);
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color & 0xFFF]; }
+	bool SupportsMetaSprites() const;
 };

@@ -59,6 +59,11 @@ void WsDefaultVideoFilter::InitLookupTable()
 	_videoConfig = config;
 }
 
+bool WsDefaultVideoFilter::SupportsMetaSprites() const
+{
+	return !_applyNtscFilter && !_emu->GetSettings()->GetWsConfig().BlendFrames;
+}
+
 FrameInfo WsDefaultVideoFilter::GetFrameInfo()
 {
 	if(_applyNtscFilter) {

@@ -23,6 +23,22 @@
 #include "Core/Debugger/TraceLogFileSaver.h"
 #include "Core/Debugger/FrozenAddressManager.h"
 #include "Core/Gameboy/GbTypes.h"
+#include "Core/Gameboy/Gameboy.h"
+#include "Core/Gameboy/GbPpu.h"
+#include "Core/SMS/SmsConsole.h"
+#include "Core/SMS/SmsVdp.h"
+#include "Core/PCE/PceConsole.h"
+#include "Core/PCE/PceVdc.h"
+#include "Core/GBA/GbaConsole.h"
+#include "Core/GBA/GbaPpu.h"
+#include "Core/WS/WsConsole.h"
+#include "Core/WS/WsPpu.h"
+#include "Core/NES/NesConsole.h"
+#include "Core/NES/DefaultNesPpu.h"
+#include "Core/SNES/SnesConsole.h"
+#include "Core/SNES/SnesPpu.h"
+#include "Core/Shared/Video/VideoDecoder.h"
+#include "Core/Shared/Video/MetaSpritePacket.h"
 #include "Utilities/StringUtilities.h"
 
 extern unique_ptr<Emulator> _emu;
@@ -53,6 +69,71 @@ void WrapDebuggerCall(std::function<void(Debugger* debugger)> func)
 
 extern "C"
 {
+	DllExport bool __stdcall SetMetaSpriteReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
+	{
+		try {
+			auto console = _emu->GetConsole();
+			auto gameboy = dynamic_cast<Gameboy*>(console.get());
+			auto sms = dynamic_cast<SmsConsole*>(console.get());
+			auto pce = dynamic_cast<PceConsole*>(console.get());
+			auto gba = dynamic_cast<GbaConsole*>(console.get());
+			auto ws = dynamic_cast<WsConsole*>(console.get());
+			auto nes = dynamic_cast<NesConsole*>(console.get());
+			auto snes = dynamic_cast<SnesConsole*>(console.get());
+			if(snes && _emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
+			if(nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole())) { return false; }
+			if(!romHash || (!gameboy && !sms && !pce && !gba && !ws && !nes && !snes) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
+				|| (pce && pce->IsSuperGrafx()) || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			auto groups = MetaSpritePacket(packet, length).Parse();
+			bool enabled = !groups.empty();
+			_emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups));
+			if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(enabled); }
+			if(sms) { sms->GetVdp()->SetMetaSpriteCapture(enabled); }
+			if(pce) { pce->GetVdc()->SetMetaSpriteCapture(enabled); }
+			if(gba) { gba->GetPpu()->SetMetaSpriteCapture(enabled); }
+			if(ws) { ws->GetPpu()->SetMetaSpriteCapture(enabled); }
+			if(nes) { nes->GetPpu()->SetMetaSpriteCapture(enabled); }
+			if(snes) { snes->GetPpu()->SetMetaSpriteCapture(enabled); }
+			return true;
+		} catch(...) { return false; }
+	}
+	// Request is atomic; the PPU activates capture on the next complete frame.
+	DllExport bool __stdcall SetMetaSpriteFrameCapture(bool enabled)
+	{
+		auto console = _emu->GetConsole();
+		if(auto snes = dynamic_cast<SnesConsole*>(console.get())) {
+			if(_emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
+			snes->GetPpu()->SetMetaSpriteCapture(enabled); return true;
+		}
+		if(auto ws = dynamic_cast<WsConsole*>(console.get())) {
+			ws->GetPpu()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		if(auto nes = dynamic_cast<NesConsole*>(console.get())) {
+			if(!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole()) { return false; }
+			nes->GetPpu()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		if(auto gameboy = dynamic_cast<Gameboy*>(console.get())) {
+			if(gameboy->IsSgb() || gameboy->GetLinkedConsole()) { return false; }
+			gameboy->GetPpu()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		if(auto sms = dynamic_cast<SmsConsole*>(console.get())) {
+			sms->GetVdp()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		if(auto pce = dynamic_cast<PceConsole*>(console.get())) {
+			if(pce->IsSuperGrafx()) { return false; }
+			pce->GetVdc()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		if(auto gba = dynamic_cast<GbaConsole*>(console.get())) {
+			gba->GetPpu()->SetMetaSpriteCapture(enabled);
+			return true;
+		}
+		return false;
+	}
 	//Debugger wrapper
 	DllExport void __stdcall InitializeDebugger()
 	{

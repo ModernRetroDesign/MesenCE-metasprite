@@ -88,6 +88,7 @@ void WsPpu::ProcessEndOfScanline()
 		}
 		_state.Mode = _state.NextMode;
 		_state.Scanline = 0;
+		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Ws);
 		_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 		_showIcons = _emu->GetSettings()->GetWsConfig().LcdShowIcons;
@@ -109,6 +110,10 @@ void WsPpu::DrawScanline()
 {
 	uint8_t rowIndex = _state.Scanline & 0x01;
 	std::fill(_rowData[rowIndex], _rowData[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+	if(_metaFrame) {
+		std::fill(_metaBackground[rowIndex], _metaBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+		std::fill(_metaSpriteIds[rowIndex], _metaSpriteIds[rowIndex] + WsConstants::ScreenWidth, -1);
+	}
 
 	DrawSprites<mode>();
 	DrawBackground<mode, 0>();
@@ -155,6 +160,16 @@ void WsPpu::DrawSprites()
 			}
 
 			uint16_t tileDataAddr = (bank0Addr + tileIndex * tileSize + tileRow * tileBytesPerRow);
+			if(_metaFrame) {
+				MetaSpriteDecodedRow captured {i, sprX >= 224 ? (int)sprX - 256 : sprX, y, (int)(scanline - y), 8, 8, {}};
+				for(int column = 0; column < 8; column++) {
+					uint8_t index = GetPixelColor<mode>(tileDataAddr, hMirror ? 7 - column : column);
+					uint16_t rgb = GetPixelRgbColor(mode, index, palette);
+					bool opaque = index || (!(palette & 4) && mode <= WsVideoMode::Color2bpp);
+					captured.Pixels.push_back(opaque ? 0xFF000000u | (((rgb >> 8) & 15) * 17 << 16) | (((rgb >> 4) & 15) * 17 << 8) | ((rgb & 15) * 17) : 0);
+				}
+				_metaFrame->DecodedRows.push_back(std::move(captured));
+			}
 			for(int j = 0; j < 8; j++) {
 				uint8_t x = sprX + j;
 
@@ -175,6 +190,7 @@ void WsPpu::DrawSprites()
 				uint8_t color = GetPixelColor<mode>(tileDataAddr, tileColumn);
 				if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
 					_rowData[rowIndex][x] = { palette, color, highPriority ? (uint8_t)2 : (uint8_t)1 };
+					if(_metaFrame) { _metaSpriteIds[rowIndex][x] = i; }
 				}
 			}
 		}
@@ -233,7 +249,7 @@ void WsPpu::DrawBackground()
 			uint8_t color = GetPixelColor<mode>(tileDataAddr, tileColumn);
 			tileColumn += (hMirror ? -1 : 1);
 
-			if(_rowData[rowIndex][i].Priority >= layerIndex + 1) {
+			if(!_metaFrame && _rowData[rowIndex][i].Priority >= layerIndex + 1) {
 				continue;
 			}
 
@@ -246,6 +262,11 @@ void WsPpu::DrawBackground()
 
 			//"In two bit per pixel modes: Palettes 0-3 and 8-11 are opaque. For these, index zero is treated as opaque."
 			if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
+				if(_metaFrame) {
+					_metaBackground[rowIndex][i] = {palette, color, (uint8_t)(layerIndex + 1)};
+					if(_rowData[rowIndex][i].Priority >= layerIndex + 1) { continue; }
+					_metaSpriteIds[rowIndex][i] = -1;
+				}
 				_rowData[rowIndex][i] = { palette, color, (uint8_t)(layerIndex + 1) };
 			}
 		}
@@ -498,6 +519,9 @@ void WsPpu::SendFrame()
 	uint16_t width = _showIcons ? _screenWidth : WsConstants::ScreenWidth;
 	uint16_t height = _showIcons ? _screenHeight : WsConstants::ScreenHeight;
 	RenderedFrame frame(_currentBuffer, width, height, 1.0, _state.FrameCount, _console->GetControlManager()->GetPortStates());
+	if(_metaFrame && !_showIcons && !_state.SleepEnabled && _state.LcdEnabled && _state.LastScanline >= 144 && _state.LastScanline != 255 && !_console->IsPowerOff()) {
+		_metaFrame->FrameNumber = _state.FrameCount; frame.MetaSprites = _metaFrame;
+	}
 	bool rewinding = _emu->GetRewindManager()->IsRewinding();
 	_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
 
@@ -675,6 +699,7 @@ void WsPpu::WriteLcdConfigPort(uint16_t port, uint8_t value)
 
 void WsPpu::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) { _metaFrame.reset(); }
 	SV(_state.FrameCount);
 	SV(_state.Cycle);
 	SV(_state.Scanline);

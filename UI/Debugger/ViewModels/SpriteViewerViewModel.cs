@@ -338,6 +338,9 @@ namespace Mesen.Debugger.ViewModels
 			}
 
 			entries.AddEntry("Sprite index", sprite.SpriteIndex.ToString());
+			if(_matchedMetaGroupsBySprite.TryGetValue(sprite.SpriteIndex, out var metaGroups)) {
+				entries.AddEntry("Meta groups", string.Join(", ", metaGroups.OrderBy(id => id).Select(id => $"Meta {id:D3}")));
+			}
 			entries.AddEntry("X, Y",
 				"$" + sprite.RawX.ToString("X2") + ", $" + sprite.RawY.ToString("X2") + Environment.NewLine +
 				sprite.X + ", " + sprite.Y
@@ -463,6 +466,11 @@ namespace Mesen.Debugger.ViewModels
 		private void SpritePreview_PointerPressed(object? sender, PointerPressedEventArgs e)
 		{
 			if(sender is Control ctrl && ctrl.DataContext is SpritePreviewModel sprite) {
+				if(e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.GetCurrentPoint(ctrl).Properties.IsLeftButtonPressed) {
+					ToggleMetaSprite(sprite);
+					e.Handled = true;
+					return;
+				}
 				SelectedSprite = sprite;
 				UpdateSelection(sprite);
 			}
@@ -632,6 +640,7 @@ namespace Mesen.Debugger.ViewModels
 				ViewerBitmap.HighlightRects = null;
 			}
 
+			UpdateLiveMetaMatches();
 			ViewerBitmap.Invalidate();
 
 			int selectedIndex = SelectedSprite?.SpriteIndex ?? -1;
@@ -684,6 +693,11 @@ namespace Mesen.Debugger.ViewModels
 
 		public void UpdateSelection(SpritePreviewModel? sprite)
 		{
+			if(MetaSelectionDragging) { return; }
+			if(_metaSelection.Count > 0) {
+				UpdateMetaSelection();
+				return;
+			}
 			if(sprite != null) {
 				SelectionRect = sprite.GetPreviewRect().Item1;
 			} else {
@@ -723,6 +737,7 @@ namespace Mesen.Debugger.ViewModels
 
 		public void OnGameLoaded()
 		{
+			LoadMetaGroups();
 			RefreshTiming = new RefreshTimingViewModel(Config.RefreshTiming, CpuType);
 			UpdateFilterVisibility();
 			RefreshData();

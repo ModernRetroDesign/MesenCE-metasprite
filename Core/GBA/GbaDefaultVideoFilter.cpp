@@ -12,6 +12,12 @@ GbaDefaultVideoFilter::GbaDefaultVideoFilter(Emulator* emu, bool applyNtscFilter
 	_applyNtscFilter = applyNtscFilter;
 }
 
+bool GbaDefaultVideoFilter::SupportsMetaSprites() const
+{
+	return !_applyNtscFilter && !_gbaAdjustColors && !_emu->GetSettings()->GetGbaConfig().BlendFrames
+		&& _videoConfig.Hue == 0 && _videoConfig.Saturation == 0 && _videoConfig.Brightness == 0 && _videoConfig.Contrast == 0;
+}
+
 FrameInfo GbaDefaultVideoFilter::GetFrameInfo()
 {
 	if(_applyNtscFilter) {

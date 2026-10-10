@@ -57,6 +57,52 @@
 					<CheckBox Content="{l:Translate chkShowOffscreenRegions}" IsChecked="{Binding Config.ShowOffscreenRegions}" />
 					<CheckBox Content="{l:Translate chkDimOffscreenSprites}" IsChecked="{Binding Config.DimOffscreenSprites}" />
 					<CheckBox Content="{l:Translate chkShowListView}" IsChecked="{Binding ListView.ShowListView}" />
+					<c:GroupBox Header="Meta groups" Margin="0 5 0 5">
+						<StackPanel Spacing="4" Width="220">
+							<TextBlock Text="Ctrl-click sprites on screen or in the grid." TextWrapping="Wrap" />
+							<CheckBox Content="Drag rectangle to select sprites" IsChecked="{Binding SelectMetaRectangle}" />
+							<Button Content="Clear sprite selection" Click="OnClearMetaSelection" />
+							<CheckBox Content="Recognize groups in live preview" IsChecked="{Binding ShowMetaMatches}" />
+							<TextBlock Text="{Binding MetaMatchStatus}" TextWrapping="Wrap" />
+							<Button Content="Create meta group" Click="OnCreateMetaGroup" />
+							<Button Content="Add selection as animation pose" Click="OnCreateMetaPose" />
+							<ComboBox ItemsSource="{Binding MetaGroups}" SelectedItem="{Binding SelectedMetaGroup}" />
+							<TextBlock Text="Earlier groups have priority when matches overlap." TextWrapping="Wrap" />
+							<Button Content="Move group earlier" Click="OnMoveMetaGroupEarlier" />
+							<Button Content="Move group later" Click="OnMoveMetaGroupLater" />
+							<Button Content="Remove selected group / pose" Click="OnRemoveMetaGroup" />
+							<Button Content="Undo last group removal" Click="OnUndoRemoveMetaGroup" />
+							<TextBox PlaceholderText="Group name" Text="{Binding SelectedMetaGroup.Name}" />
+							<TextBox PlaceholderText="Animation pose name" Text="{Binding SelectedMetaGroup.PoseName}" />
+							<TextBlock Text="Pose origins start at the same offset from bottom center; adjust the crosshair for alignment." TextWrapping="Wrap" />
+							<TextBlock Text="Origin X / Y (native pixels)" />
+							<StackPanel Orientation="Horizontal" Spacing="4">
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.OriginX}" />
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.OriginY}" />
+							</StackPanel>
+							<CheckBox Content="Click preview to set origin" IsChecked="{Binding SetMetaOrigin}" />
+							<Button Content="Align animation pose origins" Click="OnAlignMetaPoseOrigins" />
+							<TextBlock Text="Replacement scale / origin X / Y" />
+							<NumericUpDown Minimum="1" Maximum="10" Value="{Binding SelectedMetaGroup.ReplacementScale}" />
+							<StackPanel Orientation="Horizontal" Spacing="4">
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginX}" />
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginY}" />
+							</StackPanel>
+							<Viewbox Width="200" Height="160" Stretch="Uniform">
+								<Canvas Name="metaCanvas" Width="{Binding MetaPreviewWidth}" Height="{Binding MetaPreviewHeight}" Background="#404040" PointerPressed="OnMetaOriginPressed">
+									<Image Source="{Binding MetaPreview}" Width="{Binding MetaPreviewWidth}" Height="{Binding MetaPreviewHeight}" />
+									<Border Background="Red" Width="1" Height="{Binding MetaPreviewHeight}" Canvas.Left="{Binding MetaPreviewOriginX}" IsHitTestVisible="False" />
+									<Border Background="Red" Height="1" Width="{Binding MetaPreviewWidth}" Canvas.Top="{Binding MetaPreviewOriginY}" IsHitTestVisible="False" />
+								</Canvas>
+							</Viewbox>
+							<Button Content="Save group edits" Click="OnSaveMetaGroups" />
+							<CheckBox Content="Enable group in gameplay" IsChecked="{Binding SelectedMetaGroup.Enabled}" />
+							<Button Content="Apply gameplay replacements" Click="OnApplyMetaReplacements" />
+							<Button Content="Export group PNG" Click="OnExportMetaGroup" />
+							<Button Content="Load replacement PNG" Click="OnLoadMetaReplacement" />
+							<TextBlock Text="{Binding MetaStatus}" TextWrapping="Wrap" />
+						</StackPanel>
+					</c:GroupBox>
 
 					<Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
 						<TextBlock Grid.Column="0" Grid.Row="0" Text="{l:Translate lblBackground}" />

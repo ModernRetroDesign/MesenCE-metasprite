@@ -26,6 +26,7 @@ protected:
 	FrameInfo GetFrameInfo() override;
 
 public:
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color & 0x7FFF]; }
 	GbDefaultVideoFilter(Emulator* emu, bool applyNtscFilter);
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;

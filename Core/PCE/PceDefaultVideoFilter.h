@@ -4,6 +4,7 @@
 #include "Shared/Video/BaseVideoFilter.h"
 #include "Shared/EmuSettings.h"
 #include "Shared/Emulator.h"
+#include <typeinfo>
 
 class PceDefaultVideoFilter : public BaseVideoFilter
 {
@@ -152,6 +153,15 @@ protected:
 	}
 
 public:
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color & 0x3FF]; }
+	bool GetMetaSpriteCrop(int& left, int& top)
+	{
+		if(typeid(*this) != typeid(PceDefaultVideoFilter) || _frameDivider == 0 || _emu->GetRomInfo().Format == RomFormat::PceHes) { return false; }
+		auto overscan = BaseVideoFilter::GetOverscan();
+		left = PceConstants::GetLeftOverscan(_frameDivider) + overscan.Left * 4 / _frameDivider;
+		top = overscan.Top;
+		return true;
+	}
 	PceDefaultVideoFilter(Emulator* emu) : BaseVideoFilter(emu)
 	{
 		InitLookupTable();

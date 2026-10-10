@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "Gameboy/GbTypes.h"
 #include "Utilities/ISerializable.h"
+#include "Shared/Video/MetaSpriteFrame.h"
 
 class Emulator;
 class Gameboy;
@@ -20,6 +21,8 @@ private:
 	GbDmaController* _dmaController = nullptr;
 	uint16_t* _outputBuffers[2] = {};
 	uint16_t* _currentBuffer = nullptr;
+	atomic<bool> _metaCaptureRequested = false;
+	shared_ptr<MetaSpriteFrame> _metaSpriteFrame;
 	EmuSettings* _settings = nullptr;
 	uint16_t* _eventViewerBuffers[2] = {};
 	uint16_t* _currentEventViewerBuffer = nullptr;
@@ -113,6 +116,7 @@ private:
 	void WriteCgbPalette(uint8_t& pos, uint16_t* pal, bool autoInc, uint8_t value);
 
 public:
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested = enabled; }
 	virtual ~GbPpu();
 
 	void Init(Emulator* emu, Gameboy* gameboy, GbMemoryManager* memoryManager, GbDmaController* dmaController, uint8_t* vram, uint8_t* oam);

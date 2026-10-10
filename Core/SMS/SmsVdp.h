@@ -4,6 +4,9 @@
 #include "Shared/SettingTypes.h"
 #include "Shared/ColorUtilities.h"
 #include "Utilities/ISerializable.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
+#include <memory>
 
 class Emulator;
 class SmsConsole;
@@ -60,6 +63,8 @@ private:
 
 	uint16_t* _outputBuffers[2] = {};
 	uint16_t* _currentOutputBuffer = nullptr;
+	std::atomic<bool> _metaCaptureRequested{false};
+	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 
 	SmsVdpState _state = {};
 	uint64_t _lastMasterClock = 0;
@@ -79,6 +84,10 @@ private:
 		uint16_t TileAddr = 0;
 		int16_t SpriteX = 0;
 		uint8_t SpriteRow = 0;
+		uint8_t CapturedTileData[4] = {};
+		int16_t CapturedX = 0;
+		uint8_t EvaluatedDisplayRow = 0, CapturedDisplayRow = 0;
+		int CapturedSprite = -1;
 		bool HardwareSprite = false;
 	};
 
@@ -152,6 +161,7 @@ private:
 	void LoadSpriteTilesSg();
 	void LoadExtraSpritesSg();
 	void ShiftSprite(uint8_t sprIndex);
+	void CaptureFetchedSprite(uint8_t sprIndex);
 	void ShiftSpriteSg(uint8_t sprIndex);
 
 	__forceinline bool IsZoomedSpriteAllowed(int spriteIndex);
@@ -167,6 +177,7 @@ private:
 
 public:
 	void Init(Emulator* emu, SmsConsole* console, SmsCpu* cpu, SmsControlManager* controlManager, SmsMemoryManager* memoryManager);
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 	~SmsVdp();
 
 	void Run(uint64_t runTo);

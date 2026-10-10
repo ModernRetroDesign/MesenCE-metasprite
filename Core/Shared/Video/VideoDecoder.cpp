@@ -12,6 +12,13 @@
 #include "Shared/Video/ScanlineFilter.h"
 #include "Shared/Video/DebugHud.h"
 #include "Shared/RenderedFrame.h"
+#include "Gameboy/GbDefaultVideoFilter.h"
+#include "SMS/SmsDefaultVideoFilter.h"
+#include "GBA/GbaDefaultVideoFilter.h"
+#include "WS/WsDefaultVideoFilter.h"
+#include "NES/NesDefaultVideoFilter.h"
+#include "SNES/SnesDefaultVideoFilter.h"
+#include "PCE/PceDefaultVideoFilter.h"
 
 VideoDecoder::VideoDecoder(Emulator* emu)
 {
@@ -108,6 +115,34 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	uint32_t* outputBuffer = _videoFilter->GetOutputBuffer();
 
 	OverscanDimensions overscan = _videoFilter->GetOverscan();
+	uint32_t metaOutputScale = 1;
+	if(_frame.MetaSprites) {
+		if(auto pceFilter = dynamic_cast<PceDefaultVideoFilter*>(_videoFilter.get())) {
+			int left = 0, top = 0;
+			if(pceFilter->GetMetaSpriteCrop(left, top)) {
+				outputBuffer = _metaSpriteCompositor.Apply(outputBuffer, frameSize.Width, frameSize.Height, *_frame.MetaSprites, left, top,
+					[pceFilter](uint16_t color) { return pceFilter->GetNativeColor(color); });
+				metaOutputScale = _metaSpriteCompositor.GetOutputScale();
+				frameSize.Width *= metaOutputScale; frameSize.Height *= metaOutputScale;
+			}
+		}
+	}
+	if(_frame.MetaSprites && frameSize.Width == _frame.Width - overscan.Left - overscan.Right
+		&& frameSize.Height == _frame.Height - overscan.Top - overscan.Bottom) {
+		auto gbFilter = dynamic_cast<GbDefaultVideoFilter*>(_videoFilter.get());
+		auto smsFilter = dynamic_cast<SmsDefaultVideoFilter*>(_videoFilter.get());
+		auto gbaFilter = dynamic_cast<GbaDefaultVideoFilter*>(_videoFilter.get());
+		auto wsFilter = dynamic_cast<WsDefaultVideoFilter*>(_videoFilter.get());
+		auto nesFilter = typeid(*_videoFilter) == typeid(NesDefaultVideoFilter) ? dynamic_cast<NesDefaultVideoFilter*>(_videoFilter.get()) : nullptr;
+		auto snesFilter = dynamic_cast<SnesDefaultVideoFilter*>(_videoFilter.get());
+		if(gbFilter || smsFilter || nesFilter || (snesFilter && snesFilter->SupportsMetaSprites()) || (gbaFilter && gbaFilter->SupportsMetaSprites()) || (wsFilter && wsFilter->SupportsMetaSprites())) {
+			outputBuffer = _metaSpriteCompositor.Apply(outputBuffer, frameSize.Width, frameSize.Height, *_frame.MetaSprites, overscan.Left, overscan.Top,
+				[gbFilter, smsFilter, wsFilter, nesFilter](uint16_t color) { return gbFilter ? gbFilter->GetNativeColor(color) : smsFilter ? smsFilter->GetNativeColor(color) : wsFilter ? wsFilter->GetNativeColor(color) : nesFilter ? nesFilter->GetNativeColor(color) : 0; });
+			metaOutputScale = _metaSpriteCompositor.GetOutputScale();
+			frameSize.Width *= metaOutputScale;
+			frameSize.Height *= metaOutputScale;
+		}
+	}
 
 	if(_rotateFilter && !isAudioPlayer) {
 		outputBuffer = _rotateFilter->ApplyFilter(outputBuffer, frameSize.Width, frameSize.Height);
@@ -118,7 +153,10 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 		}
 	}
 
-	_emu->GetDebugHud()->Draw(outputBuffer, frameSize, overscan, _frame.FrameNumber, _videoFilter->GetScaleFactor());
+	HudScaleFactors hudScale = _videoFilter->GetScaleFactor();
+	hudScale.X *= metaOutputScale;
+	hudScale.Y *= metaOutputScale;
+	_emu->GetDebugHud()->Draw(outputBuffer, frameSize, overscan, _frame.FrameNumber, hudScale);
 
 	if(_scaleFilter && !isAudioPlayer) {
 		outputBuffer = _scaleFilter->ApplyFilter(outputBuffer, frameSize.Width, frameSize.Height);
@@ -131,6 +169,7 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	}
 
 	RenderedFrame convertedFrame((void*)outputBuffer, frameSize.Width, frameSize.Height, _frame.Scale, _frame.FrameNumber, _frame.InputData);
+	convertedFrame.MetaSprites = _frame.MetaSprites;
 
 	double aspectRatio = _emu->GetSettings()->GetAspectRatio(_emu->GetRegion(), _baseFrameSize);
 	if(frameSize.Height != _lastFrameSize.Height || frameSize.Width != _lastFrameSize.Width || aspectRatio != _lastAspectRatio) {
@@ -220,6 +259,7 @@ void VideoDecoder::StartThread()
 
 void VideoDecoder::StopThread()
 {
+	_metaSpriteCompositor.SetGroups({});
 	auto lock = _stopStartLock.AcquireSafe();
 	_stopFlag = true;
 	if(_decodeThread) {

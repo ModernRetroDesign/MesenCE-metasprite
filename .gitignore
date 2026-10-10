@@ -9,6 +9,10 @@
 
 # Build results
 
+# Workspace-local validation SDK
+/.tools/
+/.dotnet-install.ps1
+
 [Dd]ebug/
 [Rr]elease/
 x64/

@@ -20,6 +20,8 @@ namespace Mesen.Interop
 		private const string DllPath = EmuApi.DllName;
 		[DllImport(DllPath)] public static extern void InitializeDebugger();
 		[DllImport(DllPath)] public static extern void ReleaseDebugger();
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteFrameCapture([MarshalAs(UnmanagedType.I1)] bool enabled);
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
 
 		[DllImport(DllPath)] public static extern void ResumeExecution();
 		[DllImport(DllPath)] public static extern void Step(CpuType cpuType, Int32 instructionCount, StepType type = StepType.Step);

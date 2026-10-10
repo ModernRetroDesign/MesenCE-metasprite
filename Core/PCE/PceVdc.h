@@ -5,6 +5,8 @@
 #include "PCE/PceTypes.h"
 #include "PCE/PceConstants.h"
 #include "Utilities/ISerializable.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
 
 class PceConsole;
 class PceVce;
@@ -52,6 +54,8 @@ struct PceSpriteInfo
 	bool HorizontalMirroring;
 	bool ForegroundPriority;
 	bool LoadSp23;
+	int16_t CapturedY = 0;
+	uint8_t CapturedRow = 0, CapturedWidth = 16, CapturedHeight = 16, CapturedOffsetX = 0;
 };
 
 class PceVdc final : public ISerializable
@@ -66,6 +70,10 @@ private:
 	uint16_t* _spriteRam = nullptr;
 
 	uint16_t _rowBuffer[PceConstants::MaxScreenWidth] = {};
+	std::atomic<bool> _metaCaptureRequested{false};
+	MetaSpritePixel _metaRow[PceConstants::MaxScreenWidth] = {};
+	std::vector<MetaSpriteDecodedRow> _metaSpriteRows;
+	int _metaPictureX = -1;
 
 	uint16_t _vramOpenBus = 0;
 
@@ -201,6 +209,12 @@ public:
 	uint16_t GetHClock() { return _state.HClock; }
 	uint16_t GetScanline() { return _state.Scanline; }
 	uint16_t* GetRowBuffer() { return _rowBuffer; }
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
+	bool IsMetaSpriteCaptureEnabled() const { return _metaCaptureRequested.load(); }
+	const MetaSpritePixel* GetMetaSpriteRow() const { return _metaRow; }
+	const std::vector<MetaSpriteDecodedRow>& GetMetaSpriteGraphics() const { return _metaSpriteRows; }
+	int GetMetaPictureX() const { return _metaPictureX; }
+	void ResetMetaPicturePosition() { _metaPictureX = -1; }
 	uint16_t GetFrameCount() { return _state.FrameCount; }
 
 	void Exec();

@@ -383,8 +383,8 @@ void SmsVdpTools::GetSpriteInfo(DebugSpriteInfo& sprite, uint32_t* spritePreview
 	bool doubleSize = state.EnableDoubleSpriteSize && (!state.UseMode4 || _console->GetRevision() != SmsRevision::Sms1);
 	if(doubleSize) {
 		sprite.Width *= 2;
-		sprite.Height *= 2;
 	}
+	if(state.EnableDoubleSpriteSize) { sprite.Height *= 2; }
 
 	if(!state.UseMode4 && sprite.Palette == 0) {
 		sprite.Visibility = SpriteVisibility::Disabled;
@@ -416,7 +416,7 @@ void SmsVdpTools::GetSpriteInfo(DebugSpriteInfo& sprite, uint32_t* spritePreview
 	sprite.TileAddress = tileStart;
 
 	for(int y = 0; y < sprite.Height; y++) {
-		int yPos = doubleSize ? (y >> 1) : y;
+		int yPos = state.EnableDoubleSpriteSize ? (y >> 1) : y;
 		uint16_t pixelStart = tileStart + yPos * (state.UseMode4 ? 4 : 1);
 
 		for(int x = 0; x < sprite.Width; x++) {

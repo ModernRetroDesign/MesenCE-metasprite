@@ -200,11 +200,14 @@ void PceVpc::ProcessScanlineStart(PceVdc* vdc, uint16_t scanline)
 	}
 
 	_xStart = 0;
+	vdc->ResetMetaPicturePosition();
 
 	if(scanline >= 14 && scanline < 256) {
 		uint16_t row = scanline - 14;
 		if(row == 0) {
 			_currentOutBuffer = _currentOutBuffer == _outBuffer[0] ? _outBuffer[1] : _outBuffer[0];
+			_metaFrame = !_vdc2 && vdc->IsMetaSpriteCaptureEnabled()
+				? std::make_shared<MetaSpriteFrame>(PceConstants::MaxScreenWidth, PceConstants::ScreenHeight) : nullptr;
 		}
 
 		//Store clock dividers for each row at the end of the buffer
@@ -299,6 +302,16 @@ void PceVpc::ProcessScanlineEnd(PceVdc* vdc, uint16_t scanline, uint16_t* rowBuf
 		//PC Engine, display VDC1's data
 		uint32_t offset = (scanline - 14) * PceConstants::MaxScreenWidth;
 		memcpy(_currentOutBuffer + offset, rowBuffer, PceConstants::MaxScreenWidth * sizeof(uint16_t));
+		if(_metaFrame && scanline >= 14 && scanline < 256) {
+			std::copy(vdc->GetMetaSpriteRow(), vdc->GetMetaSpriteRow() + PceConstants::MaxScreenWidth, _metaFrame->Pixels.begin() + offset);
+			if(vdc->GetMetaPictureX() >= 0) {
+				for(auto row : vdc->GetMetaSpriteGraphics()) {
+					row.X += vdc->GetMetaPictureX();
+					row.Y = (int)scanline - 14 - row.Row;
+					_metaFrame->DecodedRows.push_back(std::move(row));
+				}
+			}
+		}
 		memset(rowBuffer, 0, PceConstants::MaxScreenWidth * sizeof(uint16_t));
 	}
 }
@@ -320,6 +333,7 @@ void PceVpc::SendFrame(PceVdc* vdc)
 			_emu->GetVideoDecoder()->UpdateFrame(frame, forRewind, forRewind);
 		} else {
 			RenderedFrame frame(_currentOutBuffer, PceConstants::InternalOutputWidth, PceConstants::InternalOutputHeight, 1.0 / PceConstants::InternalResMultipler, _vdc1->GetState().FrameCount, _console->GetControlManager()->GetPortStates());
+			if(_metaFrame) { _metaFrame->FrameNumber = frame.FrameNumber; frame.MetaSprites = _metaFrame; }
 			_emu->GetVideoDecoder()->UpdateFrame(frame, forRewind, forRewind);
 		}
 	}
@@ -394,6 +408,7 @@ void PceVpc::SetPriorityConfig(PceVpcPixelWindow wnd, uint8_t value)
 
 void PceVpc::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) { _metaFrame.reset(); }
 	SV(_state.HasIrqVdc1);
 	SV(_state.HasIrqVdc2);
 	SV(_state.Priority1);

@@ -168,6 +168,9 @@ void GbaPpu::ProcessEndOfScanline()
 		if(!_skipRender) {
 			_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 		}
+		_metaFrame = !_skipRender && _metaCaptureRequested.load() && !_state.StereoscopicEnabled
+			? std::make_shared<MetaSpriteFrame>(GbaConstants::ScreenWidth, GbaConstants::ScreenHeight) : nullptr;
+		if(_metaFrame) { _metaFrame->GbaColorEffects = true; }
 	}
 
 	if(_state.ScanlineIrqEnabled && _state.Scanline == _state.Lyc) {
@@ -183,6 +186,7 @@ void GbaPpu::SendFrame()
 	_emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::PpuFrameDone);
 
 	RenderedFrame frame(_currentBuffer, GbaConstants::ScreenWidth, GbaConstants::ScreenHeight, 1.0, _state.FrameCount, _console->GetControlManager()->GetPortStates());
+	if(_metaFrame) { _metaFrame->FrameNumber = _state.FrameCount; frame.MetaSprites = _metaFrame; }
 	bool rewinding = _emu->GetRewindManager()->IsRewinding();
 	_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
 
@@ -331,6 +335,40 @@ void GbaPpu::ProcessColorMath()
 		}
 		if constexpr(bg3Enabled) {
 			ProcessLayerPixel<3, windowEnabled>(x, wnd, main, sub);
+		}
+		if(_metaFrame && !_skipRender) {
+			// Re-run priority selection without the object layer. This retains the
+			// correct pair of backgrounds when artwork removes an object pixel.
+			GbaPixelData fallbackMain = {}, fallbackSub = {};
+			if constexpr(bg0Enabled) { ProcessLayerPixel<0, windowEnabled>(x, wnd, fallbackMain, fallbackSub); }
+			if constexpr(bg1Enabled) { ProcessLayerPixel<1, windowEnabled>(x, wnd, fallbackMain, fallbackSub); }
+			if constexpr(bg2Enabled) { ProcessLayerPixel<2, windowEnabled>(x, wnd, fallbackMain, fallbackSub); }
+			if constexpr(bg3Enabled) { ProcessLayerPixel<3, windowEnabled>(x, wnd, fallbackMain, fallbackSub); }
+			auto color = [&](uint16_t address) { return address & GbaPpu::DirectColorFlag ? (uint16_t)(address & 0x7FFF) : (uint16_t)(_paletteRam[(address >> 1) & 0x1FF] & 0x7FFF); };
+			auto& pixel = _metaFrame->Pixels[_state.Scanline * GbaConstants::ScreenWidth + x];
+			pixel.VisibleSprite = main.Layer == GbaPpu::SpriteLayerIndex ? main.Sprite : -1;
+			pixel.SecondarySprite = sub.Layer == GbaPpu::SpriteLayerIndex ? sub.Sprite : -1;
+			pixel.MainLayer = main.Layer; pixel.SecondaryLayer = sub.Layer;
+			pixel.SpriteColor = color(main.Color);
+			pixel.SecondaryColor = color(sub.Color);
+			pixel.BackgroundColor = color(main.Layer == GbaPpu::SpriteLayerIndex ? sub.Color : main.Color);
+			pixel.Window = wnd != GbaPpu::NoWindow;
+			pixel.Effect = (uint8_t)effect; pixel.MainCoefficient = mainCoeff; pixel.SecondaryCoefficient = subCoeff;
+			pixel.Brightness = brightness;
+			pixel.EffectsEnabled = _state.WindowActiveLayers[wnd][GbaPpu::EffectLayerIndex] && _state.BlendMain[main.Layer];
+			pixel.SecondaryBlendTarget = _state.BlendSub[sub.Layer];
+			pixel.SemiTransparent = (main.Color & (GbaPpu::SpriteBlendFlag | GbaPpu::DirectColorFlag)) == GbaPpu::SpriteBlendFlag;
+			pixel.GbaFallbackMainColor = color(fallbackMain.Color);
+			pixel.GbaFallbackColor = pixel.GbaFallbackMainColor;
+			pixel.GbaFallbackBlendTarget = _state.BlendSub[fallbackMain.Layer];
+			pixel.GbaFallbackCaptured = true;
+			if(_state.BlendMain[fallbackMain.Layer] && _state.WindowActiveLayers[wnd][GbaPpu::EffectLayerIndex]) {
+				if constexpr(effect == GbaPpuBlendEffect::AlphaBlend) {
+					if(_state.BlendSub[fallbackSub.Layer]) { BlendColors(&pixel.GbaFallbackColor, 0, pixel.GbaFallbackMainColor, mainCoeff, color(fallbackSub.Color), subCoeff); }
+				} else if constexpr(effect == GbaPpuBlendEffect::IncreaseBrightness || effect == GbaPpuBlendEffect::DecreaseBrightness) {
+					BlendColors(&pixel.GbaFallbackColor, 0, pixel.GbaFallbackMainColor, 16 - brightness, blendColor, brightness);
+				}
+			}
 		}
 
 		if((main.Color & (GbaPpu::SpriteBlendFlag | GbaPpu::DirectColorFlag)) == GbaPpu::SpriteBlendFlag && _state.BlendSub[sub.Layer]) {
@@ -498,6 +536,7 @@ void GbaPpu::SetPixelData(GbaPixelData& pixel, uint16_t color, uint8_t priority,
 	pixel.Color = color;
 	pixel.Priority = priority;
 	pixel.Layer = layer;
+	pixel.Sprite = -1;
 }
 
 template<int i, bool mosaic, bool bpp8>
@@ -1059,6 +1098,27 @@ uint8_t GbaPpu::ReadSpriteVram(uint32_t addr)
 	}
 }
 
+void GbaPpu::CaptureSpritePixel(const GbaSpriteRendererData& sprite, uint32_t color)
+{
+	if(!_metaFrame || _oamScanline >= GbaConstants::ScreenHeight || sprite.Mode == GbaPpuObjMode::Window) { return; }
+	int x = sprite.SpriteX >= 256 ? (int)sprite.SpriteX - 512 : sprite.SpriteX;
+	int y = sprite.SpriteY >= 160 ? (int)sprite.SpriteY - 256 : sprite.SpriteY;
+	int row = (uint8_t)(_oamScanline - sprite.SpriteY);
+	int width = sprite.Width << (uint8_t)(sprite.TransformEnabled && sprite.DoubleSize);
+	int height = sprite.Height << (uint8_t)(sprite.TransformEnabled && sprite.DoubleSize);
+	int offset = sprite.RenderX - 1;
+	if(row >= height || offset < 0 || offset >= width) { return; }
+	auto& rows = _metaFrame->DecodedRows;
+	if(!rows.empty()) {
+		auto& previous = rows.back();
+		if(previous.Sprite == (sprite.Addr >> 1) && previous.X == x && previous.Y == y && previous.Row == row
+			&& previous.Width == width && previous.Height == height && previous.OffsetX + (int)previous.Pixels.size() == offset) {
+			previous.Pixels.push_back(color); return;
+		}
+	}
+	rows.push_back({sprite.Addr >> 1, x, y, row, width, height, {color}, offset});
+}
+
 template<bool transformEnabled, bool blockFirst16k>
 void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 {
@@ -1076,7 +1136,9 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 		uint16_t drawPos = (spr.SpriteX + spr.RenderX) & 0x1FF;
 		spr.RenderX++;
 
-		if(drawPos >= 240 || spr.XPos >= spr.Width || spr.YPos >= spr.Height) {
+		if(drawPos >= 240) { continue; }
+		if(spr.XPos >= spr.Width || spr.YPos >= spr.Height) {
+			CaptureSpritePixel(spr, 0);
 			continue;
 		}
 
@@ -1104,6 +1166,12 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 				}
 			}
 
+			if(_metaFrame) {
+				uint16_t native = _paletteRam[256 + spr.PaletteIndex * 16 + color] & 0x7FFF;
+				auto channel = [](int value) { return (value << 3) | (value >> 2); };
+				CaptureSpritePixel(spr, color ? 0xFF000000u | (channel(native & 31) << 16) | (channel((native >> 5) & 31) << 8) | channel((native >> 10) & 31) : 0);
+			}
+
 			if(color != 0) {
 				if(spr.Mode == GbaPpuObjMode::Window) {
 					_oamHasWindowModeSprite = true;
@@ -1115,6 +1183,7 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 					}
 					if(_state.ObjEnableTimer == 0 && _state.ObjLayerEnabled) {
 						SetPixelData(_oamWriteOutput[drawPos], colorIndex, spr.Priority, GbaPpu::SpriteLayerIndex);
+						_oamWriteOutput[drawPos].Sprite = spr.Addr >> 1;
 					}
 				}
 			} else if(isHigherPriority && _oamWriteOutput[drawPos].Priority != 0xFF) {
@@ -1600,6 +1669,7 @@ void GbaPpu::DebugProcessMemoryAccessView()
 
 void GbaPpu::Serialize(Serializer& s)
 {
+	if(!s.IsSaving()) { _metaFrame.reset(); _renderSprPixel.Sprite = -1; }
 	SV(_state.FrameCount);
 	SV(_state.Cycle);
 	SV(_state.Scanline);
@@ -1716,6 +1786,7 @@ void GbaPpu::Serialize(Serializer& s)
 					data[j].Color = color[j];
 					data[j].Layer = layer[j];
 					data[j].Priority = priority[j];
+					data[j].Sprite = -1;
 				}
 			}
 		}

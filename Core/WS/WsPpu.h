@@ -4,6 +4,9 @@
 #include "Shared/Emulator.h"
 #include "Shared/SettingTypes.h"
 #include "Utilities/ISerializable.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
+#include <memory>
 
 class Emulator;
 class WsTimer;
@@ -32,6 +35,10 @@ private:
 	};
 
 	PixelData _rowData[2][224];
+	PixelData _metaBackground[2][224] = {};
+	int16_t _metaSpriteIds[2][224] = {};
+	std::atomic<bool> _metaCaptureRequested {false};
+	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 
 	uint16_t _screenHeight = 0;
 	uint16_t _screenWidth = 0;
@@ -102,6 +109,14 @@ public:
 				uint16_t screenWidth = _showIcons ? _screenWidth : WsConstants::ScreenWidth;
 				uint16_t offset = (_state.Scanline - 1) * screenWidth + _state.Cycle;
 				_currentBuffer[offset] = data.Priority == 0 ? GetBgColor() : GetPixelRgbColor(_state.Mode, data.Color, data.Palette);
+				if(_metaFrame) {
+					auto& pixel = _metaFrame->Pixels[(_state.Scanline - 1) * WsConstants::ScreenWidth + _state.Cycle];
+					const auto& bg = _metaBackground[rowIndex][_state.Cycle];
+					pixel.VisibleSprite = _metaSpriteIds[rowIndex][_state.Cycle];
+					pixel.SpriteColor = _currentBuffer[offset];
+					pixel.BackgroundColor = bg.Priority ? GetPixelRgbColor(_state.Mode, bg.Color, bg.Palette) : GetBgColor();
+					pixel.SpriteColorIndex = data.Color; pixel.SpriteAttributes = data.Palette;
+				}
 			}
 		} else {
 			if(_state.Cycle == 224) {
@@ -117,6 +132,7 @@ public:
 	}
 
 	void SetVideoMode(WsVideoMode mode);
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 
 	uint8_t ReadPort(uint16_t port);
 	void WritePort(uint16_t port, uint8_t value);

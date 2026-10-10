@@ -4,6 +4,7 @@
 #include "Utilities/AutoResetEvent.h"
 #include "Shared/SettingTypes.h"
 #include "Shared/RenderedFrame.h"
+#include "Shared/Video/MetaSpriteCompositor.h"
 
 class BaseVideoFilter;
 class ScaleFilter;
@@ -33,6 +34,7 @@ private:
 	FrameInfo _baseFrameSize = {};
 	FrameInfo _lastFrameSize = {};
 	RenderedFrame _frame = {};
+	MetaSpriteCompositor _metaSpriteCompositor;
 
 	VideoFilterType _videoFilterType = VideoFilterType::None;
 	unique_ptr<BaseVideoFilter> _videoFilter;
@@ -44,6 +46,7 @@ private:
 	void DecodeThread();
 
 public:
+	void SetMetaSpriteGroups(std::vector<MetaSpriteReplacement> groups) { _metaSpriteCompositor.SetGroups(std::move(groups)); }
 	VideoDecoder(Emulator* console);
 	~VideoDecoder();
 

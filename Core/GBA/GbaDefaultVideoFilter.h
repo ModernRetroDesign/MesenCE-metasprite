@@ -29,4 +29,5 @@ public:
 	GbaDefaultVideoFilter(Emulator* emu, bool applyNtscFilter);
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
+	bool SupportsMetaSprites() const;
 };

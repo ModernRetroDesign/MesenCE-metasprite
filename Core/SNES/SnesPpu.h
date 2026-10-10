@@ -3,6 +3,9 @@
 #include "SNES/SnesPpuTypes.h"
 #include "Utilities/ISerializable.h"
 #include "Utilities/Timer.h"
+#include "Shared/Video/MetaSpriteFrame.h"
+#include <atomic>
+#include <memory>
 
 class Emulator;
 class SnesConsole;
@@ -14,11 +17,19 @@ class EmuSettings;
 class SnesPpu : public ISerializable
 {
 public:
+	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 	constexpr static uint32_t SpriteRamSize = 544;
 	constexpr static uint32_t CgRamSize = 512;
 	constexpr static uint32_t VideoRamSize = 0x10000;
 
 private:
+	std::atomic<bool> _metaCaptureRequested {false};
+	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	int16_t _metaSpriteIds[256] = {}, _metaSpriteIdsCopy[256] = {};
+	int16_t _metaMainIds[256] = {}, _metaSubIds[256] = {};
+	uint16_t _metaBgMain[256] = {}, _metaBgSub[256] = {};
+	uint8_t _metaBgMainFlags[256] = {}, _metaBgSubPriority[256] = {};
+	void CaptureBackgroundPixel(uint8_t x, uint16_t color, uint8_t flags, bool main);
 	constexpr static int SpriteLayerIndex = 4;
 	constexpr static int ColorWindowIndex = 5;
 

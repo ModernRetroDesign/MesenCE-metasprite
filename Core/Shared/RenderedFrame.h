@@ -10,6 +10,8 @@ enum class FrameFlags
 
 struct RenderedFrame
 {
+	// Shared ownership keeps captured source data alive through asynchronous decode.
+	shared_ptr<const struct MetaSpriteFrame> MetaSprites;
 	void* FrameBuffer = nullptr;
 	void* Data = nullptr; //Used by HD packs
 	uint32_t Width = 256;

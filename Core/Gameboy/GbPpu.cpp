@@ -488,6 +488,17 @@ void GbPpu::RunDrawCycle()
 
 			GbFifoEntry entry = _insertGlitchBgPixel ? GbFifoEntry {} : _bgFifo.Content[_bgFifo.Position];
 			GbFifoEntry sprite = _oamFifo.Content[_oamFifo.Position];
+			MetaSpritePixel* metaPixel = _metaSpriteFrame ? &_metaSpriteFrame->Pixels[_state.Scanline * GbConstants::ScreenWidth + _drawnPixels] : nullptr;
+			if(metaPixel) {
+				uint8_t bgIndex = _state.CgbEnabled ? entry.Color | ((entry.Attributes & 0x07) << 2)
+					: (_state.BgEnabled ? ((_state.BgPalette >> (entry.Color * 2)) & 0x03) : (_state.BgPalette & 0x03));
+				if(cfg.DisableBackground) { bgIndex = _state.BgPalette & 0x03; }
+				metaPixel->BackgroundColor = LcdReadBgPalette(bgIndex) & 0x7FFF;
+				metaPixel->BackgroundColorIndex = entry.Color;
+				metaPixel->BackgroundAttributes = entry.Attributes;
+				metaPixel->Window = _fetchWindow;
+				metaPixel->VisibleSprite = -1;
+			}
 			if(!cfg.DisableSprites && sprite.Color != 0 && (entry.Color == 0 || (!(sprite.Attributes & 0x80) && !(entry.Attributes & 0x80)) || (_state.CgbEnabled && !_state.BgEnabled))) {
 				//Use sprite pixel if:
 				//  -BG color is 0, OR
@@ -500,6 +511,12 @@ void GbPpu::RunDrawCycle()
 					WriteObjPixel(((sprite.Attributes & 0x10) ? 4 : 0) | colorIndex);
 				}
 				_lastPixelType = GbPixelType::Object;
+				if(metaPixel) {
+					metaPixel->VisibleSprite = _spriteIndexes[sprite.Index] / 4;
+					metaPixel->SpriteColor = _currentBuffer[_state.Scanline * GbConstants::ScreenWidth + _drawnPixels];
+					metaPixel->SpriteColorIndex = sprite.Color;
+					metaPixel->SpriteAttributes = sprite.Attributes;
+				}
 			} else {
 				if(!cfg.DisableBackground) {
 					if(_state.CgbEnabled) {
@@ -585,6 +602,10 @@ void GbPpu::LoadExtraSprite()
 
 void GbPpu::ResetRenderer()
 {
+	if(_state.Scanline == 0) {
+		_metaSpriteFrame = _metaCaptureRequested && !_gameboy->IsSgb() && !_gameboy->GetLinkedConsole()
+			? std::make_shared<MetaSpriteFrame>(GbConstants::ScreenWidth, GbConstants::ScreenHeight) : nullptr;
+	}
 	//Reset fetcher & pixel FIFO
 	_oamFifo.Reset();
 	_oamFetcher.Step = 0;
@@ -740,6 +761,24 @@ void GbPpu::ClockTileFetcher()
 void GbPpu::PushSpriteToPixelFifo()
 {
 	uint8_t spriteIndex = _fetchSprite;
+	if(_metaSpriteFrame && _state.SpritesEnabled) {
+		MetaSpriteRow row;
+		row.Sprite = _spriteIndexes[spriteIndex] / 4;
+		row.X = _drawnPixels;
+		row.Y = (int16_t)_spriteY[spriteIndex] - 16;
+		row.Scanline = _state.Scanline;
+		row.PatternAddress = _oamFetcher.Addr;
+		row.LowByte = _oamFetcher.LowByte;
+		row.HighByte = _oamFetcher.HighByte;
+		row.Attributes = _oamFetcher.Attributes;
+		row.Height = _state.LargeSprites ? 16 : 8;
+		for(uint8_t color = 0; color < 4; color++) {
+			uint8_t index = _state.CgbEnabled ? color | ((row.Attributes & 0x07) << 2)
+				: (((row.Attributes & 0x10) ? 4 : 0) | ((((row.Attributes & 0x10) ? _state.ObjPalette1 : _state.ObjPalette0) >> (color * 2)) & 0x03));
+			row.Palette[color] = LcdReadObjPalette(index) & 0x7FFF;
+		}
+		_metaSpriteFrame->Rows.push_back(row);
+	}
 
 	_fetchSprite = -1;
 	_oamFetcher.Step = 0;
@@ -870,6 +909,7 @@ void GbPpu::SendFrame()
 	}
 
 	if(_forceBlankFrame) {
+		_metaSpriteFrame.reset();
 		//Send blank frame on the first frame after enabling LCD
 		//On CGB some games flicker if this is done when the LCD is only off for a short time (e.g Men in Black - The Series)
 		//So for CGB, the screen is only cleared if the LCD has been turned off for a while
@@ -880,6 +920,10 @@ void GbPpu::SendFrame()
 	_isFirstFrame = false;
 
 	RenderedFrame frame(_currentBuffer, GbConstants::ScreenWidth, GbConstants::ScreenHeight, 1.0, _state.FrameCount, _gameboy->GetControlManager()->GetPortStates());
+	if(_metaSpriteFrame) {
+		_metaSpriteFrame->FrameNumber = _state.FrameCount;
+		frame.MetaSprites = _metaSpriteFrame;
+	}
 	if(_gameboy->GetLinkedConsole()) {
 		SendLinkedFrame(frame);
 		if(_gameboy->IsPrimaryConsole()) {
@@ -1473,6 +1517,8 @@ void GbPpu::Serialize(Serializer& s)
 	}
 
 	if(!s.IsSaving()) {
+		// A restored mid-frame state cannot reuse capture from the previous timeline.
+		_metaSpriteFrame.reset();
 		//For save state compatibility
 		if(!_state.LcdEnabled) {
 			_lcdDisabled = true;

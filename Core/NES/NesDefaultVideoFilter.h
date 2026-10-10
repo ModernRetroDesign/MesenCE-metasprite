@@ -31,4 +31,5 @@ public:
 	static uint32_t GetDefaultPixelBrightness(uint16_t colorIndex, PpuModel model);
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color & 0x1FF]; }
 };
