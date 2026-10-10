@@ -1,4 +1,9 @@
-# Mesen Community Edition
+# This is an experimental fork of Mesen-CE
+
+Please be aware this fork coded using AI tools and will not and never be merged into Mesen-CE due to it being prohibited by their maintainers.
+MesenCE-Metasprite is a proof of concept project to showcase a different HD replacement method. Combining sprite groups into 1 large metasprite. This feature works on all systems Mesen 2.2.1 supports. The Sprite viewer now contains the tool for grouping and labeling metasprites for export and import.
+
+## Mesen Community Edition
 
 Mesen is a multi-system emulator for Windows, Linux, and macOS. It supports NES, SNES, Game Boy (GB/SGB/GBC), Game Boy Advance, PC Engine, SMS/Game Gear, and WonderSwan (WS/WSC).
 
