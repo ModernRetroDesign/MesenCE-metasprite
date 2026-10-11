@@ -20,6 +20,8 @@ class BaseNesPpu : public INesMemoryHandler, public ISerializable
 protected:
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaBackgroundSample _metaBackgroundFetch;
+	MetaBackgroundSample _metaBackgroundShift[16] = {};
 	int16_t _metaSecondarySpriteIds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 	int16_t _metaFetchedSpriteIds[64] = {};
 	uint64_t _masterClock = 0;

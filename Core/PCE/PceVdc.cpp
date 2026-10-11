@@ -483,6 +483,12 @@ void PceVdc::LoadBackgroundTilesWidth4(uint16_t end, uint16_t scrollOffset, uint
 void PceVdc::LoadBatEntry(uint16_t scrollOffset, uint16_t columnMask, uint16_t row)
 {
 	uint16_t tileColumn = (scrollOffset + _tileCount) & columnMask;
+	if(_metaCaptureRequested.load()) {
+		_metaBackgroundTiles[_tileCount].X = tileColumn * 8;
+		_metaBackgroundTiles[_tileCount].Y = row;
+		_metaBackgroundTiles[_tileCount].Layer = _isVdc2 ? 1 : 0;
+		_metaBackgroundTiles[_tileCount].Valid = true;
+	}
 	uint16_t batEntry = ReadVram((row >> 3) * _state.HvLatch.ColumnCount + tileColumn);
 	_tiles[_tileCount].Palette = batEntry >> 12;
 	_tiles[_tileCount].TileAddr = ((batEntry & 0xFFF) * 16);
@@ -924,6 +930,10 @@ void PceVdc::InternalDrawScanline()
 				if(bgEnabled) {
 					uint16_t screenX = (_state.HvLatch.BgScrollX & 0x07) + _screenOffsetX;
 					uint16_t column = screenX >> 3;
+					if(capture) {
+						_metaRow[xStart].BackgroundSample = _metaBackgroundTiles[column];
+						_metaRow[xStart].BackgroundSample.X += screenX & 7;
+					}
 					bgColor = GetTilePixelColor(_tiles[column].TileData[0], _tiles[column].TileData[1], 7 - (screenX & 0x07));
 					if(bgColor != 0) {
 						outColor = _vce->GetPalette(_tiles[column].Palette * 16 + bgColor);
@@ -939,6 +949,9 @@ void PceVdc::InternalDrawScanline()
 					for(uint16_t i = 0; i < _totalSpriteCount; i++) {
 						int16_t xOffset = _screenOffsetX - _drawSprites[i].X;
 						if(xOffset >= 0 && xOffset < 16) {
+							if(capture && sprEnabled && !checkSprite0Hit && visibleSprite < 0 && (bgColor == 0 || _drawSprites[i].ForegroundPriority)) {
+								_metaRow[xStart].AllowReplacementSprite(_drawSprites[i].Index);
+							}
 							if(!_drawSprites[i].HorizontalMirroring) {
 								xOffset = 15 - xOffset;
 							}

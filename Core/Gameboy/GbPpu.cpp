@@ -497,7 +497,24 @@ void GbPpu::RunDrawCycle()
 				metaPixel->BackgroundColorIndex = entry.Color;
 				metaPixel->BackgroundAttributes = entry.Attributes;
 				metaPixel->Window = _fetchWindow;
+				metaPixel->BackgroundSample = _metaBgFifo[_bgFifo.Position];
+				metaPixel->BackgroundSample.Valid &= !_insertGlitchBgPixel && !cfg.DisableBackground && (_state.CgbEnabled || _state.BgEnabled);
 				metaPixel->VisibleSprite = -1;
+				if(_state.SpritesEnabled && !cfg.DisableSprites) {
+					for(auto row = _metaSpriteFrame->Rows.rbegin(); row != _metaSpriteFrame->Rows.rend(); ++row) {
+						if(row->Scanline != _state.Scanline) { break; }
+						if(_drawnPixels < row->X || _drawnPixels >= row->X + 8) { continue; }
+						if(!(entry.Color == 0 || (!(row->Attributes & 0x80) && !(entry.Attributes & 0x80)) || (_state.CgbEnabled && !_state.BgEnabled))) { continue; }
+						int index = row->ScanlineSpriteIndex;
+						if(index >= _spriteCount) { continue; }
+						if(sprite.Color != 0 && index != sprite.Index) {
+							bool wins = IsCgbEnabled() ? index <= sprite.Index
+								: _spriteX[index] < _spriteX[sprite.Index] || (_spriteX[index] == _spriteX[sprite.Index] && _spriteIndexes[index] < _spriteIndexes[sprite.Index]);
+							if(!wins) { continue; }
+						}
+						metaPixel->ReplacementEligibleSprites |= uint64_t(1) << row->Sprite;
+					}
+				}
 			}
 			if(!cfg.DisableSprites && sprite.Color != 0 && (entry.Color == 0 || (!(sprite.Attributes & 0x80) && !(entry.Attributes & 0x80)) || (_state.CgbEnabled && !_state.BgEnabled))) {
 				//Use sprite pixel if:
@@ -703,6 +720,10 @@ void GbPpu::ClockTileFetcher()
 			}
 
 			uint8_t row = yOffset >> 3;
+			_metaBgFetch.X = scrollPos * 8;
+			_metaBgFetch.Y = yOffset;
+			_metaBgFetch.Layer = _fetchWindow ? 1 : 0;
+			_metaBgFetch.Valid = true;
 			uint16_t tileAddr = tilemapAddr + scrollPos + row * 32;
 			_tileIndex = LcdReadVram(tileAddr);
 
@@ -764,6 +785,7 @@ void GbPpu::PushSpriteToPixelFifo()
 	if(_metaSpriteFrame && _state.SpritesEnabled) {
 		MetaSpriteRow row;
 		row.Sprite = _spriteIndexes[spriteIndex] / 4;
+		row.ScanlineSpriteIndex = spriteIndex;
 		row.X = _drawnPixels;
 		row.Y = (int16_t)_spriteY[spriteIndex] - 16;
 		row.Scanline = _state.Scanline;
@@ -815,6 +837,8 @@ void GbPpu::PushTileToPixelFifo()
 
 		_bgFifo.Content[i].Color = bits;
 		_bgFifo.Content[i].Attributes = _bgFetcher.Attributes;
+		_metaBgFifo[i] = _metaBgFetch;
+		_metaBgFifo[i].X = (_metaBgFetch.X + i) & 255;
 	}
 
 	_fetchColumn = (_fetchColumn + 1) & 0x1F;
