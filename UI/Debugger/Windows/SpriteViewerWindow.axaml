@@ -60,11 +60,11 @@
 					<c:GroupBox Header="Meta groups" Margin="0 5 0 5">
 						<StackPanel Spacing="4" Width="220">
 							<TextBlock Text="Ctrl-click sprites on screen or in the grid." TextWrapping="Wrap" />
-							<CheckBox Content="Drag rectangle to select sprites" IsChecked="{Binding SelectMetaRectangle}" />
+							<TextBlock Text="Drag to select sprites; Ctrl-click to toggle" />
 							<Button Content="Clear sprite selection" Click="OnClearMetaSelection" />
-							<CheckBox Content="Recognize groups in live preview" IsChecked="{Binding ShowMetaMatches}" />
+							<TextBlock Text="Groups recognized in live preview" />
 							<TextBlock Text="{Binding MetaMatchStatus}" TextWrapping="Wrap" />
-							<Button Content="Create meta group" Click="OnCreateMetaGroup" />
+							<Button Content="Create meta group" Click="OnCreateMetaGroup" ToolTip.Tip="Create the group, save and assign its transparent PNG in the default pack folder, and enable gameplay replacement." />
 							<Button Content="Add selection as animation pose" Click="OnCreateMetaPose" />
 							<ComboBox ItemsSource="{Binding MetaGroups}" SelectedItem="{Binding SelectedMetaGroup}" />
 							<TextBlock Text="Earlier groups have priority when matches overlap." TextWrapping="Wrap" />
@@ -280,3 +280,4 @@
 		</Grid>
 	</DockPanel>
 </Window>
+

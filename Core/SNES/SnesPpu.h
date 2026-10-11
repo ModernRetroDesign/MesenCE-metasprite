@@ -26,6 +26,8 @@ private:
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 	int16_t _metaSpriteIds[256] = {}, _metaSpriteIdsCopy[256] = {};
+	std::vector<MetaSpritePixel::SnesCoverageSample> _metaSpriteCoverage[256], _metaSpriteCoverageCopy[256];
+	uint16_t _metaSpriteOrder[256] = {}, _metaSpriteOrderCopy[256] = {}, _metaFetchOrder = 0;
 	int16_t _metaMainIds[256] = {}, _metaSubIds[256] = {};
 	uint16_t _metaBgMain[256] = {}, _metaBgSub[256] = {};
 	uint8_t _metaBgMainFlags[256] = {}, _metaBgSubPriority[256] = {};
@@ -49,6 +51,7 @@ private:
 
 	//Temporary data used by the sprite evaluation/fetching
 	SpriteInfo _currentSprite = {};
+	SpriteInfo _metaFetchedSprite = {};
 	uint8_t _oamEvaluationIndex = 0;
 	uint8_t _oamTimeIndex = 0;
 	uint16_t _fetchSpriteStart = 0;

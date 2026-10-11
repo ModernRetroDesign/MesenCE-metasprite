@@ -70,6 +70,8 @@ private:
 	uint64_t _lastMasterClock = 0;
 
 	uint32_t _bgShifters[4] = {};
+	MetaBackgroundSample _metaBgFetch;
+	MetaBackgroundSample _metaBgSamples[24] = {};
 	uint32_t _bgPriority = 0;
 	uint32_t _bgPalette = 0;
 	uint16_t _bgTileAddr = 0;

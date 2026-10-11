@@ -112,7 +112,10 @@ void WsPpu::DrawScanline()
 	std::fill(_rowData[rowIndex], _rowData[rowIndex] + WsConstants::ScreenWidth, PixelData {});
 	if(_metaFrame) {
 		std::fill(_metaBackground[rowIndex], _metaBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+		std::fill(_metaBackgroundSamples[rowIndex], _metaBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
 		std::fill(_metaSpriteIds[rowIndex], _metaSpriteIds[rowIndex] + WsConstants::ScreenWidth, -1);
+		std::fill(_metaReplacementCoverage[rowIndex], _metaReplacementCoverage[rowIndex] + WsConstants::ScreenWidth, MetaCoverage{});
+		std::fill(_metaHighPriorityCoverage[rowIndex], _metaHighPriorityCoverage[rowIndex] + WsConstants::ScreenWidth, MetaCoverage{});
 	}
 
 	DrawSprites<mode>();
@@ -183,6 +186,10 @@ void WsPpu::DrawSprites()
 				}
 
 				int tileColumn = j;
+				if(_metaFrame) {
+					_metaReplacementCoverage[rowIndex][x].AllowReplacementSprite(i);
+					if(highPriority) { _metaHighPriorityCoverage[rowIndex][x].AllowReplacementSprite(i); }
+				}
 				if(hMirror) {
 					tileColumn = 7 - tileColumn;
 				}
@@ -264,6 +271,10 @@ void WsPpu::DrawBackground()
 			if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
 				if(_metaFrame) {
 					_metaBackground[rowIndex][i] = {palette, color, (uint8_t)(layerIndex + 1)};
+					if constexpr(layerIndex == 1) { _metaReplacementCoverage[rowIndex][i] = _metaHighPriorityCoverage[rowIndex][i]; }
+					auto& sample = _metaBackgroundSamples[rowIndex][i];
+					sample.X = (x + i - cycle) & 255; sample.Y = y;
+					sample.Layer = layerIndex; sample.Valid = true;
 					if(_rowData[rowIndex][i].Priority >= layerIndex + 1) { continue; }
 					_metaSpriteIds[rowIndex][i] = -1;
 				}

@@ -17,6 +17,8 @@ namespace Mesen.Debugger.Windows
 	{
 		private SpriteViewerViewModel _model;
 		private PixelPoint? _metaDragStart;
+		private IPointer? _metaDragPointer;
+		private Rect _metaSelectionBeforeDrag;
 
 		[Obsolete("For designer only")]
 		public SpriteViewerWindow() : this(CpuType.Snes) { }
@@ -41,6 +43,7 @@ namespace Mesen.Debugger.Windows
 			MouseViewerModelEvents.InitEvents(_model, this, picViewer);
 			picViewer.PositionClicked += PicViewer_PositionClicked;
 			picViewer.PointerReleased += OnMetaSelectionReleased;
+			picViewer.PointerCaptureLost += OnMetaSelectionCaptureLost;
 		}
 
 		private void InitializeComponent()
@@ -68,9 +71,14 @@ namespace Mesen.Debugger.Windows
 
 		private void PicViewer_PositionClicked(object? sender, PositionClickedEventArgs e)
 		{
-			if(_model.SelectMetaRectangle && e.Properties.IsLeftButtonPressed) {
-				if(e.OriginalEvent is PointerPressedEventArgs && sender is PictureViewer viewer) {
+			if(e.Properties.IsLeftButtonPressed && (_metaDragStart != null || !e.OriginalEvent.KeyModifiers.HasFlag(KeyModifiers.Control))) {
+				if(_metaDragStart == null && e.OriginalEvent is PointerPressedEventArgs && sender is PictureViewer viewer) {
+					_metaSelectionBeforeDrag = _model.SelectionRect;
+					var pressedSprite = _model.GetMatchingSprite(e.Position, out _);
+					_model.SelectedSprite = pressedSprite;
+					_model.UpdateSelection(pressedSprite);
 					_metaDragStart = e.Position;
+					_metaDragPointer = e.OriginalEvent.Pointer;
 					_model.MetaSelectionDragging = true;
 					e.OriginalEvent.Pointer.Capture(viewer);
 				}
@@ -112,12 +120,21 @@ namespace Mesen.Debugger.Windows
 		private void OnClearMetaSelection(object? sender, RoutedEventArgs e) => _model.ClearMetaSelection();
 		private void OnMetaSelectionReleased(object? sender, PointerReleasedEventArgs e)
 		{
-			if(_metaDragStart == null) { return; }
+			if(_metaDragStart == null || e.InitialPressMouseButton != MouseButton.Left || !ReferenceEquals(e.Pointer, _metaDragPointer)) { return; }
 			_metaDragStart = null;
+			_metaDragPointer = null;
 			_model.MetaSelectionDragging = false;
 			_model.SelectMetaSprites(_model.SelectionRect);
 			e.Pointer.Capture(null);
 			e.Handled = true;
+		}
+		private void OnMetaSelectionCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+		{
+			if(_metaDragStart == null || !ReferenceEquals(e.Pointer, _metaDragPointer)) { return; }
+			_metaDragStart = null;
+			_metaDragPointer = null;
+			_model.MetaSelectionDragging = false;
+			_model.SelectionRect = _metaSelectionBeforeDrag;
 		}
 		private void OnSaveMetaGroups(object? sender, RoutedEventArgs e)
 		{
@@ -158,3 +175,4 @@ namespace Mesen.Debugger.Windows
 		}
 	}
 }
+

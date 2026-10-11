@@ -47,6 +47,9 @@ private:
 
 public:
 	void SetMetaSpriteGroups(std::vector<MetaSpriteReplacement> groups) { _metaSpriteCompositor.SetGroups(std::move(groups)); }
+	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
+	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
+	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
 	VideoDecoder(Emulator* console);
 	~VideoDecoder();
 

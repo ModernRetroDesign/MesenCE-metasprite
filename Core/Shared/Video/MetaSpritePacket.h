@@ -40,7 +40,9 @@ public:
 	MetaSpritePacket(const uint8_t* data, size_t length) : _data(data), _length(length) {}
 	std::vector<MetaSpriteReplacement> Parse()
 	{
-		if(!_data || _length > 536870912 || Read() != 0x3150534D) { throw std::runtime_error("Invalid metasprite packet"); }
+		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid metasprite packet"); }
+		uint32_t magic = Read();
+		if(magic != 0x3150534D && magic != 0x3250534D) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t count = Read();
 		if(count > 1024) { throw std::runtime_error("Too many groups"); }
 		std::vector<MetaSpriteReplacement> groups;
@@ -63,6 +65,15 @@ public:
 				group.Members.push_back(std::move(member));
 			}
 			group.Artwork = Pixels(group.ArtworkWidth, group.ArtworkHeight);
+			if(magic == 0x3250534D) {
+				uint32_t conditions = Read();
+				if(conditions > 64) { throw std::runtime_error("Too many memory conditions"); }
+				for(uint32_t c = 0; c < conditions; c++) {
+					uint32_t address = Read(), value = Read(), mask = Read();
+					if(value > 255 || mask > 255) { throw std::runtime_error("Invalid memory condition byte"); }
+					group.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+				}
+			}
 			groups.push_back(std::move(group));
 		}
 		if(_offset != _length) { throw std::runtime_error("Trailing packet data"); }

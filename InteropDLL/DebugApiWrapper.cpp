@@ -39,6 +39,7 @@
 #include "Core/SNES/SnesPpu.h"
 #include "Core/Shared/Video/VideoDecoder.h"
 #include "Core/Shared/Video/MetaSpritePacket.h"
+#include "Core/Shared/Video/MetaBackgroundPacket.h"
 #include "Utilities/StringUtilities.h"
 
 extern unique_ptr<Emulator> _emu;
@@ -69,7 +70,38 @@ void WrapDebuggerCall(std::function<void(Debugger* debugger)> func)
 
 extern "C"
 {
-	DllExport bool __stdcall SetMetaSpriteReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
+	DllExport bool __stdcall SetMetaBackgroundReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
+	{
+		try {
+			if(!romHash || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			auto console = _emu->GetConsole();
+			auto gameboy = dynamic_cast<Gameboy*>(console.get());
+			auto sms = dynamic_cast<SmsConsole*>(console.get());
+			auto ws = dynamic_cast<WsConsole*>(console.get());
+			auto nes = dynamic_cast<NesConsole*>(console.get());
+			auto gba = dynamic_cast<GbaConsole*>(console.get());
+			auto layers = MetaBackgroundPacket(packet, length).Parse();
+			auto pce = dynamic_cast<PceConsole*>(console.get());
+			if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba) || (pce && pce->IsSuperGrafx()) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
+				|| (nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole()))
+				|| (sms && !sms->GetVdp()->GetState().UseMode4))) { return false; }
+			if(gameboy && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 1; })) { return false; }
+			if(sms && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
+			if(ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 1; })) { return false; }
+			if(nes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
+			if(pce && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
+			if(gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 3; })) { return false; }
+			_emu->GetVideoDecoder()->SetMetaBackgroundLayers(std::move(layers));
+			if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(sms) { sms->GetVdp()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(ws) { ws->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(nes) { nes->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(pce) { pce->GetVdc()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(gba) { gba->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			return true;
+		} catch(...) { return false; }
+	}
+	static bool ApplyMetaReplacements(const char* romHash, const uint8_t* packet, uint32_t length, const uint8_t* backgroundPacket, uint32_t backgroundLength, bool combined)
 	{
 		try {
 			auto console = _emu->GetConsole();
@@ -85,8 +117,13 @@ extern "C"
 			if(!romHash || (!gameboy && !sms && !pce && !gba && !ws && !nes && !snes) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
 				|| (pce && pce->IsSuperGrafx()) || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
 			auto groups = MetaSpritePacket(packet, length).Parse();
-			bool enabled = !groups.empty();
-			_emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups));
+			if(combined) {
+				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength).Parse();
+				if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba) || (sms && !sms->GetVdp()->GetState().UseMode4))) { return false; }
+				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba ? 3 : 1); })) { return false; }
+				_emu->GetVideoDecoder()->SetMetaReplacements(std::move(groups), std::move(layers));
+			} else { _emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups)); }
+			bool enabled = _emu->GetVideoDecoder()->HasMetaReplacements();
 			if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(enabled); }
 			if(sms) { sms->GetVdp()->SetMetaSpriteCapture(enabled); }
 			if(pce) { pce->GetVdc()->SetMetaSpriteCapture(enabled); }
@@ -96,6 +133,14 @@ extern "C"
 			if(snes) { snes->GetPpu()->SetMetaSpriteCapture(enabled); }
 			return true;
 		} catch(...) { return false; }
+	}
+	DllExport bool __stdcall SetMetaSpriteReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
+	{
+		return ApplyMetaReplacements(romHash, packet, length, nullptr, 0, false);
+	}
+	DllExport bool __stdcall SetMetaReplacements(const char* romHash, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
+	{
+		return ApplyMetaReplacements(romHash, sprites, spriteLength, backgrounds, backgroundLength, true);
 	}
 	// Request is atomic; the PPU activates capture on the next complete frame.
 	DllExport bool __stdcall SetMetaSpriteFrameCapture(bool enabled)

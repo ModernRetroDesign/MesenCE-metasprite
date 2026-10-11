@@ -22,6 +22,8 @@ namespace Mesen.Interop
 		[DllImport(DllPath)] public static extern void ReleaseDebugger();
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteFrameCapture([MarshalAs(UnmanagedType.I1)] bool enabled);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaBackgroundReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] sprites, uint spriteLength, byte[] backgrounds, uint backgroundLength);
 
 		[DllImport(DllPath)] public static extern void ResumeExecution();
 		[DllImport(DllPath)] public static extern void Step(CpuType cpuType, Int32 instructionCount, StepType type = StepType.Step);

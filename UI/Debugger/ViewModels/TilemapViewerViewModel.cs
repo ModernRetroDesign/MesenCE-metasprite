@@ -26,6 +26,26 @@ namespace Mesen.Debugger.ViewModels
 		[ObservableProperty] public partial bool IsNes { get; private set; }
 
 		public TilemapViewerConfig Config { get; }
+		public MetaBackgroundEditorViewModel BackgroundEditor { get; }
+		public (int? Layer, string Context) GetBackgroundImportLayer()
+		{
+			int layer = SelectedTab?.Layer ?? 0;
+			if(CpuType == CpuType.Pce) { return (layer == 0 ? 0 : null, "PCE background (0) requires the default filter. SuperGrafx replacement is pending."); }
+			if(CpuType == CpuType.Nes) { return (0, "Imported as NES background (0). All nametables share this layer; artwork coordinates span the logical nametable layout. Gameplay requires the default PPU and filter."); }
+			if(CpuType == CpuType.Gameboy) {
+				if(_data.PpuState is not GbPpuState state) { return (null, "Refresh the tilemap snapshot before importing."); }
+				int? role = MetaBackgroundLayer.ResolveGameboyRole(layer, state.BgTilemapSelect, state.WindowTilemapSelect);
+				return (role, role == null ? "This map is not currently selected for background or window rendering."
+					: state.BgTilemapSelect == state.WindowTilemapSelect ? "Both roles use this map: imported as background (0); choose window (1) if needed."
+					: role == 0 ? "Imported as background (0)." : "Imported as window (1).");
+			}
+			if((CpuType == CpuType.Snes && layer >= 4) || (CpuType == CpuType.Gba && layer >= 4) || (CpuType == CpuType.Sms && layer >= 1)) {
+				return (null, "Select a hardware background tilemap; this tab is a composite or memory-access view.");
+			}
+			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Gameplay currently requires Mode 4 and the default filter."
+				: CpuType == CpuType.Ws ? "Imported for the selected WonderSwan background. Gameplay requires the default filter, frame blending off, and LCD icons off."
+				: "Definitions can be authored here; gameplay background integration for this system is pending.");
+		}
 		[ObservableProperty] public partial RefreshTimingViewModel RefreshTiming { get; private set; }
 
 		[ObservableProperty] public partial Rect SelectionRect { get; set; }
@@ -70,6 +90,8 @@ namespace Mesen.Debugger.ViewModels
 
 		public TilemapViewerViewModel(CpuType cpuType, PictureViewer picViewer, ScrollPictureViewer scrollViewer, Window? wnd)
 		{
+			BackgroundEditor = new(cpuType);
+			AddDisposables(new[] { BackgroundEditor });
 			Config = ConfigManager.Config.Debug.TilemapViewer.Clone();
 			CpuType = cpuType;
 
@@ -872,6 +894,7 @@ namespace Mesen.Debugger.ViewModels
 			Dispatcher.UIThread.Post(() => {
 				_inGameLoaded = true;
 				InitForCpuType();
+				BackgroundEditor.Load(CpuType);
 				RefreshData();
 				_inGameLoaded = false;
 			});

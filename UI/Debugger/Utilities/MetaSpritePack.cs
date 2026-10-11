@@ -15,6 +15,7 @@ public sealed class MetaSpritePack
 	public string RomHash { get; set; } = "";
 	public string System { get; set; } = "";
 	public int NextGroupId { get; set; } = 1;
+	public int NextBackgroundId { get; set; } = 1;
 	public List<MetaSpriteGroup> Groups { get; set; } = new();
 	public List<MetaBackgroundLayer> BackgroundLayers { get; set; } = new();
 
@@ -64,6 +65,12 @@ public sealed class MetaSpritePack
 			throw new InvalidDataException("Invalid background layer definitions.");
 		}
 		foreach(var layer in pack.BackgroundLayers) { layer.Validate(); }
+		foreach(var group in pack.Groups) {
+			MetaMemoryCondition.ValidateAll(group.MemoryConditions);
+			if(group.AlternateArtwork == null) { throw new InvalidDataException("Invalid alternate artwork list."); }
+			foreach(var alternate in group.AlternateArtwork) { alternate.Validate(); }
+		}
+		pack.NextBackgroundId = Math.Max(pack.NextBackgroundId, pack.BackgroundLayers.Select(layer => layer.Id).DefaultIfEmpty(0).Max() + 1);
 		foreach(var group in pack.Groups.Where(g => g.ReplacementPath.Length > 0 && g.ReplacementWidth == 0)) {
 			// Packs written before independent replacement origins used the captured origin.
 			group.ReplacementOriginX = group.OriginX;
@@ -77,6 +84,13 @@ public sealed class MetaSpritePack
 // Runtime adapters supply the selected hardware layer's scroll at each pixel/scanline.
 public sealed class MetaBackgroundLayer
 {
+	public static int? ResolveGameboyRole(int tilemap, bool backgroundMap, bool windowMap)
+	{
+		if(tilemap < 0 || tilemap > 1) { return null; }
+		if(tilemap == (backgroundMap ? 1 : 0)) { return 0; }
+		if(tilemap == (windowMap ? 1 : 0)) { return 1; }
+		return null;
+	}
 	public int Id { get; set; }
 	public string Name { get; set; } = "";
 	public int NativeLayer { get; set; }
@@ -90,6 +104,8 @@ public sealed class MetaBackgroundLayer
 	public bool WrapX { get; set; }
 	public bool WrapY { get; set; }
 	public bool Enabled { get; set; }
+	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	public override string ToString() => $"Background {Id:D3}" + (Name.Length > 0 ? $" — {Name}" : "");
 
 	public void Validate()
 	{
@@ -97,6 +113,7 @@ public sealed class MetaBackgroundLayer
 			throw new InvalidDataException("Invalid background layer identity.");
 		}
 		MetaSpritePlacement.ValidateCanvas(ArtworkWidth, ArtworkHeight, ArtworkScale);
+		MetaMemoryCondition.ValidateAll(MemoryConditions);
 	}
 
 	public bool TryGetArtworkPixel(int screenX, int screenY, int scrollX, int scrollY, out int artworkX, out int artworkY)
@@ -128,6 +145,31 @@ public sealed class MetaBackgroundLayer
 	}
 }
 
+public static class MetaBackgroundRuntimePacket
+{
+	public const uint Magic = 0x3147424D; // MBG1
+	public static byte[] Create(MetaSpritePack pack, Func<MetaBackgroundLayer, (int Width, int Height, uint[] Pixels)> loadArtwork)
+	{
+		using MemoryStream stream = new();
+		using BinaryWriter writer = new(stream);
+		var layers = pack.BackgroundLayers.Where(layer => layer.Enabled).ToList();
+		if(layers.Count > 128 || layers.Select(layer => layer.Id).Distinct().Count() != layers.Count) { throw new InvalidDataException("Invalid background layers."); }
+		writer.Write(Magic); writer.Write(layers.Count);
+		foreach(var layer in layers) {
+			layer.Validate();
+			var artwork = loadArtwork(layer);
+			if(artwork.Width != layer.ArtworkWidth || artwork.Height != layer.ArtworkHeight || artwork.Pixels.Length != checked(artwork.Width * artwork.Height)) {
+				throw new InvalidDataException("Background PNG dimensions changed.");
+			}
+			writer.Write(layer.Id); writer.Write(layer.NativeLayer); writer.Write(layer.X); writer.Write(layer.Y);
+			writer.Write((layer.FollowScroll ? 1 : 0) | (layer.WrapX ? 2 : 0) | (layer.WrapY ? 4 : 0));
+			writer.Write(layer.ArtworkScale); writer.Write(artwork.Width); writer.Write(artwork.Height);
+			foreach(uint pixel in artwork.Pixels) { writer.Write(pixel); }
+		}
+		return stream.ToArray();
+	}
+}
+
 public sealed class MetaSpriteGroup : INotifyPropertyChanged
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
@@ -153,6 +195,8 @@ public sealed class MetaSpriteGroup : INotifyPropertyChanged
 	public int ReplacementHeight { get; set; }
 	public string ReplacementPath { get; set; } = "";
 	public List<MetaSpriteMember> Members { get; set; } = new();
+	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	public List<MetaAlternateArtwork> AlternateArtwork { get; set; } = new();
 	public override string ToString() => $"Meta {Id:D3}" + (Name.Length > 0 ? $" — {Name}" : "") + (PoseName.Length > 0 ? $" ({PoseName})" : "");
 
 	public void LinkAsPoseOf(MetaSpriteGroup source)
@@ -164,6 +208,47 @@ public sealed class MetaSpriteGroup : INotifyPropertyChanged
 		OriginX = Width / 2 + source.OriginX - source.Width / 2;
 		OriginY = Height + source.OriginY - source.Height;
 		ReplacementScale = source.ReplacementScale;
+	}
+}
+
+// Conditions refer to the owning console CPU's mapped byte addresses.
+// Missing snapshots fail closed; an empty list is unconditional.
+public sealed class MetaMemoryCondition
+{
+	public uint Address { get; set; }
+	public int Value { get; set; }
+	public int Mask { get; set; } = 255;
+	public void Validate()
+	{
+		if(Value < 0 || Value > 255 || Mask < 0 || Mask > 255) { throw new InvalidDataException("Memory conditions require byte values and masks."); }
+	}
+	public static void ValidateAll(List<MetaMemoryCondition> conditions)
+	{
+		if(conditions == null || conditions.Count > 64 || conditions.Any(c => c == null)) { throw new InvalidDataException("Invalid memory condition list."); }
+		foreach(var condition in conditions) { condition.Validate(); }
+	}
+	public static bool Matches(List<MetaMemoryCondition> conditions, Func<uint, byte?> readSnapshot)
+	{
+		ValidateAll(conditions);
+		foreach(var condition in conditions) {
+			byte? value = readSnapshot(condition.Address);
+			if(!value.HasValue || (value.Value & condition.Mask) != (condition.Value & condition.Mask)) { return false; }
+		}
+		return true;
+	}
+}
+
+public sealed class MetaAlternateArtwork
+{
+	public string Path { get; set; } = "";
+	public int Scale { get; set; } = 1;
+	public int OriginX { get; set; }
+	public int OriginY { get; set; }
+	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	public void Validate()
+	{
+		if(string.IsNullOrWhiteSpace(Path) || Scale < 1 || Scale > 10 || MemoryConditions == null || MemoryConditions.Count == 0) { throw new InvalidDataException("Alternate artwork requires a PNG, scale, and memory conditions."); }
+		MetaMemoryCondition.ValidateAll(MemoryConditions);
 	}
 }
 
@@ -236,12 +321,14 @@ internal partial class MetaSpriteSerializerContext : JsonSerializerContext { }
 public static class MetaSpriteRuntimePacket
 {
 	public const uint Magic = 0x3150534D; // MSP1, little endian
+	public const uint ConditionalMagic = 0x3250534D; // MSP2 adds per-group byte/mask conditions
 	public static byte[] Create(MetaSpritePack pack, Func<MetaSpriteGroup, (int Width, int Height, uint[] Pixels)> loadArtwork)
 	{
 		using MemoryStream stream = new();
 		using BinaryWriter writer = new(stream);
 		var groups = pack.Groups.Where(g => g.Enabled).ToList();
-		writer.Write(Magic);
+		bool conditional = groups.Any(g => g.MemoryConditions.Count > 0);
+		writer.Write(conditional ? ConditionalMagic : Magic);
 		writer.Write(groups.Count);
 		foreach(var group in groups) {
 			var artwork = loadArtwork(group);
@@ -258,6 +345,13 @@ public static class MetaSpriteRuntimePacket
 				foreach(uint pixel in member.Pixels) { writer.Write(pixel); }
 			}
 			foreach(uint pixel in artwork.Pixels) { writer.Write(pixel); }
+			if(conditional) {
+				MetaMemoryCondition.ValidateAll(group.MemoryConditions);
+				writer.Write(group.MemoryConditions.Count);
+				foreach(var condition in group.MemoryConditions) {
+					writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask);
+				}
+			}
 		}
 		return stream.ToArray();
 	}

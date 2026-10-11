@@ -24,8 +24,6 @@ public partial class SpriteViewerViewModel
 	[ObservableProperty] public partial MetaSpriteGroup? SelectedMetaGroup { get; set; }
 	[ObservableProperty] public partial string MetaStatus { get; set; } = "Ctrl-click sprites to select group members.";
 	[ObservableProperty] public partial bool SetMetaOrigin { get; set; }
-	[ObservableProperty] public partial bool SelectMetaRectangle { get; set; }
-	[ObservableProperty] public partial bool ShowMetaMatches { get; set; }
 	[ObservableProperty] public partial string MetaMatchStatus { get; set; } = "";
 	private readonly Dictionary<int, HashSet<int>> _matchedMetaGroupsBySprite = new();
 	[ObservableProperty] public partial Bitmap? MetaPreview { get; set; }
@@ -43,13 +41,12 @@ public partial class SpriteViewerViewModel
 	private int _removedMetaGroupIndex;
 	public bool MetaSelectionDragging { get; set; }
 
-	partial void OnShowMetaMatchesChanged(bool value) => RefreshTab();
 
 	private unsafe void UpdateLiveMetaMatches()
 	{
 		_matchedMetaGroupsBySprite.Clear();
 		MetaMatchStatus = "";
-		if(!ShowMetaMatches || MetaGroups.Count == 0 || _data.PpuState == null || _data.PpuToolsState == null || _data.Palette == null) { return; }
+		if(MetaGroups.Count == 0 || _data.PpuState == null || _data.PpuToolsState == null || _data.Palette == null) { return; }
 		try {
 			DebugSpriteInfo[] sprites = Array.Empty<DebugSpriteInfo>();
 			uint[] pixels = Array.Empty<uint>();
@@ -121,7 +118,7 @@ public partial class SpriteViewerViewModel
 			_metaPack = MetaSpritePack.Load(_metaPackPath, hash, CpuType.ToString());
 			foreach(MetaSpriteGroup group in _metaPack.Groups) { MetaGroups.Add(group); }
 			MetaStatus = "Ctrl-click sprites to select group members.";
-			if(_metaPack.Groups.Any(g => g.Enabled)) { ApplyMetaReplacements(); }
+			if(_metaPack.Groups.Any(g => g.Enabled) || _metaPack.BackgroundLayers.Any(layer => layer.Enabled)) { ApplyMetaReplacements(); }
 		} catch(Exception ex) {
 			_metaLoadFailed = true;
 			MetaStatus = "Could not load groups: " + ex.Message;
@@ -186,6 +183,8 @@ public partial class SpriteViewerViewModel
 	public unsafe void CreateMetaGroup(bool asPose = false)
 	{
 		MetaSpriteGroup? poseSource = asPose ? SelectedMetaGroup : null;
+		int previousFamilyId = poseSource?.PoseFamilyId ?? 0;
+		bool creationSaved = false;
 		if(asPose && poseSource == null) { MetaStatus = "Choose an existing group before adding a pose."; return; }
 		if(_metaLoadFailed || _data.PpuState == null || _data.PpuToolsState == null || _data.Palette == null) { return; }
 		var selected = SpritePreviews.Where(s => _metaSelection.Contains(s.SpriteIndex) && s.Width > 0 && s.Height > 0).OrderBy(s => s.SpriteIndex).ToList();
@@ -216,12 +215,37 @@ public partial class SpriteViewerViewModel
 				Array.Copy(previews, sprite.SpriteIndex * 128 * 128, pixels, 0, pixels.Length);
 				group.Members.Add(new() { X = MetaPosition(sprite).X - left, Y = MetaPosition(sprite).Y - top, Width = sprite.Width, Height = sprite.Height, Pixels = pixels });
 			}
+			string directory = Path.GetDirectoryName(_metaPackPath)!;
+			Directory.CreateDirectory(directory);
+			string artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}.png");
+			if(File.Exists(artworkPath)) { artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}-{Guid.NewGuid():N}.png"); }
+			using(var bitmap = BuildMetaBitmap(group)) {
+				using var file = new FileStream(artworkPath, FileMode.CreateNew, FileAccess.Write);
+				bitmap.Save(file, PngBitmapEncoderOptions.Default);
+			}
+			group.ReplacementPath = Path.GetFileName(artworkPath);
+			group.ReplacementWidth = group.Width; group.ReplacementHeight = group.Height;
+			group.ReplacementScale = 1;
+			group.ReplacementOriginX = group.OriginX; group.ReplacementOriginY = group.OriginY;
+			group.Enabled = true;
+			int previousNextId = _metaPack.NextGroupId;
 			_metaPack.NextGroupId++;
 			_metaPack.Groups.Add(group);
+			try { SaveSpritePack(); }
+			catch {
+				_metaPack.Groups.Remove(group); _metaPack.NextGroupId = previousNextId;
+				if(poseSource != null) { poseSource.PoseFamilyId = previousFamilyId; }
+				throw;
+			}
+			creationSaved = true;
 			MetaGroups.Add(group);
 			SelectedMetaGroup = group;
-			SaveMetaGroups();
-		} catch(Exception ex) { MetaStatus = "Could not create group: " + ex.Message; }
+			ApplyMetaReplacements();
+			MetaStatus += $" PNG saved and assigned: {group.ReplacementPath}.";
+		} catch(Exception ex) {
+			if(!creationSaved && poseSource != null) { poseSource.PoseFamilyId = previousFamilyId; }
+			MetaStatus = (creationSaved ? "Group and PNG saved; could not finish activation: " : "Could not create group: ") + ex.Message;
+		}
 	}
 
 	public void MoveMetaGroup(int direction)
@@ -232,7 +256,7 @@ public partial class SpriteViewerViewModel
 		if(index < 0 || destination < 0 || destination >= _metaPack.Groups.Count) { return; }
 		_metaPack.Groups.RemoveAt(index);
 		_metaPack.Groups.Insert(destination, group);
-		try { _metaPack.Save(_metaPackPath); }
+		try { SaveSpritePack(); }
 		catch(Exception ex) {
 			_metaPack.Groups.RemoveAt(destination);
 			_metaPack.Groups.Insert(index, group);
@@ -251,7 +275,7 @@ public partial class SpriteViewerViewModel
 		int index = _metaPack.Groups.IndexOf(group);
 		if(index < 0) { return; }
 		_metaPack.Groups.RemoveAt(index);
-		try { _metaPack.Save(_metaPackPath); }
+		try { SaveSpritePack(); }
 		catch(Exception ex) {
 			_metaPack.Groups.Insert(index, group);
 			MetaStatus = "Could not remove group: " + ex.Message;
@@ -272,7 +296,7 @@ public partial class SpriteViewerViewModel
 		var previous = _metaPack.Groups.Select(g => (Group: g, X: g.OriginX, Y: g.OriginY)).ToList();
 		int count = _metaPack.AlignPoseOrigins(source);
 		if(count == 0) { MetaStatus = "Add an animation pose before aligning family origins."; return; }
-		try { _metaPack.Save(_metaPackPath); }
+		try { SaveSpritePack(); }
 		catch(Exception ex) {
 			foreach(var item in previous) { item.Group.OriginX = item.X; item.Group.OriginY = item.Y; }
 			MetaStatus = "Could not save pose origins: " + ex.Message;
@@ -288,7 +312,7 @@ public partial class SpriteViewerViewModel
 		if(_metaLoadFailed || _metaPackPath.Length == 0 || _removedMetaGroup is not MetaSpriteGroup group) { return; }
 		int index = Math.Min(_removedMetaGroupIndex, _metaPack.Groups.Count);
 		_metaPack.Groups.Insert(index, group);
-		try { _metaPack.Save(_metaPackPath); }
+		try { SaveSpritePack(); }
 		catch(Exception ex) {
 			_metaPack.Groups.RemoveAt(index);
 			MetaStatus = "Could not restore group: " + ex.Message;
@@ -302,10 +326,20 @@ public partial class SpriteViewerViewModel
 		MetaStatus += $" Restored Meta {group.Id:D3}.";
 	}
 
+ private void SaveSpritePack()
+ {
+  var latest = MetaSpritePack.Load(_metaPackPath, _metaPack.RomHash, CpuType.ToString());
+  _metaPack.BackgroundLayers = latest.BackgroundLayers;
+  _metaPack.NextBackgroundId = latest.NextBackgroundId;
+  _metaPack.Save(_metaPackPath);
+ }
 	public void SaveMetaGroups()
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
-		try { _metaPack.Save(_metaPackPath); MetaStatus = "Groups saved."; ApplyMetaReplacements(); }
+		try {
+			foreach(var layer in _metaPack.BackgroundLayers) { layer.Validate(); }
+			SaveSpritePack(); MetaStatus = "Groups saved."; ApplyMetaReplacements();
+		}
 		catch(Exception ex) { MetaStatus = "Could not save groups: " + ex.Message; }
 	}
 
@@ -321,7 +355,7 @@ public partial class SpriteViewerViewModel
 				MetaStatus = "Could not apply replacements: the ROM changed or this console layout is not supported yet.";
 				return;
 			}
-			MetaStatus = _metaPack.Groups.Any(g => g.Enabled) ? "Replacements applied. Capture starts on the next complete frame." : "Groups saved; gameplay replacements disabled.";
+			MetaStatus = _metaPack.Groups.Any(g => g.Enabled) || _metaPack.BackgroundLayers.Any(layer => layer.Enabled) ? "Replacements applied. Capture starts on the next complete frame." : "Groups saved; gameplay replacements disabled.";
 			if(CpuType == CpuType.Pce && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " PCE currently requires the default filter and a consistent dot clock; fixed-resolution output is pending."; }
 			if(CpuType == CpuType.Gba && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " GBA currently requires the default filter with color adjustment and frame blending disabled; NTSC and stereoscopic output are pending."; }
 			if(CpuType == CpuType.Ws && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " WonderSwan currently requires the default filter with frame blending and LCD icons disabled; other output modes are pending."; }
@@ -427,3 +461,4 @@ public partial class SpriteViewerViewModel
 		} catch(Exception ex) { MetaStatus = "Could not load PNG: " + ex.Message; }
 	}
 }
+

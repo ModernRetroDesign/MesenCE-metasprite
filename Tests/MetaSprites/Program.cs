@@ -10,6 +10,25 @@ static void Check(bool condition, string message)
 
 static MetaSpriteMember Sprite(int x, int y, uint color) => new() { X = x, Y = y, Width = 1, Height = 1, Pixels = new[] { color } };
 
+var memoryConditions = new System.Collections.Generic.List<MetaMemoryCondition> {
+	new() { Address = 0xC000, Value = 3, Mask = 15 }, new() { Address = 0xC001, Value = 7 }
+};
+Check(MetaMemoryCondition.Matches(memoryConditions, address => address == 0xC000 ? (byte)0xA3 : (byte)7), "All masked CPU-byte conditions must match.");
+Check(!MetaMemoryCondition.Matches(memoryConditions, address => address == 0xC000 ? (byte)0xA3 : (byte)8), "A single mismatched CPU byte must suppress artwork.");
+Check(!MetaMemoryCondition.Matches(memoryConditions, _ => null), "Missing memory snapshots must suppress conditioned artwork.");
+Check(MetaMemoryCondition.Matches(new(), _ => null), "Old packs without conditions remain unconditional.");
+var conditionPack = new MetaSpritePack {
+	Groups = new() { new() { MemoryConditions = memoryConditions, AlternateArtwork = new() {
+		new() { Path = "powered.png", Scale = 2, OriginX = 3, OriginY = 9, MemoryConditions = memoryConditions }
+	} } },
+	BackgroundLayers = new() { new() { MemoryConditions = memoryConditions } }
+};
+string conditionJson = System.Text.Json.JsonSerializer.Serialize(conditionPack, MetaSpriteSerializerContext.Default.MetaSpritePack);
+var restoredConditions = System.Text.Json.JsonSerializer.Deserialize(conditionJson, MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(restoredConditions.Groups[0].AlternateArtwork[0].Path == "powered.png" && restoredConditions.Groups[0].AlternateArtwork[0].OriginY == 9
+	&& restoredConditions.Groups[0].MemoryConditions[0].Mask == 15 && restoredConditions.BackgroundLayers[0].MemoryConditions[1].Address == 0xC001,
+	"CPU conditions and alternate origins must survive pack serialization.");
+
 MetaSpriteGroup group = new() { Id = 7, Name = "Standing", Width = 2, Height = 1, OriginX = 1, OriginY = 1 };
 group.Enabled = true;
 MetaSpriteGroup pose = new() { Id = 8, Width = 6, Height = 5 };
@@ -21,6 +40,10 @@ var anchor = new MetaSpriteGroup { Id = 20, PoseFamilyId = 20, Width = 9, Height
 var sibling = new MetaSpriteGroup { Id = 21, PoseFamilyId = 20, Width = 14, Height = 8, ReplacementOriginX = 9, ReplacementOriginY = 11 };
 var unrelated = new MetaSpriteGroup { Id = 22, PoseFamilyId = 22, OriginX = 3, OriginY = 4 };
 var alignmentPack = new MetaSpritePack { Groups = new() { anchor, sibling, unrelated } };
+Check(MetaBackgroundLayer.ResolveGameboyRole(0, true, false) == 1 && MetaBackgroundLayer.ResolveGameboyRole(1, true, false) == 0,
+	"Game Boy map tabs must resolve current hardware roles rather than assuming map index equals layer.");
+Check(MetaBackgroundLayer.ResolveGameboyRole(0, false, false) == 0 && MetaBackgroundLayer.ResolveGameboyRole(1, false, false) == null,
+	"Shared Game Boy maps prefer background, and unused maps must not silently target a role.");
 Check(alignmentPack.AlignPoseOrigins(anchor) == 1 && sibling.OriginX == 5 && sibling.OriginY == 6,
 	"Editing a family anchor must preserve its bottom-center offset across different pose bounds.");
 Check(unrelated.OriginX == 3 && unrelated.OriginY == 4 && sibling.ReplacementOriginX == 9 && sibling.ReplacementOriginY == 11,
@@ -62,6 +85,12 @@ try {
 	var loaded = MetaSpritePack.Load(path, "test-rom", "Gameboy");
 	Check(loaded.BackgroundLayers.Count == 1 && loaded.BackgroundLayers[0].ArtworkPath == "background.png" && loaded.BackgroundLayers[0].NativeLayer == 1,
 		"Background layer definitions must persist per game with artwork and hardware layer selection.");
+	Check(loaded.NextBackgroundId == 2, "Older background packs must allocate above existing IDs.");
+	loaded.NextBackgroundId = 7;
+	loaded.BackgroundLayers.Clear();
+	loaded.Save(path);
+	Check(MetaSpritePack.Load(path, "test-rom", "Gameboy").NextBackgroundId == 7,
+		"Removing backgrounds must not reuse IDs or overwrite retained artwork on the next import.");
 	Check(background.TryGetArtworkPixel(0, 0, 0, 5, out int bx, out int by) && bx == 58 && by == 0,
 		"Negative horizontal scroll coordinates must wrap within the scaled PNG canvas.");
 	Check(!background.TryGetArtworkPixel(0, 0, 0, 4, out _, out _), "Unwrapped vertical coordinates must clip outside the artwork.");
@@ -134,6 +163,26 @@ using(var reader = new BinaryReader(new MemoryStream(runtimePacket))) {
 		"Runtime packet must contain only enabled groups and use the agreed little-endian header.");
 }
 if(args.Length > 0) { File.WriteAllBytes(args[0], runtimePacket); }
+runtimeGroup.MemoryConditions = new() {
+	new() { Address = 0x1234, Value = 0xAF, Mask = 0xF0 },
+	new() { Address = 0x5678, Value = 3 }
+};
+byte[] conditionalPacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => (8, 8, Enumerable.Repeat(0xFF00FF00u, 64).ToArray()));
+using(var reader = new BinaryReader(new MemoryStream(conditionalPacket))) {
+	Check(reader.ReadUInt32() == MetaSpriteRuntimePacket.ConditionalMagic, "Conditioned groups require MSP2.");
+	reader.BaseStream.Position = conditionalPacket.Length - 28;
+	Check(reader.ReadInt32() == 2 && reader.ReadUInt32() == 0x1234 && reader.ReadInt32() == 0xAF && reader.ReadInt32() == 0xF0
+		&& reader.ReadUInt32() == 0x5678 && reader.ReadInt32() == 3 && reader.ReadInt32() == 255, "Condition bytes must survive packet transfer.");
+}
+Check(MetaMemoryCondition.Matches(runtimeGroup.MemoryConditions, address => address == 0x1234 ? (byte)0xA7 : (byte)3), "Masked expected bits must match native semantics.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".conditions", conditionalPacket); }
+runtimeGroup.MemoryConditions.Clear();
+var bgTransfer = new MetaSpritePack();
+bgTransfer.BackgroundLayers.Add(new() { Id = 8, NativeLayer = 1, X = -3, Y = 5, Enabled = true, ArtworkWidth = 2, ArtworkHeight = 2, ArtworkScale = 2, WrapX = true });
+byte[] bgPacket = MetaBackgroundRuntimePacket.Create(bgTransfer, _ => (2, 2, new uint[] {0, 0x8000FF00, 0xFFFF0000, 0xFFFFFFFF}));
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background", bgPacket); }
+bgTransfer.BackgroundLayers[0].Enabled = false;
+Check(MetaBackgroundRuntimePacket.Create(bgTransfer, _ => throw new Exception("Disabled background must not load PNG.")).Length == 8, "Disabled backgrounds must serialize a clear packet.");
 Console.WriteLine("PASS: enabled-group packet serialization.");
 var priorityPack = new MetaSpritePack { Groups = new() {
 	new MetaSpriteGroup { Id = 90, Enabled = true },
@@ -151,6 +200,10 @@ runtimeGroup.Enabled = false;
 byte[] disabledPacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => throw new Exception("Disabled groups must not load PNG assets."));
 Check(disabledPacket.Length == 8 && BitConverter.ToInt32(disabledPacket, 4) == 0, "An all-disabled pack must clear native definitions without reading artwork.");
 Console.WriteLine("PASS: all-disabled pack clears runtime definitions without loading PNG assets.");
+if(args.Length >= 3 && args[1] == "--snes-ordering") {
+	GameplayFixture.RunSnesOrdering(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}
 if(args.Length >= 3 && args[1] == "--gameplay") {
 	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+	GameplayFixture.VerifyPackActivation(Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), Path.GetFullPath(args[0]));
 }

@@ -19,6 +19,19 @@
 #include "NES/NesDefaultVideoFilter.h"
 #include "SNES/SnesDefaultVideoFilter.h"
 #include "PCE/PceDefaultVideoFilter.h"
+#include "Gameboy/Gameboy.h"
+#include "Gameboy/GbMemoryManager.h"
+#include "NES/NesConsole.h"
+#include "SMS/SmsConsole.h"
+#include "SMS/SmsMemoryManager.h"
+#include "GBA/GbaConsole.h"
+#include "GBA/GbaMemoryManager.h"
+#include "WS/WsConsole.h"
+#include "WS/WsMemoryManager.h"
+#include "PCE/PceConsole.h"
+#include "PCE/PceMemoryManager.h"
+#include "SNES/SnesConsole.h"
+#include "SNES/SnesMemoryManager.h"
 
 VideoDecoder::VideoDecoder(Emulator* emu)
 {
@@ -229,6 +242,37 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
 
 	_emu->OnBeforeSendFrame();
 
+	if(frame.MetaSprites && !forRewind) {
+		auto console = _emu->GetConsole();
+		_metaSpriteCompositor.CaptureMemorySnapshot(*frame.MetaSprites, [&](uint32_t address, uint8_t& value) {
+			switch(_emu->GetConsoleType()) {
+				case ConsoleType::Gameboy:
+					if(address > 0xFFFF) { return false; }
+					value = static_cast<Gameboy*>(console.get())->GetMemoryManager()->DebugRead(static_cast<uint16_t>(address)); break;
+				case ConsoleType::Nes:
+					if(address > 0xFFFF) { return false; }
+					value = static_cast<NesConsole*>(console.get())->DebugRead(static_cast<uint16_t>(address)); break;
+				case ConsoleType::Sms:
+					if(address > 0xFFFF) { return false; }
+					value = static_cast<SmsConsole*>(console.get())->GetMemoryManager()->DebugRead(static_cast<uint16_t>(address)); break;
+				case ConsoleType::PcEngine:
+					if(address > 0xFFFF) { return false; }
+					value = static_cast<PceConsole*>(console.get())->GetMemoryManager()->DebugRead(static_cast<uint16_t>(address)); break;
+				case ConsoleType::Gba:
+					if(address > 0xFFFFFFF) { return false; }
+					value = static_cast<GbaConsole*>(console.get())->GetMemoryManager()->DebugRead(address); break;
+				case ConsoleType::Ws:
+					if(address > 0xFFFFF) { return false; }
+					value = static_cast<WsConsole*>(console.get())->GetMemoryManager()->DebugRead(address); break;
+				case ConsoleType::Snes:
+					if(address > 0xFFFFFF) { return false; }
+					value = static_cast<SnesConsole*>(console.get())->GetMemoryManager()->Peek(address); break;
+				default: return false;
+			}
+			return true;
+		});
+	}
+
 	_frame = frame;
 	if(sync) {
 		DecodeFrame(forRewind);
@@ -260,6 +304,7 @@ void VideoDecoder::StartThread()
 void VideoDecoder::StopThread()
 {
 	_metaSpriteCompositor.SetGroups({});
+	_metaSpriteCompositor.SetBackgroundLayers({});
 	auto lock = _stopStartLock.AcquireSafe();
 	_stopFlag = true;
 	if(_decodeThread) {

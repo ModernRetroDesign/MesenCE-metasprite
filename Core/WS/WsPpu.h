@@ -36,7 +36,19 @@ private:
 
 	PixelData _rowData[2][224];
 	PixelData _metaBackground[2][224] = {};
+	MetaBackgroundSample _metaBackgroundSamples[2][224] = {};
 	int16_t _metaSpriteIds[2][224] = {};
+	struct MetaCoverage
+	{
+		uint64_t ReplacementEligibleSprites = 0, ReplacementEligibleSpritesHigh = 0;
+		void AllowReplacementSprite(int id)
+		{
+			if(id >= 0 && id < 64) { ReplacementEligibleSprites |= uint64_t(1) << id; }
+			else if(id >= 64 && id < 128) { ReplacementEligibleSpritesHigh |= uint64_t(1) << (id - 64); }
+		}
+	};
+	MetaCoverage _metaReplacementCoverage[2][224] = {};
+	MetaCoverage _metaHighPriorityCoverage[2][224] = {};
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 
@@ -113,8 +125,11 @@ public:
 					auto& pixel = _metaFrame->Pixels[(_state.Scanline - 1) * WsConstants::ScreenWidth + _state.Cycle];
 					const auto& bg = _metaBackground[rowIndex][_state.Cycle];
 					pixel.VisibleSprite = _metaSpriteIds[rowIndex][_state.Cycle];
+				pixel.ReplacementEligibleSprites = _metaReplacementCoverage[rowIndex][_state.Cycle].ReplacementEligibleSprites;
+				pixel.ReplacementEligibleSpritesHigh = _metaReplacementCoverage[rowIndex][_state.Cycle].ReplacementEligibleSpritesHigh;
 					pixel.SpriteColor = _currentBuffer[offset];
 					pixel.BackgroundColor = bg.Priority ? GetPixelRgbColor(_state.Mode, bg.Color, bg.Palette) : GetBgColor();
+					pixel.BackgroundSample = _metaBackgroundSamples[rowIndex][_state.Cycle];
 					pixel.SpriteColorIndex = data.Color; pixel.SpriteAttributes = data.Palette;
 				}
 			}

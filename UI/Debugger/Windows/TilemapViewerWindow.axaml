@@ -54,6 +54,31 @@
 					<TextBlock Text="{l:Translate lblBackground}" Grid.Row="1" />
 					<c:EnumComboBox SelectedItem="{Binding Config.Background}" Width="100" Grid.Column="1" Grid.Row="1" />
 				</Grid>
+				<c:GroupBox Header="Background PNG replacements" DataContext="{Binding BackgroundEditor}" x:DataType="dvm:MetaBackgroundEditorViewModel"><StackPanel>							<TextBlock Text="Background PNG layers" FontWeight="Bold" />
+							<TextBlock Text="Gameplay: GB/GBC layers 0/1, SMS Mode 4 layer 0, WonderSwan layers 0/1." TextWrapping="Wrap" />
+							<Button Content="Import background PNG" Click="OnImportMetaBackground" />
+							<ComboBox ItemsSource="{Binding MetaBackgrounds}" SelectedItem="{Binding SelectedMetaBackground}" />
+							<Button Content="Remove selected background layer" Click="OnRemoveMetaBackground" />
+							<Border Background="#404040" MaxHeight="200">
+								<Image Source="{Binding MetaBackgroundPreview}" Stretch="Uniform" MaxHeight="200" />
+							</Border>
+							<TextBlock Text="{Binding MetaBackgroundPreviewInfo}" TextWrapping="Wrap" />
+							<TextBox PlaceholderText="Background name" Text="{Binding SelectedMetaBackground.Name}" />
+							<TextBlock Text="Hardware layer" />
+							<NumericUpDown Minimum="0" Maximum="7" Value="{Binding SelectedMetaBackground.NativeLayer}" />
+							<TextBlock Text="Placement X / Y (native pixels)" />
+							<StackPanel Orientation="Horizontal">
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaBackground.X}" />
+								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaBackground.Y}" />
+							</StackPanel>
+							<TextBlock Text="PNG scale" />
+							<NumericUpDown Minimum="1" Maximum="10" Value="{Binding SelectedMetaBackground.ArtworkScale}" />
+							<CheckBox Content="Follow hardware scrolling" IsChecked="{Binding SelectedMetaBackground.FollowScroll}" />
+							<CheckBox Content="Wrap horizontally" IsChecked="{Binding SelectedMetaBackground.WrapX}" />
+							<CheckBox Content="Wrap vertically" IsChecked="{Binding SelectedMetaBackground.WrapY}" />
+							<CheckBox Content="Enable background in gameplay" IsChecked="{Binding SelectedMetaBackground.Enabled}" />
+							<Button Content="Save and apply background edits" Click="OnSaveMetaBackgrounds" />
+<TextBlock Text="{Binding MetaStatus}" TextWrapping="Wrap" /></StackPanel></c:GroupBox>
 				<CheckBox Content="{l:Translate chkShowGrid}" IsChecked="{Binding Config.ShowGrid}" />
 				<CheckBox Content="{l:Translate chkNesShowAttributeGrid}" IsChecked="{Binding Config.NesShowAttributeGrid}" IsVisible="{Binding IsNes}" />
 				<CheckBox Content="{l:Translate chkNesShowAttributeByteGrid}" IsChecked="{Binding Config.NesShowAttributeByteGrid}" IsVisible="{Binding IsNes}" />
@@ -118,3 +143,4 @@
 		/>
 	</DockPanel>
 </Window>
+
