@@ -1,6 +1,6 @@
 # This is an experimental fork of MesenCE
 
-Please be aware this fork is coded using AI tools and will not and never be merged into MesenCE due to it being prohibited by their maintainers.
+Please be aware this fork coded using AI tools and will not and never be merged into MesenCE due to it being prohibited by their maintainers.
 
 MesenCE-Metasprite is a proof of concept project to showcase a different HD replacement method. Combining sprite groups into 1 complete metasprite. This feature works on all systems Mesen 2.2.1 supports. The Sprite viewer now contains the tool for grouping and labeling metasprites for export and import.
 
@@ -18,21 +18,20 @@ The latest stable version is available from the [releases page on GitHub](https:
 
 ## Development Builds
 
-[!\[Mesen](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml/badge.svg)](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml?query=branch:master)
+[![Mesen](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml/badge.svg)](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml?query=branch%3Amaster)
 
 * [Windows](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28Windows%20-%20net10.0%20-%20AoT%29.zip)
-
   * Windows 7 or higher is required. Windows 7 users must use SP1 and have all updates installed.
-* [Linux x64](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04%20-%20clang_aot%29.zip)  (requires **SDL2**)
-* [Linux ARM64](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04-arm%20-%20clang_aot%29.zip)  (requires **SDL2**)
-* [macOS - Intel](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28macOS%20-%20macos-15-intel%20-%20clang_aot%29.zip)  (requires **SDL2**)
-* [macOS - Apple Silicon](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28macOS%20-%20macos-15%20-%20clang_aot%29.zip)  (requires **SDL2**)
+* [Linux x64](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04%20-%20clang_aot%29.zip)  (requires **SDL2**)  
+* [Linux ARM64](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28Linux%20-%20ubuntu-22.04-arm%20-%20clang_aot%29.zip)  (requires **SDL2**)  
+* [macOS - Intel](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28macOS%20-%20macos-15-intel%20-%20clang_aot%29.zip)  (requires **SDL2**)  
+* [macOS - Apple Silicon](https://nightly.link/nesdev-org/MesenCE/workflows/build/master/Mesen%20%28macOS%20-%20macos-15%20-%20clang_aot%29.zip)  (requires **SDL2**)  
 
-#### <ins>Notes</ins>
+#### <ins>Notes</ins> ####
 
-* Other builds are also available in the [Actions](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml?query=branch:master) tab.
-* **macOS**: Builds are self-signed and will require approval via Gatekeeper before they are able to be run.
-* **SteamOS**: See [SteamOS.md](SteamOS.md)
+* Other builds are also available in the [Actions](https://github.com/nesdev-org/MesenCE/actions/workflows/build.yml?query=branch%3Amaster) tab.
+* **macOS**: Builds are self-signed and will require approval via Gatekeeper before they are able to be run.  
+* **SteamOS**: See [SteamOS.md](SteamOS.md)  
 
 ## Compiling
 
@@ -44,7 +43,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
 
-Mesen is available under the GPL V3 license.  Full text here: [http://www.gnu.org/licenses/gpl-3.0.en.html](http://www.gnu.org/licenses/gpl-3.0.en.html)
+Mesen is available under the GPL V3 license.  Full text here: <http://www.gnu.org/licenses/gpl-3.0.en.html>
 
 Copyright (C) 2014-2026 Sour, 2026 contributors
 
@@ -59,5 +58,4 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see [http://www.gnu.org/licenses/](http://www.gnu.org/licenses/).
-
+along with this program.  If not, see <http://www.gnu.org/licenses/>.

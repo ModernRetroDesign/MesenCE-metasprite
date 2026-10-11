@@ -134,7 +134,6 @@ private:
 	PceSpriteInfo _sprites[64] = {};
 	PceSpriteInfo _drawSprites[64] = {};
 	PceTileInfo _tiles[100] = {};
-	MetaBackgroundSample _metaBackgroundTiles[100] = {};
 
 	template<uint16_t bitMask = 0xFFFF>
 	void UpdateReg(uint16_t& reg, uint8_t value, bool msb)
