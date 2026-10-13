@@ -50,6 +50,7 @@ public:
 	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
 	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
 	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
+	bool HasMetaBackgroundLayers() { return _metaSpriteCompositor.HasBackgroundLayers(); }
 	VideoDecoder(Emulator* console);
 	~VideoDecoder();
 

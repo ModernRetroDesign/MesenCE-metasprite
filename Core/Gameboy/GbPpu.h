@@ -23,6 +23,7 @@ private:
 	uint16_t* _currentBuffer = nullptr;
 	atomic<bool> _metaCaptureRequested = false;
 	shared_ptr<MetaSpriteFrame> _metaSpriteFrame;
+	MetaSpriteFramePool _metaFramePool;
 	EmuSettings* _settings = nullptr;
 	uint16_t* _eventViewerBuffers[2] = {};
 	uint16_t* _currentEventViewerBuffer = nullptr;
@@ -36,6 +37,8 @@ private:
 
 	GbPpuFifo _bgFifo;
 	GbPpuFetcher _bgFetcher;
+	MetaBackgroundSample _metaBgFetch;
+	MetaBackgroundSample _metaBgFifo[8] = {};
 
 	GbPpuFifo _oamFifo;
 	GbPpuFetcher _oamFetcher;

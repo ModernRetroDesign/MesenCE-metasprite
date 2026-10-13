@@ -54,6 +54,13 @@ namespace Mesen.Debugger.ViewModels
 		public int RealWidth => Width / (DoubleSize == NullableBoolean.True ? 2 : 1);
 		public int RealHeight => Height / (DoubleSize == NullableBoolean.True ? 2 : 1);
 
+		public void ReleasePreview()
+		{
+			DynamicBitmap? previous = SpritePreview;
+			SpritePreview = null;
+			previous?.Dispose();
+		}
+
 		public unsafe void Init(ref DebugSpriteInfo sprite, UInt32[] spritePreviews, DebugSpritePreviewInfo previewInfo)
 		{
 			SpriteIndex = sprite.SpriteIndex;
@@ -97,16 +104,18 @@ namespace Mesen.Debugger.ViewModels
 				UInt32* spritePreview = p + (sprite.SpriteIndex * 128 * 128);
 
 				if(SpritePreview == null || SpritePreview.PixelSize.Width != sprite.Width || SpritePreview.PixelSize.Height != sprite.Height) {
+					DynamicBitmap? previous = SpritePreview;
 					SpritePreview = new DynamicBitmap(new PixelSize(Width, Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+					previous?.Dispose();
 					needUpdate = true;
 				}
 
 				int len = Width * Height;
-				for(int i = 0; i < len; i++) {
-					if(_rawPreview[i] != spritePreview[i]) {
-						needUpdate = true;
-					}
-					_rawPreview[i] = spritePreview[i];
+				ReadOnlySpan<uint> currentPixels = new(spritePreview, len);
+				Span<uint> previousPixels = _rawPreview.AsSpan(0, len);
+				if(!currentPixels.SequenceEqual(previousPixels)) {
+					currentPixels.CopyTo(previousPixels);
+					needUpdate = true;
 				}
 
 				if(needUpdate) {

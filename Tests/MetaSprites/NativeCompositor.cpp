@@ -2,17 +2,22 @@
 #include "../../Core/Shared/Video/MetaSpritePacket.h"
 #include "../../Core/Shared/Video/MetaBackgroundReplacement.h"
 #include "../../Core/Shared/Video/MetaBackgroundPacket.h"
+#include "../../Core/Debugger/ViewerRefreshSchedule.h"
 #include <cassert>
 #include <iostream>
 #include <fstream>
 #include <iterator>
 #include <chrono>
 
+#ifdef NDEBUG
+#error Native compositor verification requires assertions in every configuration.
+#endif
+
 static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 {
 	MetaSpriteFrame frame(256, 239);
 	frame.GbaColorEffects = effects == 1;
-	frame.SnesColorEffects = effects == 2;
+	frame.SnesColorEffects = effects >= 2;
 	std::vector<uint32_t> original(256 * 239, 0xFF0000FF);
 	std::vector<MetaSpriteReplacement> groups;
 	for(int id = 0; id < (largeGroups ? 128 : 32); id++) {
@@ -34,11 +39,11 @@ static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 					pixel.MainCoefficient = pixel.SecondaryCoefficient = 8;
 					pixel.EffectsEnabled = true; pixel.SecondaryBlendTarget = true;
 					pixel.GbaFallbackCaptured = effects == 1; pixel.GbaFallbackColor = 0x7C00;
-					pixel.SnesFallbackCaptured = effects == 2;
+					pixel.SnesFallbackCaptured = effects >= 2;
 					pixel.SnesFixedColor = 0x7C00;
 					pixel.SnesMathEnabled = true;
 					if(x == 15 && effects == 1) { pixel.GbaCoverage.push_back({static_cast<int16_t>(id), 0x7C00, true, false, true}); }
-					if(x == 15 && effects == 2) { pixel.SnesCoverage.push_back({static_cast<int16_t>(id), 1, 3, 4, true, false, true}); }
+					if(x == 15 && effects >= 2) { pixel.SnesCoverage.push_back({static_cast<int16_t>(id), 1, 3, 4, true, false, true}); }
 				}
 				if(x < 15) { pixel.VisibleSprite = (int16_t)id; original[(top + y) * 256 + left + x] = sourceColor; }
 			}
@@ -52,26 +57,179 @@ static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 		groups.back().Members.push_back(std::move(member));
 	}
 	MetaSpriteCompositor compositor; compositor.SetGroups(std::move(groups));
-	compositor.Apply(original.data(), 256, 239, frame);
-	constexpr int iterations = 20;
-	auto start = std::chrono::steady_clock::now();
+	if(effects >= 3) {
+		if(effects == 4) { frame.SnesBackgrounds.resize(frame.Pixels.size()); }
+		for(int y = 0; y < 239; y++) { for(int x = 0; x < 256; x++) {
+			auto& pixel = frame.Pixels[y * 256 + x];
+			pixel.BackgroundSample = {x, y, 0, true}; pixel.SnesFallbackCaptured = true;
+			pixel.SnesFallbackMainColor = 0x7C00; pixel.Brightness = 15;
+			if(effects == 4) {
+				auto& captured = frame.SnesBackgrounds[y * 256 + x];
+				captured.Captured = true; captured.BackdropColor = 0x7C00;
+				captured.MainPriority = pixel.VisibleSprite >= 0 ? 3 : 0;
+				captured.Layers[0].Sample = {x, y, 0, true}; captured.Layers[0].Priority = 1;
+				captured.Layers[0].Opaque = captured.Layers[0].Main = true; captured.Layers[0].Color = 0x7C00;
+			}
+		} }
+		MetaBackgroundReplacement background;
+		background.Id = 1; background.Scale = 2; background.Width = background.Height = 2;
+		background.WrapX = background.WrapY = true; background.Artwork.assign(4, 0x80FFFFFF);
+		compositor.SetBackgroundLayers({background});
+	}
+	for(int warmup = 0; warmup < 8; warmup++) { compositor.Apply(original.data(), 256, 239, frame); }
+	constexpr int iterations = 120;
+	std::vector<double> timings;
+	timings.reserve(iterations);
+	double total = 0;
+	int overBudget = 0;
 	uint64_t checksum = 0;
 	for(int i = 0; i < iterations; i++) {
+		auto start = std::chrono::steady_clock::now();
 		const auto* output = compositor.Apply(original.data(), 256, 239, frame);
 		checksum = 0;
 		for(int j = 0; j < 512 * 478; j++) { checksum += output[j]; }
+		double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		timings.push_back(elapsed); total += elapsed;
+		if(elapsed > 16.67) { overBudget++; }
 	}
-	double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / iterations;
-	std::cout << "BENCH: " << (effects == 1 ? "GBA alpha/effects " : effects == 2 ? "SNES alpha/effects " : "") << (largeGroups ? "8 metasprites of 16 members" : "32 matched 16x16 sprites") << ", 256x239 frame, 2x artwork: " << milliseconds << " ms/frame, checksum=" << checksum << std::endl;
+	double milliseconds = total / iterations;
+	std::sort(timings.begin(), timings.end());
+	std::cout << "BENCH: " << (effects == 1 ? "GBA alpha/effects " : effects == 2 ? "SNES alpha/effects " : effects == 3 ? "SNES background/alpha " : effects == 4 ? "SNES captured layers/alpha " : "") << (largeGroups ? "8 metasprites of 16 members" : "32 matched 16x16 sprites") << ", 256x239 frame, 2x artwork: " << milliseconds << " ms/frame, checksum=" << checksum << std::endl;
+	std::cout << "TIMING: composition plus checksum readback, " << iterations << " frames; p50=" << timings[59]
+		<< " ms, p95=" << timings[113] << " ms, p99=" << timings[118] << " ms, max=" << timings.back()
+		<< " ms, frames over 16.67 ms=" << overBudget << "/" << iterations
+		<< "; excludes emulation, capture, filtering, and presentation." << std::endl;
 }
 
 int main(int argc, char** argv)
 {
+	assert(MetaSpriteCompositor::CompositeAlpha(0x12010203, 0x34040506, 255) == 0xFF010203);
+	assert(MetaSpriteCompositor::CompositeAlpha(0x12010203, 0x34040506, 0) == 0xFF040506);
+	ViewerRefreshSchedule refreshSchedule;
+	assert(!refreshSchedule.HasViewers());
+	refreshSchedule.Set(123, 224, 0); refreshSchedule.Set(456, 240, 16); refreshSchedule.Set(789, 224, 0);
+	std::vector<uint32_t> refreshed;
+	auto visitRefresh = [&](uint16_t scanline, uint16_t cycle) {
+		refreshed.clear(); refreshSchedule.Visit(scanline, cycle, [&](uint32_t id) { refreshed.push_back(id); });
+		std::sort(refreshed.begin(), refreshed.end());
+	};
+	visitRefresh(224, 0); assert((refreshed == std::vector<uint32_t>{123, 789}));
+	visitRefresh(224, 16); assert(refreshed.empty()); // Both masks match, but no viewer uses this pair.
+	visitRefresh(240, 16); assert((refreshed == std::vector<uint32_t>{456}));
+	refreshSchedule.Set(123, UINT16_MAX, UINT16_MAX);
+	visitRefresh(224, 0); assert((refreshed == std::vector<uint32_t>{789}));
+	visitRefresh(UINT16_MAX, UINT16_MAX); assert((refreshed == std::vector<uint32_t>{123}));
+	refreshSchedule.Remove(789); refreshSchedule.Remove(456); refreshSchedule.Remove(123); refreshSchedule.Remove(999);
+	assert(!refreshSchedule.HasViewers());
+	visitRefresh(224, 0); assert(refreshed.empty());
+	refreshSchedule.Set(1, 0, 0); visitRefresh(0, 0); assert((refreshed == std::vector<uint32_t>{1}));
+	refreshSchedule.Set(2, 64, 63); refreshSchedule.Set(3, 63, 64);
+	visitRefresh(64, 63); assert((refreshed == std::vector<uint32_t>{2}));
+	visitRefresh(63, 64); assert((refreshed == std::vector<uint32_t>{3}));
+	visitRefresh(64, 64); assert(refreshed.empty());
+	refreshSchedule.Remove(2); visitRefresh(64, 63); assert(refreshed.empty());
+	// Coverage storage must retain order through growth, deep copies, moves and reuse.
+	MetaSpriteCoverageList<MetaGbaSpriteCoverage> coverageList;
+	for(int i = 0; i < 128; i++) { coverageList.push_back({static_cast<int16_t>(i), static_cast<uint16_t>(i * 3)}); }
+	auto copiedCoverage = coverageList;
+	copiedCoverage[0].Sprite = 127;
+	if(coverageList[0].Sprite != 0) { return 1; }
+	auto movedCoverage = std::move(copiedCoverage);
+	if(copiedCoverage.begin() != copiedCoverage.end() || movedCoverage[127].SecondaryColor != 381) { return 1; }
+	coverageList = movedCoverage;
+	movedCoverage.clear(); movedCoverage.push_back({7, 9});
+	if(coverageList[0].Sprite != 127 || movedCoverage[0].Sprite != 7) { return 1; }
+	int coverageCount = 0;
+	for(const auto& coverage : coverageList) {
+		if(coverage.Sprite != (coverageCount == 0 ? 127 : coverageCount)) { return 1; }
+		coverageCount++;
+	}
+	if(coverageCount != 128) { return 1; }
+	for(int i = 0; i < 3; i++) { movedCoverage.push_back({8, 10}); }
+	movedCoverage.push_back(movedCoverage[0]);
+	if(movedCoverage[4].Sprite != 7 || movedCoverage[4].SecondaryColor != 9) { return 1; }
+	MetaSpriteCoverageList<MetaGbaSpriteCoverage> swappedCoverage;
+	swappedCoverage.swap(movedCoverage);
+	if(movedCoverage.begin() != movedCoverage.end() || swappedCoverage[4].SecondaryColor != 9) { return 1; }
+	MetaSpriteFramePool framePool;
+	auto firstFrame = framePool.Acquire(3, 2);
+	auto retainedFrame = firstFrame;
+	auto secondFrame = framePool.Acquire(3, 2);
+	auto thirdFrame = framePool.Acquire(3, 2);
+	firstFrame->FrameNumber = 99; firstFrame->GbaColorEffects = firstFrame->SnesColorEffects = true;
+	firstFrame->Pixels[0].VisibleSprite = 7; firstFrame->Pixels[0].BackgroundSample = {4, 5, 2, true};
+	firstFrame->Pixels[0].GbaCoverage.push_back({7, 9});
+	firstFrame->Pixels[0].SnesCoverage.push_back({7, 1, 3, 4, true, false, true});
+	firstFrame->SnesBackgrounds.resize(6); firstFrame->Rows.resize(1); firstFrame->DecodedRows.resize(1); firstFrame->NesRows.resize(1);
+	firstFrame->MemorySnapshot[0x123] = 9;
+	auto overflowFrame = framePool.Acquire(3, 2);
+	if(overflowFrame == firstFrame || overflowFrame == secondFrame || overflowFrame == thirdFrame) { return 1; }
+	firstFrame.reset(); overflowFrame.reset();
+	overflowFrame = framePool.Acquire(3, 2);
+	if(overflowFrame == retainedFrame || retainedFrame->Pixels[0].VisibleSprite != 7) { return 1; }
+	MetaSpriteFrame* reusableAddress = retainedFrame.get();
+	retainedFrame.reset();
+	auto reusedFrame = framePool.Acquire(3, 2);
+	if(reusedFrame.get() != reusableAddress || reusedFrame->FrameNumber != 0 || reusedFrame->GbaColorEffects || reusedFrame->SnesColorEffects
+		|| reusedFrame->Pixels[0].VisibleSprite != -1 || reusedFrame->Pixels[0].BackgroundSample.Valid
+		|| reusedFrame->Pixels[0].GbaCoverage.begin() != reusedFrame->Pixels[0].GbaCoverage.end()
+		|| reusedFrame->Pixels[0].SnesCoverage.begin() != reusedFrame->Pixels[0].SnesCoverage.end()
+		|| !reusedFrame->SnesBackgrounds.empty() || !reusedFrame->Rows.empty() || !reusedFrame->DecodedRows.empty()
+		|| !reusedFrame->NesRows.empty() || !reusedFrame->MemorySnapshot.empty()) { return 1; }
+	if(reusedFrame->Pixels[0].GbaObjectPriority != 0xFF || reusedFrame->Pixels[0].SnesFallbackMainLayer != 0xFF
+		|| reusedFrame->Pixels[0].MainCoefficient != 16 || !reusedFrame->Pixels[0].SnesWindowMathAllowed) { return 1; }
+	auto otherSize = framePool.Acquire(4, 3);
+	if(otherSize->Width != 4 || otherSize->Height != 3 || otherSize->Pixels.size() != 12 || reusedFrame->Width != 3) { return 1; }
+	if(argc > 1 && std::string(argv[1]) == "--benchmark-capture-allocation") {
+		auto start = std::chrono::steady_clock::now();
+		uint64_t checksum = 0;
+		for(int i = 0; i < 120; i++) {
+			MetaSpriteFrame allocatedFrame(256, 239);
+			checksum += allocatedFrame.Pixels.size();
+		}
+		std::cout << "Capture frame allocation/destruction: " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 120
+			<< " ms/frame; checksum=" << checksum << std::endl;
+		MetaSpriteFramePool allocationPool;
+		auto pooledFrame = allocationPool.Acquire(256, 239);
+		pooledFrame = allocationPool.Acquire(256, 239);
+		start = std::chrono::steady_clock::now();
+		for(int i = 0; i < 120; i++) { pooledFrame = allocationPool.Acquire(256, 239); }
+		std::cout << "Capture frame reuse/reset: " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 120 << " ms/frame" << std::endl;
+		return 0;
+	}
 	if(argc > 1 && std::string(argv[1]) == "--benchmark") { BenchmarkComposition(); return 0; }
 	if(argc > 1 && std::string(argv[1]) == "--benchmark-metagroups") { BenchmarkComposition(true); return 0; }
+	if(argc > 1 && std::string(argv[1]) == "--benchmark-snes-background") { BenchmarkComposition(true, 3); return 0; }
+	if(argc > 1 && std::string(argv[1]) == "--benchmark-snes-background-layers") { BenchmarkComposition(true, 4); return 0; }
 	if(argc > 1 && std::string(argv[1]) == "--benchmark-gba-alpha") { BenchmarkComposition(true, 1); return 0; }
 	if(argc > 1 && std::string(argv[1]) == "--benchmark-snes-alpha") { BenchmarkComposition(true, 2); return 0; }
 	MetaSpriteFrame crossWord(3, 1);
+	MetaBackgroundView emptyBackgroundView;
+	assert(!(emptyBackgroundView.begin() != emptyBackgroundView.end()));
+	std::vector<MetaBackgroundReplacement> viewLayers(2);
+	viewLayers[0].Id = 9; viewLayers[1].Id = 3;
+	MetaBackgroundView orderedBackgroundView(viewLayers);
+	int viewIndex = 0;
+	for(const auto& layer : orderedBackgroundView) { assert(&layer == &viewLayers[viewIndex++]); }
+	assert(viewIndex == 2);
+	for(int dimension : {1, 2, 3, 4, 5, 8, 17}) {
+		MetaBackgroundReplacement wrapping;
+		wrapping.Id = 1; wrapping.X = 3; wrapping.Y = -5; wrapping.Scale = 2;
+		wrapping.Width = wrapping.Height = dimension * 2; wrapping.WrapX = wrapping.WrapY = true;
+		for(int i = 0; i < wrapping.Width * wrapping.Height; i++) { wrapping.Artwork.push_back(0xFF000000u | i); }
+		for(int x : {INT32_MIN, -18, -9, -1, 0, 1, 9, 18, INT32_MAX}) {
+			for(int y : {INT32_MIN, -18, -9, -1, 0, 1, 9, 18, INT32_MAX}) {
+				int64_t expectedX = (static_cast<int64_t>(x) - wrapping.X) % dimension;
+				int64_t expectedY = (static_cast<int64_t>(y) - wrapping.Y) % dimension;
+				if(expectedX < 0) { expectedX += dimension; } if(expectedY < 0) { expectedY += dimension; }
+				for(int sy = 0; sy < 2; sy++) { for(int sx = 0; sx < 2; sx++) {
+					uint32_t color;
+					assert(wrapping.Sample({x, y, 0, true}, 0, 0, sx, sy, 2, color));
+					assert(color == wrapping.Artwork[(expectedY * 2 + sy) * wrapping.Width + expectedX * 2 + sx]);
+				} }
+			}
+		}
+	}
 	crossWord.DecodedRows = {{63, 0, 0, 0, 1, 1, {0xFFFF0000}}, {64, 1, 0, 0, 1, 1, {0}}};
 	crossWord.Pixels[0].VisibleSprite = 63; crossWord.Pixels[0].BackgroundColor = 0x7C00;
 	crossWord.Pixels[1].AllowReplacementSprite(64); crossWord.Pixels[2].AllowReplacementSprite(32);
@@ -117,6 +275,10 @@ int main(int argc, char** argv)
 	boundedGroup.ArtworkWidth = boundedGroup.ArtworkHeight = 1; boundedGroup.Artwork = {0xFF00FF00};
 	boundedGroup.Members = {{0, 0, 2, 1, -1, {0xFFFF0000, 0xFFFF0000}}};
 	MetaSpriteCompositor boundedCompositor; boundedCompositor.SetGroups({boundedGroup});
+	MetaSpriteFrame malformedFrame(4, 1);
+	malformedFrame.Pixels.resize(3);
+	uint32_t malformedOriginal[] = {0xFF0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+	assert(boundedCompositor.Apply(malformedOriginal, 4, 1, malformedFrame) == malformedOriginal);
 	uint32_t boundedOriginal[] = {0xFF0000FF, 0xFFFF0000, 0xFFFF0000, 0xFF0000FF};
 	const auto* boundedOutput = boundedCompositor.Apply(boundedOriginal, 4, 1, boundedFrame);
 	assert(boundedOutput[0] == boundedOriginal[0] && boundedOutput[1] == 0xFF00FF00 && boundedOutput[2] == 0xFF0000FF && boundedOutput[3] == boundedOriginal[3]);
@@ -124,6 +286,34 @@ int main(int argc, char** argv)
 	uint32_t boundedCrop[] = {0xFFFF0000, 0xFFFF0000};
 	boundedOutput = boundedCompositor.Apply(boundedCrop, 2, 1, boundedFrame, 1);
 	assert(boundedOutput[0] == 0xFF0000FF && boundedOutput[1] == 0xFF00FF00);
+	MetaSpriteReplacement alternateGroup = boundedGroup;
+	alternateGroup.ArtworkOriginX = 0;
+	MetaAlternateArtwork alternate;
+	alternate.ArtworkOriginX = -1; alternate.ArtworkScale = 2;
+	alternate.ArtworkWidth = alternate.ArtworkHeight = 2;
+	alternate.Artwork.assign(4, 0xFFFFFFFF);
+	alternate.MemoryConditions = {{0x2345, 1, 0xFF}};
+	alternateGroup.AlternateArtwork = {alternate};
+	alternate.Artwork.assign(4, 0xFFFF0000);
+	alternateGroup.AlternateArtwork.push_back(alternate);
+	MetaSpriteCompositor alternateCompositor; alternateCompositor.SetGroups({alternateGroup});
+	auto alternateOutput = alternateCompositor.Apply(boundedOriginal, 4, 1, boundedFrame);
+	assert(alternateCompositor.GetOutputScale() == 1 && alternateOutput[1] == 0xFF00FF00);
+	int alternateReads = 0;
+	alternateCompositor.CaptureMemorySnapshot(boundedFrame, [&](uint32_t address, uint8_t& value) {
+		assert(address == 0x2345); alternateReads++; value = 1; return true;
+	});
+	assert(alternateReads == 1);
+	alternateOutput = alternateCompositor.Apply(boundedOriginal, 4, 1, boundedFrame);
+	assert(alternateCompositor.GetOutputScale() == 2 && alternateOutput[2] == 0xFF0000FF && alternateOutput[4] == 0xFFFFFFFF);
+	alternateGroup.AlternateArtwork[0].Artwork[0] = 0;
+	alternateGroup.AlternateArtwork[0].Artwork[1] = 0x80FFFFFF;
+	alternateCompositor.SetGroups({alternateGroup});
+	alternateOutput = alternateCompositor.Apply(boundedOriginal, 4, 1, boundedFrame);
+	assert(alternateOutput[4] == 0xFF0000FF && alternateOutput[5] == 0xFF8080FF);
+	boundedFrame.MemorySnapshot[0x2345] = 2;
+	alternateOutput = alternateCompositor.Apply(boundedOriginal, 4, 1, boundedFrame);
+	assert(alternateCompositor.GetOutputScale() == 1 && alternateOutput[1] == 0xFF00FF00);
 	MetaSpritePixel gbaComposition;
 	gbaComposition.GbaObjectSprite = 0; gbaComposition.GbaObjectPriority = 1; gbaComposition.GbaObjectColor = 31;
 	gbaComposition.GbaBackdropColor = 0x7C00;
@@ -170,6 +360,34 @@ int main(int argc, char** argv)
 		assert(rejected);
 	}
 	MetaBackgroundReplacement background;
+	if(argc > 1) {
+		std::ifstream input(std::string(argv[1]) + ".background.conditions", std::ios::binary);
+		assert(input.good());
+		std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+		auto layers = MetaBackgroundPacket(bytes.data(), bytes.size()).Parse();
+		assert(layers.size() == 1 && layers[0].MemoryConditions.size() == 1);
+		assert(layers[0].MemoryConditions[0].Address == 0xC123 && layers[0].MemoryConditions[0].Value == 0xA7 && layers[0].MemoryConditions[0].Mask == 0xF0);
+		MetaSpriteFrame conditionalFrame(2, 2);
+		for(auto& pixel : conditionalFrame.Pixels) { pixel.BackgroundSample = {-3, 5, 1, true}; }
+		MetaSpriteCompositor conditionalCompositor; conditionalCompositor.SetReplacements({}, layers);
+		uint32_t native[] = {0xFF0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+		assert(conditionalCompositor.Apply(native, 2, 2, conditionalFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; }) == native);
+		conditionalCompositor.CaptureMemorySnapshot(conditionalFrame, [](uint32_t address, uint8_t& value) {
+			assert(address == 0xC123); value = 0xAF; return true;
+		});
+		assert(conditionalCompositor.Apply(native, 2, 2, conditionalFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; })[1] == 0xFF00807F);
+		conditionalFrame.MemorySnapshot[0xC123] = 0xB0;
+		assert(conditionalCompositor.Apply(native, 2, 2, conditionalFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; }) == native);
+		for(size_t length = 0; length < bytes.size(); length++) {
+			bool invalid = false;
+			try { MetaBackgroundPacket(bytes.data(), length).Parse(); } catch(const std::runtime_error&) { invalid = true; }
+			assert(invalid);
+		}
+		bytes[bytes.size() - 3] = 1;
+		bool invalid = false;
+		try { MetaBackgroundPacket(bytes.data(), bytes.size()).Parse(); } catch(const std::runtime_error&) { invalid = true; }
+		assert(invalid);
+	}
 	background.Id = 1; background.Layer = 1; background.Width = 4; background.Height = 4; background.Scale = 2;
 	background.X = 3; background.Y = 5; background.WrapX = background.WrapY = true;
 	for(uint32_t i = 0; i < 16; i++) { background.Artwork.push_back(0x80000000 | i); }
@@ -203,6 +421,30 @@ int main(int argc, char** argv)
 	assert(backgroundOutput[2] == 0xFF0000FF && backgroundOutput[6] == 0xFF0000FF); // Winning OBJ.
 	assert(backgroundOutput[8] == 0xFF0000FF && backgroundOutput[12] == 0xFF0000FF); // Invalid capture.
 	auto unchangedBackground = backgroundOutput;
+	MetaSpriteCompositor gatedBackground;
+	compositionLayer.MemoryConditions = {{0x1234, 1, 0xFF}};
+	gatedBackground.SetReplacements({}, {compositionLayer});
+	uint32_t nativeBackground[] = {0xFF0000FF, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+	assert(gatedBackground.Apply(nativeBackground, 2, 2, backgroundFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; }) == nativeBackground);
+	int backgroundReads = 0;
+	gatedBackground.CaptureMemorySnapshot(backgroundFrame, [&](uint32_t address, uint8_t& value) {
+		assert(address == 0x1234); backgroundReads++; value = 1; return true;
+	});
+	assert(backgroundReads == 1);
+	assert(gatedBackground.Apply(nativeBackground, 2, 2, backgroundFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; })[1] == 0xFF00807F);
+	assert(gatedBackground.GetOutputScale() == 2);
+	MetaSpriteFrame conditionalGba(2, 2); conditionalGba.GbaColorEffects = true;
+	conditionalGba.MemorySnapshot = backgroundFrame.MemorySnapshot;
+	for(auto& pixel : conditionalGba.Pixels) {
+		pixel.GbaFallbackCaptured = true; pixel.GbaBackdropColor = 0x7C00;
+		pixel.GbaBackgroundSamples[0] = {0, 0, 0, true};
+		pixel.GbaBackgroundLayers[0].Priority = 3;
+	}
+	assert(gatedBackground.Apply(nativeBackground, 2, 2, conditionalGba)[1] == 0xFF00807F);
+	conditionalGba.MemorySnapshot[0x1234] = 2;
+	assert(gatedBackground.Apply(nativeBackground, 2, 2, conditionalGba) == nativeBackground && gatedBackground.GetOutputScale() == 1);
+	backgroundFrame.MemorySnapshot[0x1234] = 2;
+	assert(gatedBackground.Apply(nativeBackground, 2, 2, backgroundFrame, 0, 0, [](uint16_t) { return 0xFF0000FF; }) == nativeBackground);
 	backgroundFrame.GbaColorEffects = true;
 	assert(!MetaBackgroundCompositor::Apply(backgroundFrame, {compositionLayer}, 2, backgroundOutput) && backgroundOutput == unchangedBackground);
 	MetaSpritePixel snesEffect;
@@ -350,6 +592,80 @@ int main(int argc, char** argv)
 	assert(layeredCompositor.Apply(&layeredOriginal, 1, 1, gbaLayers)[0] == 0xFF7FFF7F);
 	layeredPixel.SnesSubtract = true;
 	assert(layeredCompositor.Apply(&layeredOriginal, 1, 1, gbaLayers)[0] == 0xFF000000);
+	MetaSpriteFrame snesBackground(1, 1);
+	snesBackground.SnesColorEffects = true;
+	auto& sb = snesBackground.Pixels[0];
+	sb.SnesFallbackCaptured = true; sb.Brightness = 15;
+	sb.SpriteColor = sb.SnesFallbackMainColor = 0x7C00;
+	sb.BackgroundSample = {0, 0, 0, true};
+	MetaBackgroundReplacement snesBg;
+	snesBg.Id = 1; snesBg.Width = snesBg.Height = 1; snesBg.Artwork = {0xFF00FF00};
+	MetaSpriteCompositor snesBgCompositor;
+	snesBgCompositor.SetBackgroundLayers({snesBg});
+	uint32_t snesBgOriginal = 0xFF0000FF;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground)[0] == 0xFF00FF00);
+	snesBg.Artwork[0] = 0x8000FF00; snesBgCompositor.SetBackgroundLayers({snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground)[0] == 0xFF00807F);
+	sb.VisibleSprite = 0; sb.SpriteColor = 31;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground)[0] == 0xFFFF0000);
+	snesBg.Layer = 1; snesBg.Artwork[0] = 0xFFFFFFFF;
+	sb.SnesSubBackgroundSample = {0, 0, 1, true}; sb.SecondaryColor = 0x7C00;
+	sb.SnesMathEnabled = sb.SnesUseSubscreen = sb.SnesAddSubscreen = sb.SnesHalf = true;
+	snesBgCompositor.SetBackgroundLayers({snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground)[0] == 0xFFFF7F7F);
+	snesBg.MemoryConditions = {{0x1234, 7, 0xFF}}; snesBgCompositor.SetBackgroundLayers({snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground) == &snesBgOriginal);
+	snesBackground.MemorySnapshot[0x1234] = 7;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBackground)[0] == 0xFFFF7F7F);
+	MetaSpriteFrame snesBgHole(1, 1);
+	MetaSpriteFrame snesLayerHole(1, 1);
+	snesLayerHole.SnesColorEffects = true; snesLayerHole.SnesBackgrounds.resize(1);
+	auto& slp = snesLayerHole.Pixels[0]; slp.Brightness = 15; slp.SnesFallbackCaptured = true; slp.SpriteColor = 0x7C00;
+	auto& slb = snesLayerHole.SnesBackgrounds[0]; slb.Captured = true; slb.BackdropColor = 0x7C00;
+	slb.Layers[0].Sample = {0, 0, 0, true}; slb.Layers[0].Priority = 3; slb.Layers[0].Main = true;
+	snesBg.Layer = 0; snesBg.MemoryConditions.clear(); snesBg.Artwork[0] = 0xFF00FF00;
+	snesBgCompositor.SetBackgroundLayers({snesBg});
+	// A completely transparent native BG still supplies coordinates for its PNG.
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFF00FF00);
+	snesBg.Artwork[0] = 0x8000FF00; snesBgCompositor.SetBackgroundLayers({snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFF00807F);
+	// A lower opaque native layer is the alpha fallback, not the backdrop.
+	slb.Layers[1].Sample = {0, 0, 1, true}; slb.Layers[1].Priority = 1;
+	slb.Layers[1].Opaque = slb.Layers[1].Main = true; slb.Layers[1].Color = 31;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFF7F8000);
+	// Native OBJ priority occludes a lower BG PNG; a higher BG PNG occludes OBJ.
+	slp.VisibleSprite = 0; slp.SpriteColor = 31; slb.MainPriority = 4;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFFFF0000);
+	slb.Layers[0].Priority = 5;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFF7F8000);
+	slb.Layers[0].Main = false;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFFFF0000);
+	// The same transparent layer can participate exclusively on the subscreen.
+	slb.Layers[0].Sub = true; slp.SnesMathEnabled = slp.SnesAddSubscreen = slp.SnesHalfRequested = true;
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesLayerHole)[0] == 0xFF7F403F);
+	snesBgHole.SnesColorEffects = true;
+	snesBgHole.DecodedRows = {{96, 0, 0, 0, 1, 1, {0}}};
+	auto& sbh = snesBgHole.Pixels[0];
+	sbh.Brightness = 15; sbh.SnesFallbackCaptured = true;
+	sbh.SpriteColor = sbh.SnesFallbackMainColor = 0x7C00;
+	sbh.BackgroundSample = {0, 0, 0, true};
+	sbh.SnesCoverage.push_back({96, 0, 1, 0, true, false, false});
+	snesBg.Layer = 0; snesBg.Artwork[0] = 0xFF00FF00; snesBg.MemoryConditions.clear();
+	holeGroup.Artwork = {0};
+	snesBgCompositor.SetReplacements({holeGroup}, {snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBgHole)[0] == 0xFF00FF00);
+	holeGroup.Artwork[0] = 0x80FFFFFF;
+	snesBgCompositor.SetReplacements({holeGroup}, {snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBgHole)[0] == 0xFF80FF80);
+	sbh.BackgroundSample.Valid = false; sbh.SnesSubBackgroundSample = {0, 0, 0, true};
+	sbh.VisibleSprite = 0; sbh.SpriteColor = 31; sbh.SecondaryColor = sbh.SnesFallbackSubColor = 0x7C00;
+	sbh.SnesCoverage[0].Main = false; sbh.SnesCoverage[0].Sub = true;
+	sbh.SnesFallbackSubPriority = 1;
+	sbh.SnesMathEnabled = sbh.SnesUseSubscreen = sbh.SnesAddSubscreen = sbh.SnesHalf = sbh.SnesHalfRequested = true;
+	holeGroup.Artwork[0] = 0; snesBgCompositor.SetReplacements({holeGroup}, {snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBgHole)[0] == 0xFF7F7F00);
+	holeGroup.Artwork[0] = 0x80FFFFFF; snesBgCompositor.SetReplacements({holeGroup}, {snesBg});
+	assert(snesBgCompositor.Apply(&snesBgOriginal, 1, 1, snesBgHole)[0] == 0xFFBF7F40);
 	for(int y = 0; y < 16; y++) {
 		slices.DecodedRows.push_back({5, 0, 0, y, 32, 16, std::vector<uint32_t>(16, 0xFFFF0000), 0});
 	}
@@ -561,6 +877,28 @@ int main(int argc, char** argv)
 		try { MetaSpritePacket(conditionPacket.data(), conditionPacket.size()).Parse(); } catch(const std::runtime_error&) { invalid = true; }
 		assert(invalid);
 		std::cout << "PASS: MSP1 compatibility, MSP2 condition transfer and truncated/invalid condition rejection.\n";
+		std::ifstream alternateFile(std::string(argv[1]) + ".alternates", std::ios::binary);
+		assert(alternateFile.good());
+		std::vector<uint8_t> alternatePacket((std::istreambuf_iterator<char>(alternateFile)), std::istreambuf_iterator<char>());
+		auto alternates = MetaSpritePacket(alternatePacket.data(), alternatePacket.size()).Parse();
+		assert(alternates.size() == 1 && alternates[0].AlternateArtwork.size() == 1);
+		const auto& image = alternates[0].AlternateArtwork[0];
+		assert(image.ArtworkScale == 2 && image.ArtworkWidth == 16 && image.ArtworkHeight == 16 && image.ArtworkOriginX == 1 && image.ArtworkOriginY == 2);
+		compositor.SetGroups(alternates);
+		compositor.CaptureMemorySnapshot(frame, [](uint32_t address, uint8_t& value) { assert(address == 0x2345); value = 7; return true; });
+		assert(compositor.Apply(original.data(), 8, 8, frame)[0] == 0xFFFFFFFF && compositor.GetOutputScale() == 2);
+		frame.MemorySnapshot[0x2345] = 8;
+		assert(compositor.Apply(original.data(), 8, 8, frame)[0] == 0xFF00FF00 && compositor.GetOutputScale() == 1);
+		for(size_t length = 0; length < alternatePacket.size(); length++) {
+			bool alternateInvalid = false;
+			try { MetaSpritePacket(alternatePacket.data(), length).Parse(); } catch(const std::runtime_error&) { alternateInvalid = true; }
+			assert(alternateInvalid);
+		}
+		alternatePacket.push_back(0);
+		invalid = false;
+		try { MetaSpritePacket(alternatePacket.data(), alternatePacket.size()).Parse(); } catch(const std::runtime_error&) { invalid = true; }
+		assert(invalid);
+		std::cout << "PASS: MSP3 alternate transfer, selection/fallback, origins/scale, and truncation rejection.\n";
 	}
 	std::cout << "PASS: native graphic reconstruction, content matching, visibility/priority masks, transparent suppression, alpha blend, incomplete capture fallback, disable fallback.\n";
 }

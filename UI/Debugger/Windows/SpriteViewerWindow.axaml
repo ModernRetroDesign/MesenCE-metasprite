@@ -62,11 +62,18 @@
 							<TextBlock Text="Ctrl-click sprites on screen or in the grid." TextWrapping="Wrap" />
 							<TextBlock Text="Drag to select sprites; Ctrl-click to toggle" />
 							<Button Content="Clear sprite selection" Click="OnClearMetaSelection" />
+							<Button Content="Reload saved groups" Click="OnReloadMetaGroups" ToolTip.Tip="Reload definitions from disk, discarding unsaved group edits and the current sprite selection." />
 							<TextBlock Text="Groups recognized in live preview" />
 							<TextBlock Text="{Binding MetaMatchStatus}" TextWrapping="Wrap" />
 							<Button Content="Create meta group" Click="OnCreateMetaGroup" ToolTip.Tip="Create the group, save and assign its transparent PNG in the default pack folder, and enable gameplay replacement." />
 							<Button Content="Add selection as animation pose" Click="OnCreateMetaPose" />
-							<ComboBox ItemsSource="{Binding MetaGroups}" SelectedItem="{Binding SelectedMetaGroup}" />
+							<ComboBox ItemsSource="{Binding MetaGroups}" SelectedItem="{Binding SelectedMetaGroup}">
+								<ComboBox.ItemTemplate>
+									<DataTemplate x:DataType="du:MetaSpriteGroup">
+										<TextBlock Text="{Binding DisplayName}" />
+										</DataTemplate>
+								</ComboBox.ItemTemplate>
+							</ComboBox>
 							<TextBlock Text="Earlier groups have priority when matches overlap." TextWrapping="Wrap" />
 							<Button Content="Move group earlier" Click="OnMoveMetaGroupEarlier" />
 							<Button Content="Move group later" Click="OnMoveMetaGroupLater" />
@@ -80,13 +87,23 @@
 								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.OriginX}" />
 								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.OriginY}" />
 							</StackPanel>
-							<CheckBox Content="Click preview to set origin" IsChecked="{Binding SetMetaOrigin}" />
 							<Button Content="Align animation pose origins" Click="OnAlignMetaPoseOrigins" />
-							<TextBlock Text="Replacement scale / origin X / Y" />
-							<NumericUpDown Minimum="1" Maximum="10" Value="{Binding SelectedMetaGroup.ReplacementScale}" />
+							<Button Content="Align PNG pose origins" Click="OnAlignMetaPoseArtworkOrigins" />
 							<StackPanel Orientation="Horizontal" Spacing="4">
-								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginX}" />
-								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginY}" />
+								<Button Name="metaArtworkPrevious" Content="Previous" Click="OnPreviousMetaArtwork" IsEnabled="{Binding HasMetaAlternates}" />
+								<Button Name="metaArtworkNext" Content="Next" Click="OnNextMetaArtwork" IsEnabled="{Binding HasMetaAlternates}" />
+								<Button Content="+" Width="28" MinWidth="28" Padding="0" Click="OnAddMetaAlternate" IsEnabled="{Binding HasMetaGroup}" ToolTip.Tip="Add an alternate PNG. Configure its CPU memory conditions to activate it." />
+								<Button Name="metaArtworkRemove" Content="−" Width="28" MinWidth="28" Padding="0" Click="OnRemoveMetaAlternate" IsEnabled="{Binding ViewingMetaAlternate}" ToolTip.Tip="Remove the displayed alternate from this group. Its PNG file is retained." />
+							</StackPanel>
+							<TextBlock Text="{Binding MetaArtworkLabel}" TextWrapping="Wrap" />
+							<Grid>
+							<StackPanel Name="metaDefaultArtworkPanel" Spacing="4" IsVisible="{Binding !ViewingMetaAlternate}">
+							<TextBlock Text="Click preview to set origin" />
+							<TextBlock Text="Replacement scale / origin X / Y" />
+							<NumericUpDown Name="metaReplacementScale" Minimum="1" Maximum="10" Value="{Binding SelectedMetaGroup.ReplacementScale}" />
+							<StackPanel Orientation="Horizontal" Spacing="4">
+								<NumericUpDown Name="metaReplacementOriginX" Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginX}" />
+								<NumericUpDown Name="metaReplacementOriginY" Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaGroup.ReplacementOriginY}" />
 							</StackPanel>
 							<Viewbox Width="200" Height="160" Stretch="Uniform">
 								<Canvas Name="metaCanvas" Width="{Binding MetaPreviewWidth}" Height="{Binding MetaPreviewHeight}" Background="#404040" PointerPressed="OnMetaOriginPressed">
@@ -95,6 +112,36 @@
 									<Border Background="Red" Height="1" Width="{Binding MetaPreviewWidth}" Canvas.Top="{Binding MetaPreviewOriginY}" IsHitTestVisible="False" />
 								</Canvas>
 							</Viewbox>
+							</StackPanel>
+							<StackPanel Name="metaAlternateArtworkPanel" Spacing="4" IsVisible="{Binding ViewingMetaAlternate}">
+								<TextBox PlaceholderText="Alternate PNG name" Text="{Binding SelectedMetaAlternate.Name}" />
+								<TextBlock Text="Alternate scale / origin X / Y" />
+								<NumericUpDown Name="metaAlternateScale" Minimum="1" Maximum="10" Value="{Binding SelectedMetaAlternate.Scale}" />
+								<StackPanel Orientation="Horizontal" Spacing="4">
+									<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaAlternate.OriginX}" />
+									<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaAlternate.OriginY}" />
+								</StackPanel>
+								<Viewbox Width="200" Height="160" Stretch="Uniform">
+									<Canvas Name="metaAlternateCanvas" Width="{Binding MetaAlternatePreviewWidth}" Height="{Binding MetaAlternatePreviewHeight}" Background="#404040" PointerPressed="OnMetaAlternateOriginPressed">
+										<Image Source="{Binding MetaAlternatePreview}" Width="{Binding MetaAlternatePreviewWidth}" Height="{Binding MetaAlternatePreviewHeight}" />
+										<Border Background="Red" Width="1" Height="{Binding MetaAlternatePreviewHeight}" Canvas.Left="{Binding SelectedMetaAlternate.OriginX}" IsHitTestVisible="False" />
+										<Border Background="Red" Height="1" Width="{Binding MetaAlternatePreviewWidth}" Canvas.Top="{Binding SelectedMetaAlternate.OriginY}" IsHitTestVisible="False" />
+									</Canvas>
+								</Viewbox>
+								<TextBlock Text="Click preview to set origin" />
+								<TextBlock Text="Alternate CPU memory conditions (all must match)" />
+								<TextBox Text="{Binding MetaAlternateConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 = 01 / FF" />
+								<TextBlock Text="Blank conditions keep this alternate inactive. First matching alternate wins; otherwise the default PNG is used." TextWrapping="Wrap" />
+								<StackPanel Orientation="Horizontal" Spacing="4">
+									<Button Content="Earlier" Click="OnMoveMetaAlternateEarlier" ToolTip.Tip="Increase this alternate's matching priority." />
+									<Button Content="Later" Click="OnMoveMetaAlternateLater" ToolTip.Tip="Decrease this alternate's matching priority." />
+								</StackPanel>
+							</StackPanel>
+							</Grid>
+							<TextBlock Text="Group CPU memory conditions (hex, all must match)" />
+							<TextBox Text="{Binding MetaMemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap"
+								PlaceholderText="C000 = 01 / FF" />
+							<TextBlock Text="One ADDRESS = VALUE / MASK per line. Mask defaults to FF. Blank means always enabled." TextWrapping="Wrap" />
 							<Button Content="Save group edits" Click="OnSaveMetaGroups" />
 							<CheckBox Content="Enable group in gameplay" IsChecked="{Binding SelectedMetaGroup.Enabled}" />
 							<Button Content="Apply gameplay replacements" Click="OnApplyMetaReplacements" />

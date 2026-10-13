@@ -691,6 +691,13 @@ template<class T> void NesPpu<T>::LoadTileInfo()
 			_highBitShift |= _tile.HighByte;
 			_lowBitShift &= 0xFF00;
 			_lowBitShift |= _tile.LowByte;
+			if(_metaFrame) {
+				for(int x = 0; x < 8; x++) {
+					MetaBackgroundSample& sample = _metaBackgroundShift[(_metaBackgroundShiftHead + 8 + x) & 15];
+					sample = _metaBackgroundFetch;
+					sample.X += x;
+				}
+			}
 
 			_previousTilePalette = _currentTilePalette;
 			_currentTilePalette = _tile.PaletteOffset;
@@ -699,6 +706,12 @@ template<class T> void NesPpu<T>::LoadTileInfo()
 
 		case 1: {
 			uint8_t tileIndex = ReadVram(GetNameTableAddr());
+			if(_metaFrame) {
+				_metaBackgroundFetch.X = ((_videoRamAddr & 0x1F) << 3) | ((_videoRamAddr & 0x400) ? 256 : 0);
+				_metaBackgroundFetch.Y = (((_videoRamAddr >> 5) & 0x1F) << 3) + ((_videoRamAddr >> 12) & 7) + ((_videoRamAddr & 0x800) ? 240 : 0);
+				_metaBackgroundFetch.Layer = 0;
+				_metaBackgroundFetch.Valid = true;
+			}
 			_tile.TileAddr = (tileIndex << 4) | (_videoRamAddr >> 12) | _control.BackgroundPatternAddr;
 			((T*)this)->StoreTileInformation(); //Used by HD packs
 			break;
@@ -849,6 +862,11 @@ template<class T> void NesPpu<T>::ShiftTileRegisters()
 {
 	_lowBitShift <<= 1;
 	_highBitShift <<= 1;
+	if(_metaFrame) {
+		// Advance the coordinate shifter without copying fifteen records per dot.
+		_metaBackgroundShiftHead = (_metaBackgroundShiftHead + 1) & 15;
+		_metaBackgroundShift[(_metaBackgroundShiftHead + 15) & 15].Valid = false;
+	}
 
 	//The high bit shifter is filled with 1s as it shifts (the low bit shifter is not)
 	_highBitShift |= 1;
@@ -876,8 +894,22 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 		captured->BackgroundColorIndex = backgroundColor;
 		captured->BackgroundColor = (_paletteRam[backgroundColor ? bgIndex : 0] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
 		captured->VisibleSprite = -1;
+		if(_cycle > _minimumDrawBgCycle && _emulatorBgEnabled && _prevRenderingEnabled) {
+			captured->BackgroundSample = _metaBackgroundShift[(_metaBackgroundShiftHead + offset) & 15];
+		}
 	}
 	uint8_t spriteColor = 0;
+	auto captureReplacementCoverage = [&]() {
+		if(!captured || !_prevRenderingEnabled || !_mask.SpritesEnabled || !_emulatorSpritesEnabled || _cycle <= _minimumDrawSpriteCycle) { return; }
+		for(int i = 0; i < _spriteCount; i++) {
+			int id = _metaFetchedSpriteIds[i];
+			const auto& candidate = _spriteTiles[i];
+			int x = (int)_cycle - candidate.SpriteX - 1;
+			if(id < 0 || id >= 64 || x < 0 || x >= 8 || (backgroundColor != 0 && candidate.BackgroundPriority)) { continue; }
+			if(spriteColor != 0 && spriteIndex >= 0 && i > spriteIndex) { continue; }
+			captured->ReplacementEligibleSprites |= uint64_t(1) << id;
+		}
+	};
 	if(_processSprites && _prevRenderingEnabled) {
 		//If the dot is skipped, all sprite shifters are active on the first dot of the scanline.
 		uint8_t remainingShifters = _dotSkipped ? 0xFF : _activeSpriteShifters;
@@ -923,6 +955,7 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 				}
 			}
 
+			captureReplacementCoverage();
 			if(spriteColor != 0) {
 				if(_sprite0Visible && spriteIndex == 0 && spriteColor != 0 && spriteBgColor != 0 && _cycle != 256 && _mask.BackgroundEnabled && !_statusFlags.Sprite0Hit && _cycle > _minimumDrawSpriteStandardCycle) {
 					//"The hit condition is basically sprite zero is in range AND the first sprite output unit is outputting a non-zero pixel AND the background drawing unit is outputting a non-zero pixel."
@@ -946,6 +979,7 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 			}
 		}
 	}
+	captureReplacementCoverage();
 	return ((offset + ((_cycle - 1) & 0x07) < 8) ? _previousTilePalette : _currentTilePalette) + backgroundColor;
 }
 
@@ -1464,7 +1498,7 @@ template<class T> void NesPpu<T>::ProcessScanlineFirstCycle()
 	if(++_scanline > _vblankEnd) {
 		_lastUpdatedPixel = -1;
 		_scanline = -1;
-		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(256, 240) : nullptr;
+		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 240) : nullptr;
 
 		//Force prerender scanline sprite fetches to load the dummy $FF tiles (fixes shaking in Ninja Gaiden 3 stage 1 after beating boss)
 		_spriteCount = 0;

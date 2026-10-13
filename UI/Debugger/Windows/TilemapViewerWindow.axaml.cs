@@ -68,14 +68,17 @@ namespace Mesen.Debugger.Windows
 		{
 			_model.Config.ShowSettingsPanel = !_model.Config.ShowSettingsPanel;
 		}
+		private async void OnReplaceMetaBackground(object? sender, RoutedEventArgs e) => await _model.BackgroundEditor.ReplaceBackgroundPng(this);
 		private async void OnImportMetaBackground(object? sender, RoutedEventArgs e)
 		{
 			var target = _model.GetBackgroundImportLayer();
 			if(target.Layer is not int layer) { _model.BackgroundEditor.MetaStatus = target.Context; return; }
 			await _model.BackgroundEditor.ImportMetaBackground(this, layer, target.Context);
 		}
+		private async void OnExportMetaBackground(object? sender, RoutedEventArgs e) => await _model.ExportBackgroundPng(this);
 		private void OnRemoveMetaBackground(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.RemoveMetaBackground();
 		private void OnSaveMetaBackgrounds(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.SaveMetaGroups();
+		private void OnReloadMetaBackgrounds(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.Load();
 
 		public void ProcessNotification(NotificationEventArgs e)
 		{

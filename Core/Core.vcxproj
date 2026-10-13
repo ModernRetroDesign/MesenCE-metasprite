@@ -702,6 +702,7 @@
     <ClInclude Include="Shared\Audio\PcmReader.h" />
     <ClInclude Include="Netplay\PlayerListMessage.h" />
     <ClInclude Include="Debugger\PpuTools.h" />
+    <ClInclude Include="Debugger\ViewerRefreshSchedule.h" />
     <ClInclude Include="Debugger\Profiler.h" />
     <ClInclude Include="Shared\RecordedRomTest.h" />
     <ClInclude Include="SNES\RegisterHandlerB.h" />

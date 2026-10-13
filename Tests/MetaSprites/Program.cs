@@ -36,6 +36,11 @@ pose.LinkAsPoseOf(group);
 pose.PoseName = "Walking";
 Check(group.PoseFamilyId == 7 && pose.PoseFamilyId == 7, "Animation poses must share a persistent family.");
 Check(pose.OriginX == 3 && pose.OriginY == 5, "Different pose bounds must preserve the bottom-center anchor offset.");
+pose.ReplacementScale = 4;
+pose.UseExportedArtwork("pose.png");
+Check(pose.Enabled && pose.ReplacementPath == "pose.png" && pose.ReplacementWidth == 6 && pose.ReplacementHeight == 5
+	&& pose.ReplacementScale == 1 && pose.ReplacementOriginX == pose.OriginX && pose.ReplacementOriginY == pose.OriginY,
+	"Newly exported poses must enable gameplay and use their native canvas and consistent anchor.");
 var anchor = new MetaSpriteGroup { Id = 20, PoseFamilyId = 20, Width = 9, Height = 12, OriginX = 2, OriginY = 10 };
 var sibling = new MetaSpriteGroup { Id = 21, PoseFamilyId = 20, Width = 14, Height = 8, ReplacementOriginX = 9, ReplacementOriginY = 11 };
 var unrelated = new MetaSpriteGroup { Id = 22, PoseFamilyId = 22, OriginX = 3, OriginY = 4 };
@@ -50,6 +55,15 @@ Check(unrelated.OriginX == 3 && unrelated.OriginY == 4 && sibling.ReplacementOri
 	"Pose alignment must preserve other families and independent artwork anchors.");
 Check(alignmentPack.AlignPoseOrigins(new MetaSpriteGroup { PoseFamilyId = 20 }) == 0,
 	"An external group must not change a pack's pose origins.");
+anchor.ReplacementPath = "anchor.png"; anchor.ReplacementWidth = 24; anchor.ReplacementHeight = 32;
+anchor.ReplacementScale = 2; anchor.ReplacementOriginX = 4; anchor.ReplacementOriginY = 13;
+sibling.ReplacementPath = "sibling.png"; sibling.ReplacementWidth = 80; sibling.ReplacementHeight = 40; sibling.ReplacementScale = 4;
+Check(alignmentPack.AlignPoseArtworkOrigins(anchor) == 1 && sibling.ReplacementOriginX == 8 && sibling.ReplacementOriginY == 7,
+	"PNG pose anchors must preserve native bottom-center offsets across independent canvas sizes and scales.");
+Check(anchor.ReplacementOriginX == 4 && anchor.ReplacementOriginY == 13 && sibling.OriginX == 5 && sibling.OriginY == 6
+	&& unrelated.OriginX == 3 && unrelated.OriginY == 4, "PNG alignment must preserve the source anchor, native anchors and other families.");
+Check(alignmentPack.AlignPoseArtworkOrigins(new MetaSpriteGroup { PoseFamilyId = 20 }) == 0,
+	"An external group must not align PNG anchors.");
 group.Members.Add(Sprite(0, 0, 0xFF102030));
 group.Members.Add(Sprite(1, 0, 0xFF405060));
 var candidates = new[] { Sprite(101, 50, 0xFF405060), Sprite(100, 50, 0xFF102030), Sprite(200, 60, 0xFF102030), Sprite(201, 60, 0xFF405060) };
@@ -153,6 +167,30 @@ try {
 Console.WriteLine("PASS: instance matching, independent artwork origins and scale, origin migration, reordered indices, incomplete/incorrect groups, persistence, ID allocation, ROM isolation, corrupt data rejection.");
 
 MetaSpritePack runtimePack = new();
+var editedConditions = MetaMemoryConditionText.Parse("$C000 = $01 / $0F\r\n0xC001 = 0xA0\nFFFFFFFF = FF / 00");
+var observableAlternate = new MetaAlternateArtwork();
+var alternateNotifications = new System.Collections.Generic.List<string?>();
+observableAlternate.PropertyChanged += (_, e) => alternateNotifications.Add(e.PropertyName);
+observableAlternate.Scale = 2; observableAlternate.OriginX = 3; observableAlternate.OriginY = -2;
+observableAlternate.Scale = 2; observableAlternate.OriginX = 3; observableAlternate.OriginY = -2;
+Check(alternateNotifications.SequenceEqual(new[] { "Scale", "OriginX", "OriginY" }), "Alternate preview bindings must observe changes without redundant notifications.");
+var observableBackground = new MetaBackgroundLayer();
+var backgroundNotifications = new System.Collections.Generic.List<string?>();
+observableBackground.PropertyChanged += (_, e) => backgroundNotifications.Add(e.PropertyName);
+observableBackground.ArtworkScale = 2; observableBackground.X = 3; observableBackground.Y = -2;
+observableBackground.ArtworkScale = 2; observableBackground.X = 3; observableBackground.Y = -2;
+Check(backgroundNotifications.SequenceEqual(new[] { "ArtworkScale", "X", "Y" }), "Background placement edits must notify the preview only when values change.");
+Check(editedConditions.Count == 3 && editedConditions[0].Address == 0xC000 && editedConditions[0].Mask == 15
+	&& editedConditions[1].Value == 160 && editedConditions[1].Mask == 255 && editedConditions[2].Address == uint.MaxValue,
+	"Condition editor must parse hex prefixes, optional masks, and 32-bit addresses.");
+var editedRoundtrip = MetaMemoryConditionText.Parse(MetaMemoryConditionText.Format(editedConditions));
+Check(editedRoundtrip.Count == 3 && editedRoundtrip[2].Mask == 0 && MetaMemoryConditionText.Parse(" \r\n").Count == 0, "Condition editor must preserve conditions and allow clearing.");
+foreach(string invalidCondition in new[] { "C000", "C000 = 100", "C000 = 01 / 100", "100000000 = 01", "C000 = GG", "C000 = 01 / FF extra",
+	string.Join('\n', Enumerable.Repeat("C000 = 01", 65)) }) {
+	bool invalidEditorInput = false;
+	try { MetaMemoryConditionText.Parse(invalidCondition); } catch(InvalidDataException) { invalidEditorInput = true; }
+	Check(invalidEditorInput, "Condition editor must reject invalid input before saving.");
+}
 var runtimeGroup = new MetaSpriteGroup { Id = 22, Width = 8, Height = 8, Enabled = true };
 runtimeGroup.Members.Add(new() { Width = 8, Height = 8, Pixels = Enumerable.Repeat(0xFFFF0000u, 64).ToArray() });
 runtimePack.Groups.Add(runtimeGroup);
@@ -177,10 +215,36 @@ using(var reader = new BinaryReader(new MemoryStream(conditionalPacket))) {
 Check(MetaMemoryCondition.Matches(runtimeGroup.MemoryConditions, address => address == 0x1234 ? (byte)0xA7 : (byte)3), "Masked expected bits must match native semantics.");
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".conditions", conditionalPacket); }
 runtimeGroup.MemoryConditions.Clear();
+runtimeGroup.AlternateArtwork.Add(new() { Path = "draft.png" });
+runtimeGroup.AlternateArtwork[0].Validate();
+byte[] draftPacket = MetaSpriteRuntimePacket.Create(runtimePack,
+	_ => (8, 8, Enumerable.Repeat(0xFF00FF00u, 64).ToArray()), _ => throw new Exception("Inactive alternate must not decode its PNG."));
+Check(BitConverter.ToUInt32(draftPacket, 0) == MetaSpriteRuntimePacket.Magic, "Conditionless alternate drafts must not enter gameplay packets.");
+runtimeGroup.AlternateArtwork.Clear();
+runtimeGroup.AlternateArtwork.Add(new() { Path = "alternate.png", Scale = 2, OriginX = 1, OriginY = 2,
+	MemoryConditions = new() { new() { Address = 0x2345, Value = 7 } } });
+byte[] alternatePacket = MetaSpriteRuntimePacket.Create(runtimePack,
+	_ => (8, 8, Enumerable.Repeat(0xFF00FF00u, 64).ToArray()),
+	_ => (16, 16, Enumerable.Repeat(0xFFFFFFFFu, 256).ToArray()));
+Check(BitConverter.ToUInt32(alternatePacket, 0) == MetaSpriteRuntimePacket.AlternateMagic, "Alternate PNGs require MSP3.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".alternates", alternatePacket); }
+runtimeGroup.AlternateArtwork.Clear();
 var bgTransfer = new MetaSpritePack();
 bgTransfer.BackgroundLayers.Add(new() { Id = 8, NativeLayer = 1, X = -3, Y = 5, Enabled = true, ArtworkWidth = 2, ArtworkHeight = 2, ArtworkScale = 2, WrapX = true });
-byte[] bgPacket = MetaBackgroundRuntimePacket.Create(bgTransfer, _ => (2, 2, new uint[] {0, 0x8000FF00, 0xFFFF0000, 0xFFFFFFFF}));
+Check(MetaBackgroundRuntimePacket.Create(bgTransfer, _ => throw new Exception("Conditionless backgrounds must not load PNG.")).Length == 8,
+	"Enabled backgrounds without configured CPU checks must serialize a clear packet.");
+bgTransfer.BackgroundLayers[0].MemoryConditions = new() { new() { Address = 0xC123, Value = 0xA7, Mask = 0xF0 } };
+byte[] conditionedBackground = MetaBackgroundRuntimePacket.Create(bgTransfer, _ => (2, 2, new uint[] {0, 0x8000FF00, 0xFFFF0000, 0xFFFFFFFF}));
+// Exercise the native legacy decoder separately from user-pack activation policy.
+byte[] bgPacket = conditionedBackground.AsSpan(0, conditionedBackground.Length - 16).ToArray();
+BitConverter.GetBytes(MetaBackgroundRuntimePacket.Magic).CopyTo(bgPacket, 0);
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background", bgPacket); }
+using(var reader = new BinaryReader(new MemoryStream(conditionedBackground))) {
+	Check(reader.ReadUInt32() == MetaBackgroundRuntimePacket.ConditionalMagic, "Conditioned backgrounds require MBG2.");
+	reader.BaseStream.Position = conditionedBackground.Length - 16;
+	Check(reader.ReadInt32() == 1 && reader.ReadUInt32() == 0xC123 && reader.ReadInt32() == 0xA7 && reader.ReadInt32() == 0xF0, "Background condition bytes must survive transfer.");
+}
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.conditions", conditionedBackground); }
 bgTransfer.BackgroundLayers[0].Enabled = false;
 Check(MetaBackgroundRuntimePacket.Create(bgTransfer, _ => throw new Exception("Disabled background must not load PNG.")).Length == 8, "Disabled backgrounds must serialize a clear packet.");
 Console.WriteLine("PASS: enabled-group packet serialization.");
@@ -202,8 +266,22 @@ Check(disabledPacket.Length == 8 && BitConverter.ToInt32(disabledPacket, 4) == 0
 Console.WriteLine("PASS: all-disabled pack clears runtime definitions without loading PNG assets.");
 if(args.Length >= 3 && args[1] == "--snes-ordering") {
 	GameplayFixture.RunSnesOrdering(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+	GameplayFixture.VerifyPackActivation(Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.holes-subscreen.sfc")), Path.GetFullPath(args[0]));
+}
+if(args.Length >= 3 && (args[1] == "--snes-frame-timing" || args[1] == "--snes-viewer-core-timing")) {
+	GameplayFixture.RunSnesFrameTiming(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), args[1] == "--snes-viewer-core-timing");
+}
+if(args.Length >= 3 && args[1] == "--gameplay-nes") {
+	GameplayFixture.RunNesSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}
+if(args.Length >= 3 && args[1] == "--gba-affine") {
+	GameplayFixture.RunGbaAffine(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
 }
 if(args.Length >= 3 && args[1] == "--gameplay") {
 	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 	GameplayFixture.VerifyPackActivation(Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), Path.GetFullPath(args[0]));
 }
+if(args.Length >= 3 && args[1] == "--viewer-refresh") {
+	GameplayFixture.RunViewerRefreshSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}
+if(args.Length >= 2 && args[1] == "--matcher-benchmark") { MatcherBenchmark.Run(); }

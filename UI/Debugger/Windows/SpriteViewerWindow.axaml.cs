@@ -114,6 +114,8 @@ namespace Mesen.Debugger.Windows
 		private void OnMoveMetaGroupEarlier(object? sender, RoutedEventArgs e) => _model.MoveMetaGroup(-1);
 		private void OnMoveMetaGroupLater(object? sender, RoutedEventArgs e) => _model.MoveMetaGroup(1);
 		private void OnAlignMetaPoseOrigins(object? sender, RoutedEventArgs e) => _model.AlignMetaPoseOrigins();
+		private void OnReloadMetaGroups(object? sender, RoutedEventArgs e) => _model.LoadMetaGroups();
+		private void OnAlignMetaPoseArtworkOrigins(object? sender, RoutedEventArgs e) => _model.AlignMetaPoseArtworkOrigins();
 		private void OnRemoveMetaGroup(object? sender, RoutedEventArgs e) => _model.RemoveMetaGroup();
 		private void OnUndoRemoveMetaGroup(object? sender, RoutedEventArgs e) => _model.UndoRemoveMetaGroup();
 		private void OnApplyMetaReplacements(object? sender, RoutedEventArgs e) => _model.SaveMetaGroups();
@@ -143,26 +145,33 @@ namespace Mesen.Debugger.Windows
 		}
 		private async void OnExportMetaGroup(object? sender, RoutedEventArgs e) => await _model.ExportMetaGroup(this);
 		private async void OnLoadMetaReplacement(object? sender, RoutedEventArgs e) => await _model.LoadMetaReplacement(this);
+		private async void OnAddMetaAlternate(object? sender, RoutedEventArgs e) => await _model.AddMetaAlternate(this);
+		private void OnPreviousMetaArtwork(object? sender, RoutedEventArgs e) => _model.BrowseMetaArtwork(-1);
+		private void OnNextMetaArtwork(object? sender, RoutedEventArgs e) => _model.BrowseMetaArtwork(1);
+		private void OnRemoveMetaAlternate(object? sender, RoutedEventArgs e) => _model.RemoveMetaAlternate();
+		private void OnMoveMetaAlternateEarlier(object? sender, RoutedEventArgs e) => _model.MoveMetaAlternate(-1);
+		private void OnMoveMetaAlternateLater(object? sender, RoutedEventArgs e) => _model.MoveMetaAlternate(1);
+		private void OnMetaAlternateOriginPressed(object? sender, PointerPressedEventArgs e)
+		{
+			if(_model.SelectedMetaAlternate == null || sender is not Canvas canvas || !e.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) { return; }
+			Point position = e.GetPosition(canvas);
+			_model.SetSelectedMetaAlternateOrigin((int)Math.Round(position.X), (int)Math.Round(position.Y));
+			e.Handled = true;
+		}
 		private void OnMetaOriginPressed(object? sender, PointerPressedEventArgs e)
 		{
-			if(!_model.SetMetaOrigin || _model.SelectedMetaGroup == null || sender is not Canvas canvas || !e.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) { return; }
+			if(_model.SelectedMetaGroup == null || sender is not Canvas canvas || !e.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) { return; }
 			Point position = e.GetPosition(canvas);
-			if(_model.PreviewUsesReplacement) {
-				_model.SelectedMetaGroup.ReplacementOriginX = (int)Math.Round(position.X);
-				_model.SelectedMetaGroup.ReplacementOriginY = (int)Math.Round(position.Y);
-			} else {
-				_model.SelectedMetaGroup.OriginX = (int)Math.Round(position.X);
-				_model.SelectedMetaGroup.OriginY = (int)Math.Round(position.Y);
-			}
-			_model.SaveMetaGroups();
-			RefreshMetaBindings();
+			_model.SetSelectedMetaOrigin((int)Math.Round(position.X), (int)Math.Round(position.Y));
 			e.Handled = true;
 		}
 		private void RefreshMetaBindings()
 		{
 			var group = _model.SelectedMetaGroup;
+			var alternate = _model.SelectedMetaAlternate;
 			_model.SelectedMetaGroup = null;
 			_model.SelectedMetaGroup = group;
+			if(alternate != null && group?.AlternateArtwork.Contains(alternate) == true) { _model.SelectedMetaAlternate = alternate; }
 		}
 
 		public void ProcessNotification(NotificationEventArgs e)

@@ -21,8 +21,64 @@
 #include "Core/SNES/SnesPpu.h"
 #include "Core/Shared/Video/VideoDecoder.h"
 #include "Core/Shared/Video/VideoRenderer.h"
+#include "Core/Shared/Video/SoftwareRenderer.h"
+#include "Core/Debugger/Debugger.h"
+#include "Core/Debugger/PpuTools.h"
+#include "Core/Debugger/MemoryAccessCounter.h"
+#include "Core/Debugger/DebugBreakHelper.h"
+#include "Core/Shared/NotificationManager.h"
 #include <mutex>
 #include <iostream>
+
+class MetaSpriteViewerRefreshListener : public INotificationListener
+{
+public:
+	std::atomic<uint32_t> First {0}, Second {0}, Unexpected {0};
+	void ProcessNotification(ConsoleNotificationType type, void* parameter) override
+	{
+		if(type != ConsoleNotificationType::ViewerRefresh) { return; }
+		uintptr_t id = reinterpret_cast<uintptr_t>(parameter);
+		if(id == 123) { First.fetch_add(1, std::memory_order_relaxed); }
+		else if(id == 456) { Second.fetch_add(1, std::memory_order_relaxed); }
+		else { Unexpected.fetch_add(1, std::memory_order_relaxed); }
+	}
+};
+
+static bool VerifyMetaViewerCounters(Emulator* emu)
+{
+	auto* debugger = emu->InternalGetDebugger();
+	DebugBreakHelper paused(debugger);
+	auto* counter = debugger->GetMemoryAccessCounter();
+	AddressCounters before[6] = {}, after[6] = {};
+	constexpr uint32_t start = 0x1FFF0;
+	counter->GetAccessCounts(start, 6, MemoryType::SnesWorkRam, before);
+	AddressInfo address {(int32_t)start, MemoryType::SnesWorkRam};
+	if(counter->ProcessMemoryRead<2>(address, 100) != ReadResult::Normal) { return false; }
+	address.Address = start + 1; counter->ProcessMemoryWrite<2>(address, 200);
+	address.Address = start + 2; counter->ProcessMemoryExec<4>(address, 300);
+	address.Address = start; counter->ProcessMemoryExec<3>(address, 400);
+	counter->GetAccessCounts(start, 6, MemoryType::SnesWorkRam, after);
+	for(int i = 0; i < 6; i++) {
+		if(after[i].ReadCounter != before[i].ReadCounter + (i < 2 ? 1 : 0)
+			|| after[i].ReadStamp != (i < 2 ? 100 : before[i].ReadStamp)
+			|| after[i].WriteCounter != before[i].WriteCounter + (i >= 1 && i <= 2 ? 1 : 0)
+			|| after[i].WriteStamp != (i >= 1 && i <= 2 ? 200 : before[i].WriteStamp)
+			|| after[i].ExecCounter != before[i].ExecCounter + (i < 3 ? 1 : 0) + (i >= 2 ? 1 : 0)
+			|| after[i].ExecStamp != (i < 3 ? 400 : 300)) { return false; }
+	}
+	address.Address = -1;
+	if(counter->ProcessMemoryRead(address, 500) != ReadResult::Normal) { return false; }
+	counter->ProcessMemoryWrite(address, 500); counter->ProcessMemoryExec(address, 500);
+	counter->ResetCounts();
+	counter->GetAccessCounts(start, 6, MemoryType::SnesWorkRam, after);
+	for(const auto& value : after) {
+		if(value.ReadCounter || value.WriteCounter || value.ExecCounter || value.ReadStamp || value.WriteStamp || value.ExecStamp) { return false; }
+	}
+	address = {(int32_t)start, MemoryType::SnesWorkRam};
+	counter->ProcessMemoryRead(address, 12345);
+	counter->GetAccessCounts(start, 1, MemoryType::SnesWorkRam, after);
+	return after[0].ReadCounter == 1 && after[0].ReadStamp == 12345;
+}
 
 class MetaSpriteTestRenderer final : public IRenderingDevice
 {
@@ -31,12 +87,24 @@ public:
 	uint32_t Width = 0, Height = 0, FrameNumber = 0;
 	vector<uint32_t> Pixels;
 	shared_ptr<const MetaSpriteFrame> Capture;
+	bool MeasureTiming = false;
+	vector<double> FrameIntervals;
+	uint32_t TimingFrame = 0, SkippedTimingFrames = 0;
+	std::chrono::steady_clock::time_point TimingPrevious;
 	void UpdateFrame(RenderedFrame& frame) override
 	{
 		std::lock_guard<std::mutex> lock(Mutex);
 		Width = frame.Width; Height = frame.Height; FrameNumber = frame.FrameNumber;
 		Pixels.assign((uint32_t*)frame.FrameBuffer, (uint32_t*)frame.FrameBuffer + Width * Height);
 		Capture = frame.MetaSprites;
+		if(MeasureTiming) {
+			auto now = std::chrono::steady_clock::now();
+			if(TimingFrame && frame.FrameNumber > TimingFrame) {
+				FrameIntervals.push_back(std::chrono::duration<double, std::milli>(now - TimingPrevious).count());
+				SkippedTimingFrames += frame.FrameNumber - TimingFrame - 1;
+			}
+			TimingFrame = frame.FrameNumber; TimingPrevious = now;
+		}
 	}
 	void ClearFrame() override {}
 	void Render(RenderSurfaceInfo&, RenderSurfaceInfo&) override {}
@@ -44,7 +112,40 @@ public:
 	void SetFullscreenMode(FullscreenSettings) override {}
 };
 
-static bool VerifyLiveMemoryConditions(Emulator* emu, MetaSpriteTestRenderer& renderer, MetaSpriteReplacement group)
+static bool MeasureLiveFrameTiming(Emulator* emu, MetaSpriteTestRenderer& renderer, const char* stage)
+{
+	if(emu->GetSettings()->GetEmulationSpeed() != 0) { return false; }
+	{
+		std::lock_guard<std::mutex> lock(renderer.Mutex);
+		renderer.FrameIntervals.clear(); renderer.TimingFrame = 0; renderer.SkippedTimingFrames = 0;
+		renderer.MeasureTiming = true;
+	}
+	vector<double> samples;
+	uint32_t skipped = 0;
+	for(int attempt = 0; attempt < 30000; attempt++) {
+		{
+			std::lock_guard<std::mutex> lock(renderer.Mutex);
+			if(renderer.FrameIntervals.size() >= 120) {
+				renderer.MeasureTiming = false; samples = renderer.FrameIntervals; skipped = renderer.SkippedTimingFrames; break;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	if(samples.empty()) {
+		std::lock_guard<std::mutex> lock(renderer.Mutex); renderer.MeasureTiming = false; return false;
+	}
+	double total = 0; int overBudget = 0;
+	for(double interval : samples) { total += interval; if(interval > 16.67) { overBudget++; } }
+	std::sort(samples.begin(), samples.end());
+	auto percentile = [&](int percent) { return samples[(samples.size() * percent + 99) / 100 - 1]; };
+	std::cout << "LIVE TIMING: " << stage << "; " << samples.size() << " delivered-frame intervals, mean=" << total / samples.size()
+		<< " ms, p50=" << percentile(50) << " ms, p95=" << percentile(95) << " ms, p99=" << percentile(99)
+		<< " ms, max=" << samples.back() << " ms, over 16.67 ms=" << overBudget << ", skipped frames=" << skipped
+		<< "; maximum-speed emulation/capture/decode/headless readback, excludes desktop presentation." << std::endl;
+	return true;
+}
+
+static bool VerifyLiveMemoryConditions(Emulator* emu, MetaSpriteTestRenderer& renderer, MetaSpriteReplacement group, bool artworkVisible = true)
 {
 	uint8_t value;
 	uint32_t hdWidth, hdHeight;
@@ -77,7 +178,141 @@ static bool VerifyLiveMemoryConditions(Emulator* emu, MetaSpriteTestRenderer& re
 	if(!waitFor(false, true)) { return false; }
 	group.MemoryConditions = {{0, value, 0xFF}};
 	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
-	return waitFor(true, false);
+	if(!waitFor(true, false)) { return false; }
+	auto checksum = [&]() {
+		uint64_t hash = 1469598103934665603ULL;
+		for(uint32_t pixel : renderer.Pixels) { hash = (hash ^ pixel) * 1099511628211ULL; }
+		return hash;
+	};
+	uint64_t defaultChecksum, previousFrame;
+	{
+		std::lock_guard<std::mutex> lock(renderer.Mutex);
+		defaultChecksum = checksum();
+		previousFrame = renderer.FrameNumber;
+	}
+	auto waitForArtwork = [&](uint64_t previous, bool equal, uint64_t& observed) {
+		for(int attempt = 0; attempt < 500; attempt++) {
+			{
+				std::lock_guard<std::mutex> lock(renderer.Mutex);
+				if(renderer.Capture && renderer.FrameNumber > previousFrame + 1 && renderer.Width == hdWidth && renderer.Height == hdHeight
+					&& renderer.Capture->MemorySnapshot.size() == 1 && renderer.Capture->MemorySnapshot.count(0)) {
+					observed = checksum();
+					if((observed == previous) == equal) { previousFrame = renderer.FrameNumber; return true; }
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	};
+	MetaAlternateArtwork white;
+	white.ArtworkOriginX = group.ArtworkOriginX; white.ArtworkOriginY = group.ArtworkOriginY;
+	white.ArtworkScale = group.ArtworkScale;
+	white.ArtworkWidth = group.ArtworkWidth; white.ArtworkHeight = group.ArtworkHeight;
+	white.Artwork.assign(group.Artwork.size(), 0xFFFFFFFF);
+	white.MemoryConditions = {{0, value, 0xFF}};
+	MetaAlternateArtwork red = white;
+	red.Artwork.assign(group.Artwork.size(), 0xFFFF0000);
+	group.AlternateArtwork = {white, red};
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+	uint64_t whiteChecksum, redChecksum, restoredChecksum;
+	if(!waitForArtwork(defaultChecksum, !artworkVisible, whiteChecksum)) { return false; }
+	group.AlternateArtwork = {red, white};
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+	if(!waitForArtwork(whiteChecksum, !artworkVisible, redChecksum) || (artworkVisible && redChecksum == defaultChecksum)) { return false; }
+	for(auto& alternate : group.AlternateArtwork) { alternate.MemoryConditions[0].Value = value ^ 0x80; }
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+	if(!waitForArtwork(defaultChecksum, true, restoredChecksum)) { return false; }
+	MetaBackgroundReplacement background;
+	{
+		std::lock_guard<std::mutex> lock(renderer.Mutex);
+		// SNES background capture/composition is still under development.
+		if(renderer.Capture->SnesColorEffects) { return true; }
+		bool found = false;
+		for(const auto& pixel : renderer.Capture->Pixels) {
+			if(pixel.BackgroundSample.Valid) { background.Layer = pixel.BackgroundSample.Layer; found = true; break; }
+			for(const auto& sample : pixel.GbaBackgroundSamples) {
+				if(sample.Valid) { background.Layer = sample.Layer; found = true; break; }
+			}
+			if(found) { break; }
+		}
+		if(!found) { return true; }
+	}
+	background.Id = 1; background.Width = background.Height = 2; background.Scale = 2;
+	background.WrapX = background.WrapY = true; background.Artwork.assign(4, 0xFFA531D7);
+	background.MemoryConditions = {{0, value, 0xFF}, {0, static_cast<uint8_t>(value & 0xF0), 0xF0}};
+	group.AlternateArtwork.clear();
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+	uint64_t backgroundChecksum;
+	if(!waitForArtwork(defaultChecksum, false, backgroundChecksum)) { std::cerr << "Background condition activation failed" << std::endl; return false; }
+	// Every condition must match, even when conditions share an address.
+	background.MemoryConditions[0].Value = value ^ 0x80;
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+	if(!waitForArtwork(defaultChecksum, true, restoredChecksum)) { std::cerr << "Background condition mismatch restoration failed" << std::endl; return false; }
+	background.MemoryConditions = {{UINT32_MAX, 0, 0}};
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+	if(!waitForArtwork(defaultChecksum, true, restoredChecksum)) { std::cerr << "Background missing address restoration failed" << std::endl; return false; }
+	background.MemoryConditions = {{0, value, 0xFF}};
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+	if(!waitForArtwork(backgroundChecksum, true, restoredChecksum)) { std::cerr << "Background condition reactivation failed" << std::endl; return false; }
+	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+	return waitForArtwork(defaultChecksum, true, restoredChecksum);
+}
+
+static bool VerifyChangingSnesMemory(Emulator* emu, MetaSpriteTestRenderer& renderer,
+	MetaSpriteReplacement group, int spriteX, int spriteY, uint32_t nativeWidth, uint32_t nativeHeight)
+{
+	constexpr uint32_t stateAddress = 0x7E0000, maskedAddress = 0x7E0002;
+	group.MemoryConditions = {{stateAddress, 0, 0}, {maskedAddress, 0xA0, 0xF0}};
+	group.AlternateArtwork.clear();
+	for(uint8_t state = 0; state < 2; state++) {
+		MetaAlternateArtwork alternate;
+		alternate.ArtworkScale = group.ArtworkScale;
+		alternate.ArtworkWidth = group.ArtworkWidth; alternate.ArtworkHeight = group.ArtworkHeight;
+		alternate.ArtworkOriginX = group.ArtworkOriginX; alternate.ArtworkOriginY = group.ArtworkOriginY;
+		alternate.Artwork.assign(group.Artwork.size(), state ? 0xFFFFFFFF : 0xFF0000FF);
+		alternate.MemoryConditions = {{stateAddress, state, 0xFF}, {maskedAddress, state, 1}};
+		group.AlternateArtwork.push_back(std::move(alternate));
+	}
+	MetaBackgroundReplacement background;
+	background.Id = 1; background.Layer = 0; background.Scale = 2;
+	background.Width = background.Height = 2; background.WrapX = background.WrapY = true;
+	background.Artwork.assign(4, 0xFF00FF00);
+	background.MemoryConditions = {{stateAddress, 1, 0xFF}, {maskedAddress, 0xA1, 0xFF}};
+	for(bool gateGroup : {false, true}) {
+		uint32_t firstFrame;
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex); firstFrame = renderer.FrameNumber; }
+		if(gateGroup) { group.MemoryConditions[0] = {stateAddress, 1, 0xFF}; }
+		emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+		uint32_t previousFrame = firstFrame, transitions = 0, seen[2] = {};
+		int previousState = -1;
+		for(int attempt = 0; attempt < 5000 && (transitions < 4 || seen[0] < 6 || seen[1] < 6); attempt++) {
+			{
+				std::lock_guard<std::mutex> lock(renderer.Mutex);
+				if(renderer.FrameNumber > firstFrame + 2 && renderer.FrameNumber != previousFrame && renderer.Capture) {
+					previousFrame = renderer.FrameNumber;
+					const auto& memory = renderer.Capture->MemorySnapshot;
+					if(memory.size() != 2 || !memory.count(stateAddress) || !memory.count(maskedAddress)) { return false; }
+					uint8_t state = memory.at(stateAddress);
+					if(state > 1 || memory.at(maskedAddress) != (0xA0 | state)) { return false; }
+					bool hd = !gateGroup || state == 1;
+					uint32_t scale = hd ? 2 : 1;
+					uint32_t expected = state ? 0xFF7FFF7F : gateGroup ? 0xFFFF0000 : 0xFF7F007F;
+					if(renderer.Width != nativeWidth * scale || renderer.Height != nativeHeight * scale
+						|| renderer.Pixels[((spriteY + 1) * scale) * renderer.Width + (spriteX + 1) * scale] != expected) {
+						std::cerr << "Changing SNES memory/frame mismatch, state=" << (int)state << " gate=" << gateGroup << std::endl;
+						return false;
+					}
+					seen[state]++;
+					if(previousState >= 0 && previousState != state) { transitions++; }
+					previousState = state;
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		if(transitions < 4 || seen[0] < 6 || seen[1] < 6) { return false; }
+	}
+	std::cout << "PASS: ROM-driven WRAM transitions select alternate PNGs and gate backgrounds/groups; snapshots contain only two configured addresses." << std::endl;
+	return true;
 }
 
 class MetaSpriteTestMessages final : public IMessageManager
@@ -91,7 +326,62 @@ shared_ptr<RecordedRomTest> _recordedRomTest;
 
 extern "C"
 {
+	DllExport void __stdcall ConfigureMetaSoftwareRendererTest()
+	{
+		// Use the regular software renderer without opening an OS window or audio
+		// device. The managed reproduction can consume its normal frame callback.
+		_emu->SetAudioVideoInitCallback(nullptr, []() -> IRenderingDevice* { return new SoftwareRenderer(_emu.get()); });
+	}
+
+	DllExport bool __stdcall RunMetaViewerRefreshTest(const char* filename)
+	{
+		MetaSpriteTestMessages messages; MessageManager::RegisterMessageManager(&messages);
+		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+		emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+		emu->GetSettings()->GetGameboyConfig().Model = string(filename).find(".gbc") != string::npos ? GameboyModel::GameboyColor : GameboyModel::Gameboy;
+		emu->GetSettings()->GetGbaConfig().SkipBootScreen = true;
+		emu->GetSettings()->GetGbaConfig().DisableFrameSkipping = true;
+		emu->GetSettings()->GetPcEngineConfig().DisableFrameSkipping = true;
+		emu->GetSettings()->GetSnesConfig().DisableFrameSkipping = true;
+		emu->GetSettings()->GetWsConfig().UseBootRom = false;
+		MetaSpriteTestRenderer renderer;
+		bool passed = false;
+		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
+			emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			auto waitFrames = [&](uint32_t count) {
+				uint32_t start;
+				{ std::lock_guard<std::mutex> lock(renderer.Mutex); start = renderer.FrameNumber; }
+				for(int attempt = 0; attempt < 3000; attempt++) {
+					{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.FrameNumber >= start + count) { return true; } }
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				return false;
+			};
+			if(waitFrames(8) && MeasureLiveFrameTiming(emu.get(), renderer, "native without debugger, representative viewer ROM")) {
+				emu->InitDebugger();
+				bool debuggerOnlyPassed = waitFrames(8) && MeasureLiveFrameTiming(emu.get(), renderer, "native with debugger, no viewer schedules, representative ROM");
+				auto* tools = emu->InternalGetDebugger()->GetPpuTools(emu->InternalGetDebugger()->GetMainCpuType());
+				auto listener = std::make_shared<MetaSpriteViewerRefreshListener>();
+				emu->GetNotificationManager()->RegisterNotificationListener(listener);
+				tools->SetViewerUpdateTiming(123, 8, 12); tools->SetViewerUpdateTiming(456, 8, 16);
+				uint32_t first = listener->First.load(), second = listener->Second.load();
+				passed = MeasureLiveFrameTiming(emu.get(), renderer, "native with debugger and two viewer schedules, representative ROM") && debuggerOnlyPassed;
+				uint32_t deliveredFirst = listener->First.load() - first, deliveredSecond = listener->Second.load() - second;
+				passed &= deliveredFirst >= 118 && deliveredFirst <= 125 && deliveredSecond >= 118 && deliveredSecond <= 125 && listener->Unexpected.load() == 0;
+				tools->RemoveViewer(123); tools->RemoveViewer(456);
+				first = listener->First.load(); second = listener->Second.load();
+				passed &= waitFrames(8) && first == listener->First.load() && second == listener->Second.load();
+				std::cout << "VIEWER ROM: " << filename << "; notifications=" << deliveredFirst << "/" << deliveredSecond << "; delivery/removal=" << passed << std::endl;
+				emu->StopDebugger();
+			}
+			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); return passed;
+	}
 	bool __stdcall SetMetaReplacements(const char*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
+	bool __stdcall SetMetaBackgroundReplacements(const char*, const uint8_t*, uint32_t);
 	DllExport uint32_t __stdcall RunMetaPackActivationTest(const char* filename, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
 	{
 		auto previous = std::move(_emu);
@@ -113,13 +403,15 @@ extern "C"
 				retained &= !SetMetaReplacements(hash.c_str(), emptySprites, sizeof(emptySprites), invalidBackground.data(), (uint32_t)invalidBackground.size()) && _emu->GetVideoDecoder()->HasMetaReplacements();
 				invalidBackground.pop_back();
 				if(invalidBackground.size() >= 16) {
-					invalidBackground[12] = 3; // Valid packet layer, unsupported on GB/GBC.
+					invalidBackground[12] = dynamic_cast<SnesConsole*>(_emu->GetConsole().get()) ? 4 : 3;
 					retained &= !SetMetaReplacements(hash.c_str(), emptySprites, sizeof(emptySprites), invalidBackground.data(), (uint32_t)invalidBackground.size()) && _emu->GetVideoDecoder()->HasMetaReplacements();
 				} else { retained = false; }
 				if(retained) { flags |= 2; }
 				if(!SetMetaReplacements("wrong-rom", emptySprites, sizeof(emptySprites), emptyBackgrounds, sizeof(emptyBackgrounds)) && _emu->GetVideoDecoder()->HasMetaReplacements()) { flags |= 4; }
 				if(SetMetaReplacements(hash.c_str(), sprites, spriteLength, backgrounds, backgroundLength)) { flags |= 8; }
 				if(SetMetaReplacements(hash.c_str(), emptySprites, sizeof(emptySprites), emptyBackgrounds, sizeof(emptyBackgrounds)) && !_emu->GetVideoDecoder()->HasMetaReplacements()) { flags |= 16; }
+				if(SetMetaBackgroundReplacements(hash.c_str(), backgrounds, backgroundLength) && _emu->GetVideoDecoder()->HasMetaReplacements()
+					&& SetMetaBackgroundReplacements(hash.c_str(), emptyBackgrounds, sizeof(emptyBackgrounds)) && !_emu->GetVideoDecoder()->HasMetaReplacements()) { flags |= 32; }
 			}
 			_emu->Stop(false);
 		}
@@ -142,11 +434,25 @@ extern "C"
 		bool math = string(filename).find("math") != string::npos && string(filename).find("exempt") == string::npos;
 		uint32_t nativeSpriteColor = math ? 0xFF7B007B : 0xFFFF0000;
 		bool sub = string(filename).find("subscreen") != string::npos;
+		bool backgroundSub = string(filename).find("background-sub") != string::npos;
+		bool backgroundScroll = string(filename).find("scroll") != string::npos;
+		bool mode7 = string(filename).find("mode7") != string::npos;
+		bool mode7Turn = mode7 && string(filename).find("turn") != string::npos;
+		bool mode7Scale = mode7 && string(filename).find("scale") != string::npos;
+		uint8_t mode7Bg2Priority = string(filename).find("ext-high") != string::npos ? 5 : 1;
+		auto sampleX = [&](int x, int y) { return mode7 ? (mode7Turn ? y : mode7Scale ? x * 2 : x) & 1023 : (x + (backgroundScroll ? 253 : 0)) & 255; };
+		auto sampleY = [&](int x, int y) { return mode7 ? (mode7Turn ? -x : y) & 1023 : (y + (backgroundScroll ? 250 : 0)) & 255; };
+		bool backgroundHoles = string(filename).find("bgholes") != string::npos;
+		bool backgroundMask = string(filename).find("bgmask") != string::npos;
+		int backgroundLayer = 0;
+		for(int layer = 1; layer < 4; layer++) { if(string(filename).find("bg" + std::to_string(layer)) != string::npos) { backgroundLayer = layer; } }
 		bool overlap = string(filename).find("overlap") != string::npos;
 		bool rotate = string(filename).find("rotate") != string::npos;
 		bool transparent = string(filename).find("transparent") != string::npos;
 		if(transparent) { nativeSpriteColor = 0xFF0000FF; }
 		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
+			// Loading creates the rewind manager, which clears MaximumSpeed.
+			if(string(filename).find("frame-timing") != string::npos) { emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed); }
 			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
 			if(auto snes = dynamic_cast<SnesConsole*>(emu->GetConsole().get())) {
 				snes->GetPpu()->SetMetaSpriteCapture(true);
@@ -169,7 +475,29 @@ extern "C"
 								if(!validGraphic) { continue; }
 								const auto& pixel = renderer.Capture->Pixels[15 * 256 + 8];
 								if(pixel.VisibleSprite == (sub || transparent ? -1 : 0) && pixel.SecondarySprite == (sub ? 0 : -1) && pixel.SpriteColor == (transparent ? 0x7C00 : 31) && pixel.Brightness == 15
-									&& pixel.SnesFallbackCaptured && pixel.SnesFallbackMainColor == (sub ? 31 : 0x7C00) && pixel.SnesFallbackSubColor == 0x7C00) {
+									&& pixel.SnesFallbackCaptured && pixel.SnesFallbackMainColor == (sub ? 31 : 0x7C00) && pixel.SnesFallbackSubColor == 0x7C00
+									&& pixel.SnesFallbackMainLayer == (sub ? backgroundLayer : 0xFF) && pixel.SnesFallbackSubLayer == (backgroundSub ? backgroundLayer : 0xFF)
+									&& pixel.BackgroundSample.Valid == sub && pixel.SnesSubBackgroundSample.Valid == backgroundSub
+									&& (!sub || (pixel.BackgroundSample.X == sampleX(8, 9) && pixel.BackgroundSample.Y == sampleY(8, 9)))
+									&& (!backgroundSub || (pixel.SnesSubBackgroundSample.X == sampleX(8, 9) && pixel.SnesSubBackgroundSample.Y == sampleY(8, 9)))) {
+									bool validCoordinates = true;
+									if(sub || backgroundSub) {
+										for(int y = 7; y < 231; y++) {
+											for(int x = 0; x < 256; x++) {
+												const auto& captured = renderer.Capture->Pixels[y * 256 + x];
+												const auto& sample = sub ? captured.BackgroundSample : captured.SnesSubBackgroundSample;
+												if(mode7 && backgroundLayer == 1) {
+													validCoordinates &= (sub ? captured.SnesFallbackMainFlags & 0x0F : captured.SnesFallbackSubPriority) == mode7Bg2Priority;
+												}
+												if(backgroundMask && x >= 40 && x <= 95) { validCoordinates &= !sample.Valid; continue; }
+												if(backgroundHoles && (x & 7) == 7 && ((y - 6) & 7) == 0) { validCoordinates &= !sample.Valid; continue; }
+												validCoordinates &= sample.Valid && sample.Layer == backgroundLayer
+													&& sample.X == sampleX(x, y - 6)
+													&& sample.Y == sampleY(x, y - 6);
+											}
+										}
+									}
+									if(!validCoordinates) { continue; }
 									auto red = std::find(renderer.Pixels.begin(), renderer.Pixels.end(), nativeSpriteColor);
 									if(transparent && renderer.Width == 256 && renderer.Height == 239) { red = renderer.Pixels.begin() + 15 * 256 + 8; }
 									if(red != renderer.Pixels.end()) {
@@ -211,13 +539,134 @@ extern "C"
 							uint32_t expected = y == 0 && (x == 0 || (holes && x == 14)) ? 0xFF0000FF : y == 0 && (x == 1 || (holes && x == 15)) ? 0xFF00807F : 0xFF00FF00;
 							if(math) { expected = y == 0 && (x == 0 || (holes && x == 14)) ? 0xFF0000FF : y == 0 && (x == 1 || (holes && x == 15)) ? 0xFF0040BF : 0xFF007F7F; }
 							if(sub) { expected = y == 0 && (x == 0 || (holes && x == 14)) ? 0xFFFF00FF : y == 0 && (x == 1 || (holes && x == 15)) ? 0xFFBF407F : 0xFF7F7F00; }
+							// Before a background PNG is loaded, native BG holes expose
+							// the blue backdrop, whose color math is disabled in this ROM.
+							if(backgroundHoles && ((spriteX + x / 2) & 7) == 7 && ((spriteY + y / 2 - 6) & 7) == 0) { expected = 0xFF0000FF; }
 							if(masked(x / 2)) { expected = 0xFF0000FF; }
 							if(rotate && x >= 14) { expected = 0xFF0000FF; }
 							if(renderer.Pixels[(spriteY * 2 + y) * renderer.Width + spriteX * 2 + x] != expected) { return false; }
 						} } return renderer.Pixels[0] == backdrop;
 					})) { flags |= 2; }
-					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
+					if(string(filename).find("memory") != string::npos) {
+						if(!VerifyChangingSnesMemory(emu.get(), renderer, group, spriteX, spriteY, nativeWidth, nativeHeight)) { flags |= 128; }
+					} else if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; }
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[spriteY * nativeWidth + spriteX] == nativeSpriteColor; })) { flags |= 4; }
+					if(string(filename).find("frame-timing") != string::npos) {
+						snes->GetPpu()->SetMetaSpriteCapture(false);
+						if(!waitFor([&]() { return !renderer.Capture && renderer.Width == nativeWidth && renderer.Height == nativeHeight; })
+							|| !MeasureLiveFrameTiming(emu.get(), renderer, "SNES native without sprite capture")) { flags |= 128; }
+						snes->GetPpu()->SetMetaSpriteCapture(true);
+						if(!waitFor([&]() { return renderer.Capture != nullptr; })) { flags |= 128; }
+						if(!MeasureLiveFrameTiming(emu.get(), renderer, "SNES native with sprite capture")) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Height == nativeHeight * 2; })
+							|| !MeasureLiveFrameTiming(emu.get(), renderer, "SNES metasprite PNG")) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({});
+					}
+					if(sub) {
+						MetaBackgroundReplacement background;
+						background.Layer = backgroundLayer;
+						background.Id = 1; background.Scale = 2; background.Width = background.Height = 2;
+						background.WrapX = background.WrapY = true; background.Artwork.assign(4, 0xFF00FF00);
+						background.MemoryConditions = {{0, 0, 0}};
+						emu->GetVideoDecoder()->SetMetaBackgroundLayers({background});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Height == nativeHeight * 2
+							&& renderer.Capture && renderer.Capture->MemorySnapshot.size() == 1
+							&& renderer.Pixels[(spriteY * 2) * renderer.Width + spriteX * 2] == 0xFF7F7F00; })) { flags |= 128; }
+						if(backgroundHoles && !waitFor([&]() {
+							if(renderer.Width != nativeWidth * 2 || !renderer.Capture || renderer.Capture->SnesBackgrounds.size() != 256 * 239) { return false; }
+							for(int y = 14; y < 231; y += 8) { for(int x = 7; x < 256; x += 8) {
+								const auto& captured = renderer.Capture->SnesBackgrounds[y * 256 + x].Layers[backgroundLayer];
+								bool masked = backgroundMask && x >= 40 && x <= 95;
+								if(!captured.Sample.Valid || captured.Opaque || captured.Main == masked
+									|| captured.Sample.X != x || captured.Sample.Y != y - 6
+									|| renderer.Pixels[(y * 2) * renderer.Width + x * 2] != (masked ? 0xFF0000FF : 0xFF00FFFF)) { return false; }
+							} }
+							return true;
+						})) { flags |= 128; }
+						if(backgroundMask && !waitFor([&]() {
+							if(renderer.Width != nativeWidth * 2 || renderer.Height != nativeHeight * 2) { return false; }
+							for(int y = 14; y < 462; y++) {
+								for(int x = 80; x < 192; x++) {
+									if(renderer.Pixels[y * renderer.Width + x] != 0xFF0000FF) { return false; }
+								}
+							}
+							return renderer.Pixels[64 * renderer.Width + 200] == 0xFF00FFFF;
+						})) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						if(string(filename).find("bglow") != string::npos) {
+							background.Layer = 3;
+							emu->GetVideoDecoder()->SetMetaReplacements({}, {background});
+							if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Height == nativeHeight * 2
+								&& renderer.Pixels[(spriteY * 2) * renderer.Width + spriteX * 2] == nativeSpriteColor; })) { flags |= 128; }
+							background.Layer = backgroundLayer;
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						}
+						if(!waitFor([&]() {
+							if(renderer.Width != nativeWidth * 2 || renderer.Height != nativeHeight * 2) { return false; }
+							for(int y = 0; y < 16; y++) {
+								for(int x = 0; x < 16; x++) {
+									uint32_t expected = y == 0 && (x == 0 || (holes && x == 14)) ? 0xFF00FFFF
+										: y == 0 && (x == 1 || (holes && x == 15)) ? 0xFF00FF7F : 0xFF00FF00;
+									if(renderer.Pixels[(spriteY * 2 + y) * renderer.Width + spriteX * 2 + x] != expected) { return false; }
+								}
+							}
+							return true;
+						})) { flags |= 128; }
+						background.Artwork.assign(4, 0x80FFFFFF);
+						if(string(filename).find("frame-timing") != string::npos
+							&& !MeasureLiveFrameTiming(emu.get(), renderer, "SNES metasprite PNG and background PNG")) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Height == nativeHeight * 2
+							&& renderer.Pixels[(spriteY * 2 + 2) * renderer.Width + spriteX * 2 + 2] == 0xFF7FBF40; })) { flags |= 128; }
+						background.Width = background.Height = 16; background.X = 3; background.Y = -2;
+						background.Artwork.resize(256);
+						auto texture = [](int x, int y) { return 0xFF000000u | ((uint32_t)x * 11 << 16) | ((uint32_t)y * 13 << 8) | ((x ^ y) * 7); };
+						for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) { background.Artwork[y * 16 + x] = texture(x, y); } }
+						int tx = (sampleX(spriteX + 1, spriteY + 1 - 6) - background.X + 8) % 8 * 2;
+						int ty = (sampleY(spriteX + 1, spriteY + 1 - 6) - background.Y + 8) % 8 * 2;
+						uint32_t sampled = texture(tx, ty);
+						uint32_t expectedPattern = 0xFF000000 | (((sampled >> 16) & 255) / 2 << 16)
+							| ((((sampled >> 8) & 255) + 255) / 2 << 8) | ((sampled & 255) / 2);
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Height == nativeHeight * 2
+							&& renderer.Pixels[(spriteY * 2 + 2) * renderer.Width + spriteX * 2 + 2] == expectedPattern; })) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({});
+						background.MemoryConditions = {{UINT32_MAX, 0, 0}};
+						emu->GetVideoDecoder()->SetMetaBackgroundLayers({background});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight
+							&& renderer.Capture && renderer.Capture->MemorySnapshot.empty()
+							&& renderer.Pixels[spriteY * nativeWidth + spriteX] == nativeSpriteColor; })) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
+						if(string(filename).find("viewer-core") != string::npos) {
+							snes->GetPpu()->SetMetaSpriteCapture(false);
+							emu->InitDebugger();
+							bool counterChecks = VerifyMetaViewerCounters(emu.get());
+							if(!counterChecks) { flags |= 128; }
+							std::cout << "MEMORY COUNTERS: mixed access widths, timestamps, negative addresses and reset=" << counterChecks << std::endl;
+							if(!waitFor([&]() { return !renderer.Capture && renderer.Width == nativeWidth && renderer.Height == nativeHeight; })
+								|| !MeasureLiveFrameTiming(emu.get(), renderer, "SNES native with debugger initialized (viewer core only)")) { flags |= 128; }
+							auto* viewerTools = emu->InternalGetDebugger()->GetPpuTools(CpuType::Snes);
+							auto refreshListener = std::make_shared<MetaSpriteViewerRefreshListener>();
+							emu->GetNotificationManager()->RegisterNotificationListener(refreshListener);
+							viewerTools->SetViewerUpdateTiming(123, 224, 0);
+							viewerTools->SetViewerUpdateTiming(456, 224, 16);
+							uint32_t firstBefore = refreshListener->First.load(), secondBefore = refreshListener->Second.load();
+							if(!MeasureLiveFrameTiming(emu.get(), renderer, "SNES native with two scheduled viewer refreshes (no desktop drawing)")) { flags |= 128; }
+							uint32_t firstDelivered = refreshListener->First.load() - firstBefore, secondDelivered = refreshListener->Second.load() - secondBefore;
+							if(firstDelivered < 118 || firstDelivered > 123 || secondDelivered < 118 || secondDelivered > 123 || refreshListener->Unexpected.load()) { flags |= 128; }
+							viewerTools->RemoveViewer(123); viewerTools->RemoveViewer(456);
+							firstBefore = refreshListener->First.load(); secondBefore = refreshListener->Second.load();
+							snes->GetPpu()->SetMetaSpriteCapture(true);
+							if(!waitFor([&]() { return renderer.Capture != nullptr; })
+								|| !MeasureLiveFrameTiming(emu.get(), renderer, "SNES capture with debugger initialized (viewer core only)")) { flags |= 128; }
+							bool removalStopped = refreshListener->First.load() == firstBefore && refreshListener->Second.load() == secondBefore;
+							if(!removalStopped) { flags |= 128; }
+							std::cout << "VIEWER REFRESH: " << firstDelivered << "/" << secondDelivered << " notifications during 120 frame intervals; removal stops delivery=" << removalStopped << std::endl;
+							emu->StopDebugger();
+						}
+					}
 				}
 			}
 			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
@@ -452,7 +901,7 @@ extern "C"
 						}
 						return renderer.Pixels[0] == expectedBackground(0, 0);
 					})) { flags |= 2; }
-					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
+					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group, !occluded)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
 					if(waitFor([&]() { return renderer.Width == 224 && renderer.Height == 144 && renderer.Pixels[8 * 224 + 8] == (occluded ? 0xFF0000FF : 0xFFFF0000) && renderer.Pixels[0] == 0xFF0000FF; })) { flags |= 4; }
 				}
@@ -484,6 +933,15 @@ extern "C"
 		bool transparentSource = string(filename).find("transparent") != string::npos;
 		bool backgroundCapture = string(filename).find("background") != string::npos;
 		bool wideBackground = string(filename).find("wide") != string::npos;
+		int bitmapMode = string(filename).find("bitmap3") != string::npos ? 3 : string(filename).find("bitmap5") != string::npos ? 5 : string(filename).find("bitmap4") != string::npos ? 4 : 0;
+		bool bitmapBackground = bitmapMode != 0;
+		bool opaqueBitmap = bitmapBackground && (bitmapMode != 4 || string(filename).find("page1") != string::npos);
+		auto inBitmap = [&](int x, int y) { return bitmapMode != 5 || (x < 160 && y < 128); };
+		int backgroundLayer = bitmapBackground || string(filename).find("affine") != string::npos ? 2 : 0;
+		bool scaledBackground = string(filename).find("scaled") != string::npos;
+		bool rotatedBackground = string(filename).find("rotated") != string::npos;
+		auto backgroundX = [&](int x, int y) { return bitmapBackground ? x : rotatedBackground ? 253 + y : scaledBackground ? 253 + 2 * x + y : 253 + x; };
+		auto backgroundY = [&](int x, int y) { return bitmapBackground ? y : rotatedBackground ? 250 - x : 250 + y; };
 		auto masked = [&](int x) { return window && (middleWindow ? x >= 2 && x < 6 : x >= 4); };
 		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
 			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
@@ -517,14 +975,18 @@ extern "C"
 									for(int y = 0; y < 160; y++) { for(int x = 0; x < 240; x++) {
 										const auto& samples = renderer.Capture->Pixels[y * 240 + x].GbaBackgroundSamples;
 										const auto& captured = renderer.Capture->Pixels[y * 240 + x];
-										const auto& layer0 = captured.GbaBackgroundLayers[0];
-										valid &= layer0.Priority == 3 && !layer0.Opaque && layer0.Color == 0x7C00;
-										valid &= captured.GbaBlendMainMask == 1 && captured.GbaBlendSubMask == 32 && captured.GbaWindowEffectsEnabled && captured.GbaBackdropColor == 0x7C00;
+										const auto& layer0 = captured.GbaBackgroundLayers[backgroundLayer];
+										valid &= layer0.Priority == 3 && layer0.Opaque == (opaqueBitmap && inBitmap(x, y)) && layer0.Color == 0x7C00;
+										valid &= captured.GbaBlendMainMask == (1 << backgroundLayer) && captured.GbaBlendSubMask == 32 && captured.GbaWindowEffectsEnabled && captured.GbaBackdropColor == 0x7C00;
 										bool objectHere = x >= 8 && x < 16 && y >= 8 && y < 16;
 										valid &= captured.GbaObjectSprite == (objectHere ? 0 : -1) && captured.GbaObjectPriority == (objectHere ? 0 : 0xFF);
 										valid &= captured.GbaObjectColor == (objectHere ? 31 : 0x7C00) && !captured.GbaObjectSemiTransparent;
-										valid &= samples[0].Valid && samples[0].Layer == 0 && samples[0].X == (x + size - 3) % size && samples[0].Y == (y + size - 6) % size;
-										for(int layer = 1; layer < 4; layer++) { valid &= !samples[layer].Valid; }
+										const auto& sample = samples[backgroundLayer];
+										int expectedX = backgroundLayer == 2 ? backgroundX(x, y) & (size - 1) : (x + size - 3) % size;
+										int expectedY = backgroundLayer == 2 ? backgroundY(x, y) & (size - 1) : (y + size - 6) % size;
+										valid &= sample.Valid == inBitmap(x, y);
+										if(sample.Valid) { valid &= sample.Layer == backgroundLayer && sample.X == expectedX && sample.Y == expectedY; }
+										for(int layer = 0; layer < 4; layer++) { if(layer != backgroundLayer) { valid &= !samples[layer].Valid; } }
 									} }
 									if(!valid) { continue; }
 								}
@@ -551,8 +1013,13 @@ extern "C"
 					source.X = source.Y = 0; group.Members = {source};
 					if(backgroundCapture) {
 						MetaBackgroundReplacement background;
-						background.Id = 1; background.Layer = 0; background.Width = background.Height = 16; background.Scale = 2;
+						background.Id = 1; background.Layer = backgroundLayer; background.Width = background.Height = 16; background.Scale = 2;
 						background.WrapX = background.WrapY = true; background.Artwork.assign(256, 0xFFFFFFFF);
+						if(backgroundLayer == 2 && !bitmapBackground) {
+							for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) {
+								background.Artwork[y * 16 + x] = (x / 2) % 2 ? 0xFFFFFFFF : 0xFF00FFFF;
+							} }
+						}
 						group.MemoryConditions = {{0, 0, 0}}; emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
 					} else { group.MemoryConditions = {{0, 0, 0}}; emu->GetVideoDecoder()->SetMetaSpriteGroups({group}); }
 					auto waitFor = [&](std::function<bool()> condition) {
@@ -578,11 +1045,22 @@ extern "C"
 						if(backgroundCapture) {
 							for(int y = 0; y < 320; y++) { for(int x = 0; x < 480; x++) {
 								if(x >= 16 && x < 32 && y >= 16 && y < 32) { continue; }
-								if(renderer.Pixels[y * 480 + x] != 0xFF7F7FFF) { return false; }
+								uint32_t expectedBackground = backgroundLayer == 2 && !bitmapBackground && (backgroundX(x / 2, y / 2) % 2 == 0) ? 0xFF007FFF : 0xFF7F7FFF;
+								if(!inBitmap(x / 2, y / 2)) { expectedBackground = 0xFF0000FF; }
+								if(renderer.Pixels[y * 480 + x] != expectedBackground) { return false; }
 							} }
 						}
 						return renderer.Pixels[0] == (backgroundCapture ? 0xFF7F7FFF : dark ? 0xFF00007B : 0xFF0000FF);
 					})) { flags |= 2; }
+					if(bitmapBackground && string(filename).find("page1-live") != string::npos) {
+						for(bool opaque : {false, true}) {
+							if(!waitFor([&]() {
+								return renderer.Width == 480 && renderer.Capture
+									&& renderer.Capture->Pixels[8 * 240 + 8].GbaBackgroundLayers[2].Opaque == opaque
+									&& renderer.Pixels[0] == 0xFF7F7FFF;
+							})) { flags |= 128; }
+						}
+					}
 					if(backgroundCapture) { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {}); }
 					else { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({}); }
 					if(waitFor([&]() { return renderer.Width == 240 && renderer.Height == 160 && renderer.Pixels[8 * 240 + 8] == (dark ? 0xFF7B0000 : transparentSource || mirrored ? 0xFF0000FF : 0xFFFF0000); })) { flags |= 4; }

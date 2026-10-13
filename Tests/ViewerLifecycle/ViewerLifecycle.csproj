@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Mesen"><HintPath>../../bin/win-x64/Debug/Mesen.dll</HintPath></Reference>
+    <Reference Include="Avalonia.Base"><HintPath>../../bin/win-x64/Debug/Avalonia.Base.dll</HintPath></Reference>
+    <Reference Include="Avalonia.Controls"><HintPath>../../bin/win-x64/Debug/Avalonia.Controls.dll</HintPath></Reference>
+    <Reference Include="Avalonia.Markup"><HintPath>../../bin/win-x64/Debug/Avalonia.Markup.dll</HintPath></Reference>
+    <Reference Include="Avalonia.Desktop"><HintPath>../../bin/win-x64/Debug/Avalonia.Desktop.dll</HintPath></Reference>
+    <Reference Include="Avalonia.Skia"><HintPath>../../bin/win-x64/Debug/Avalonia.Skia.dll</HintPath></Reference>
+    <Reference Include="CommunityToolkit.Mvvm"><HintPath>../../bin/win-x64/Debug/CommunityToolkit.Mvvm.dll</HintPath></Reference>
+    <Content Include="../../bin/win-x64/Debug/*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

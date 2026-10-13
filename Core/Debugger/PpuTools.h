@@ -4,6 +4,7 @@
 #include "Shared/NotificationManager.h"
 #include "Shared/Emulator.h"
 #include "Shared/ColorUtilities.h"
+#include "Debugger/ViewerRefreshSchedule.h"
 
 class Debugger;
 
@@ -234,7 +235,7 @@ protected:
 
 	Emulator* _emu;
 	Debugger* _debugger;
-	unordered_map<uint32_t, ViewerRefreshConfig> _updateTimings;
+	ViewerRefreshSchedule _viewerSchedule;
 
 	void BlendColors(uint8_t output[4], uint8_t input[4]);
 
@@ -276,7 +277,7 @@ public:
 
 	__forceinline bool HasOpenedViewer()
 	{
-		return _updateTimings.size() > 0;
+		return _viewerSchedule.HasViewers();
 	}
 	template<TileFormat format>
 	void InternalGetTileView(GetTileViewOptions options, uint8_t* source, uint32_t srcSize, const uint32_t* colors, uint32_t* outBuffer);

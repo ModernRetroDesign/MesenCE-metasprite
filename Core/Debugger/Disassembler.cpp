@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <algorithm>
+#include <cassert>
 #include "Debugger/Disassembler.h"
 #include "Debugger/DisassemblyInfo.h"
 #include "Debugger/CdlManager.h"
@@ -54,17 +55,21 @@ DisassemblerSource& Disassembler::GetSource(MemoryType type)
 uint32_t Disassembler::BuildCache(AddressInfo& addrInfo, uint8_t cpuFlags, CpuType type)
 {
 	DisassemblerSource& src = GetSource(addrInfo.Type);
+	// The source cannot resize during decoding; cache reset runs while paused.
+	DisassemblyInfo* cache = src.Cache.data();
+	const int32_t cacheSize = static_cast<int32_t>(src.Cache.size());
+	assert(addrInfo.Address >= 0 && addrInfo.Address < cacheSize);
 
 	int returnSize = 0;
 	int32_t address = addrInfo.Address;
 	do {
-		DisassemblyInfo& disInfo = src.Cache[address];
+		DisassemblyInfo& disInfo = cache[address];
 		if(!disInfo.IsInitialized() || !disInfo.IsValid(cpuFlags)) {
 			disInfo.Initialize(address, cpuFlags, type, addrInfo.Type, _memoryDumper);
-			for(int i = 1; i < disInfo.GetOpSize() && address + i < src.Cache.size(); i++) {
+			for(int i = 1; i < disInfo.GetOpSize() && address + i < cacheSize; i++) {
 				//Clear any instructions that start in the middle of this one
 				//(can happen when resizing an instruction after X/M updates)
-				src.Cache[address + i] = DisassemblyInfo();
+				cache[address + i] = DisassemblyInfo();
 			}
 			returnSize += disInfo.GetOpSize();
 		} else {
@@ -79,7 +84,7 @@ uint32_t Disassembler::BuildCache(AddressInfo& addrInfo, uint8_t cpuFlags, CpuTy
 
 		disInfo.UpdateCpuFlags(cpuFlags);
 		address += disInfo.GetOpSize();
-	} while(address >= 0 && address < (int32_t)src.Cache.size());
+	} while(address >= 0 && address < cacheSize);
 
 	return returnSize;
 }

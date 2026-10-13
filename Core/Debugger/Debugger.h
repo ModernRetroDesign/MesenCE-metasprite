@@ -48,6 +48,8 @@ enum class EvalResultType : int32_t;
 struct CpuInfo
 {
 	unique_ptr<IDebugger> Debugger;
+	// Initialized with the owner; CPU debuggers live until this Debugger is destroyed.
+	IDebugger* Instance = nullptr;
 	unique_ptr<ExpressionEvaluator> Evaluator;
 };
 

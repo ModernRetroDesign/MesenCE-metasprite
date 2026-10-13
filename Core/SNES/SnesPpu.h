@@ -25,13 +25,18 @@ public:
 private:
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaSpriteFramePool _metaFramePool;
 	int16_t _metaSpriteIds[256] = {}, _metaSpriteIdsCopy[256] = {};
-	std::vector<MetaSpritePixel::SnesCoverageSample> _metaSpriteCoverage[256], _metaSpriteCoverageCopy[256];
+	MetaSpriteCoverageList<MetaSpritePixel::SnesCoverageSample> _metaSpriteCoverage[256], _metaSpriteCoverageCopy[256];
 	uint16_t _metaSpriteOrder[256] = {}, _metaSpriteOrderCopy[256] = {}, _metaFetchOrder = 0;
 	int16_t _metaMainIds[256] = {}, _metaSubIds[256] = {};
 	uint16_t _metaBgMain[256] = {}, _metaBgSub[256] = {};
 	uint8_t _metaBgMainFlags[256] = {}, _metaBgSubPriority[256] = {};
-	void CaptureBackgroundPixel(uint8_t x, uint16_t color, uint8_t flags, bool main);
+	uint8_t _metaBgMainLayer[256] = {}, _metaBgSubLayer[256] = {};
+	MetaBackgroundSample _metaTileSamples[4][33] = {}, _metaMosaicSample[4] = {};
+	MetaBackgroundSample _metaBgMainSample[256] = {}, _metaBgSubSample[256] = {};
+	MetaSnesBackgroundLayer _metaBgLayers[256][4] = {};
+	void CaptureBackgroundPixel(uint8_t x, uint16_t color, uint8_t flags, bool main, uint8_t layer, const MetaBackgroundSample& sample);
 	constexpr static int SpriteLayerIndex = 4;
 	constexpr static int ColorWindowIndex = 5;
 
@@ -197,7 +202,7 @@ private:
 	__forceinline void DrawSubPixel(uint8_t x, uint16_t color, uint8_t priority);
 
 	void ApplyColorMath();
-	void ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow);
+	void ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow, MetaSpritePixel* captureRow);
 
 	template<bool forMainScreen>
 	void ApplyBrightness();

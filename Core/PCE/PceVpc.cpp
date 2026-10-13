@@ -207,7 +207,7 @@ void PceVpc::ProcessScanlineStart(PceVdc* vdc, uint16_t scanline)
 		if(row == 0) {
 			_currentOutBuffer = _currentOutBuffer == _outBuffer[0] ? _outBuffer[1] : _outBuffer[0];
 			_metaFrame = !_vdc2 && vdc->IsMetaSpriteCaptureEnabled()
-				? std::make_shared<MetaSpriteFrame>(PceConstants::MaxScreenWidth, PceConstants::ScreenHeight) : nullptr;
+				? _metaFramePool.Acquire(PceConstants::MaxScreenWidth, PceConstants::ScreenHeight) : nullptr;
 		}
 
 		//Store clock dividers for each row at the end of the buffer

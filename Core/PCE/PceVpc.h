@@ -26,6 +26,7 @@ private:
 	uint16_t* _currentOutBuffer = nullptr;
 	uint16_t _xStart = 0;
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaSpriteFramePool _metaFramePool;
 
 	Timer _frameSkipTimer;
 	bool _skipRender = false;

@@ -51,6 +51,7 @@ private:
 	MetaCoverage _metaHighPriorityCoverage[2][224] = {};
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaSpriteFramePool _metaFramePool;
 
 	uint16_t _screenHeight = 0;
 	uint16_t _screenWidth = 0;

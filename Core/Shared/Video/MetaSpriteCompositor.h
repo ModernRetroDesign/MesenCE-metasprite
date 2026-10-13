@@ -13,6 +13,20 @@ struct MetaSpriteGraphic
 	std::vector<uint32_t> Pixels;
 };
 
+struct MetaAlternateArtwork
+{
+	int ArtworkOriginX = 0, ArtworkOriginY = 0;
+	int ArtworkScale = 1, ArtworkWidth = 0, ArtworkHeight = 0;
+	std::vector<uint32_t> Artwork;
+	std::vector<MetaMemoryCondition> MemoryConditions;
+};
+
+struct MetaArtworkSelection
+{
+	int ArtworkOriginX, ArtworkOriginY, ArtworkScale, ArtworkWidth, ArtworkHeight;
+	const std::vector<uint32_t>& Artwork;
+};
+
 struct MetaSpriteReplacement
 {
 	int Id = 0;
@@ -22,19 +36,42 @@ struct MetaSpriteReplacement
 	std::vector<MetaSpriteGraphic> Members;
 	std::vector<uint32_t> Artwork;
 	std::vector<MetaMemoryCondition> MemoryConditions;
+	std::vector<MetaAlternateArtwork> AlternateArtwork;
+	MetaArtworkSelection SelectArtwork(const MetaMemorySnapshot& snapshot) const
+	{
+		for(const auto& alternate : AlternateArtwork) {
+			if(!alternate.MemoryConditions.empty() && MetaMemoryCondition::Matches(alternate.MemoryConditions, snapshot)) {
+				return {alternate.ArtworkOriginX, alternate.ArtworkOriginY, alternate.ArtworkScale, alternate.ArtworkWidth, alternate.ArtworkHeight, alternate.Artwork};
+			}
+		}
+		return {ArtworkOriginX, ArtworkOriginY, ArtworkScale, ArtworkWidth, ArtworkHeight, Artwork};
+	}
 };
 
 // Shared recognition/composition accepts captured native state. It never consults live VRAM.
 class MetaSpriteCompositor
 {
+	struct SnesPreparedScreen {
+		struct Layer { const MetaSnesBackgroundLayer* Source; uint32_t Color; };
+		Layer Layers[4] = {};
+		uint32_t Backdrop = 0;
+		uint8_t Count = 0, HighestMainPriority = 0, HighestSubPriority = 0;
+		bool BackdropMath = false;
+	};
+	std::vector<SnesPreparedScreen> _snesBackgroundRow;
 	std::mutex _lock;
 	std::shared_ptr<const std::vector<MetaSpriteReplacement>> _groups;
 	std::shared_ptr<const std::vector<MetaBackgroundReplacement>> _backgroundLayers;
 	std::shared_ptr<const std::vector<uint32_t>> _memoryAddresses;
-	static std::shared_ptr<const std::vector<uint32_t>> CompileMemoryAddresses(const std::vector<MetaSpriteReplacement>& groups)
+	MetaBackgroundView _activeBackgrounds;
+	static std::shared_ptr<const std::vector<uint32_t>> CompileMemoryAddresses(const std::vector<MetaSpriteReplacement>& groups, const std::vector<MetaBackgroundReplacement>& backgrounds)
 	{
 		std::vector<uint32_t> addresses;
 		for(const auto& group : groups) { for(const auto& condition : group.MemoryConditions) { addresses.push_back(condition.Address); } }
+		for(const auto& group : groups) { for(const auto& alternate : group.AlternateArtwork) {
+			for(const auto& condition : alternate.MemoryConditions) { addresses.push_back(condition.Address); }
+		} }
+		for(const auto& layer : backgrounds) { for(const auto& condition : layer.MemoryConditions) { addresses.push_back(condition.Address); } }
 		std::sort(addresses.begin(), addresses.end());
 		addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
 		return std::make_shared<const std::vector<uint32_t>>(std::move(addresses));
@@ -89,10 +126,68 @@ public:
 	}
 	static uint32_t CompositeAlpha(uint32_t foreground, uint32_t background, uint32_t alpha)
 	{
+		if(alpha == 255) { return foreground | 0xFF000000; }
+		if(alpha == 0) { return background | 0xFF000000; }
 		uint32_t result = 0xFF000000;
 		for(int shift : {0, 8, 16}) {
 			result |= ((((foreground >> shift) & 255) * alpha + ((background >> shift) & 255) * (255 - alpha) + 127) / 255) << shift;
 		}
+		return result;
+	}
+	struct SnesResolvedScreen { uint32_t Color; uint8_t Priority; bool Math; };
+	static SnesPreparedScreen PrepareSnesBackgroundScreen(const MetaSnesBackgroundPixel& pixel)
+	{
+		SnesPreparedScreen screen;
+		screen.Backdrop = Rgb555(pixel.BackdropColor); screen.BackdropMath = pixel.BackdropMath;
+		if(!pixel.Captured) { return screen; }
+		for(const auto& layer : pixel.Layers) {
+			if(layer.Sample.Valid && (layer.Main || layer.Sub)) {
+				screen.Layers[screen.Count++] = {&layer, layer.Opaque ? Rgb555(layer.Color) : 0};
+				if(layer.Main) { screen.HighestMainPriority = std::max(screen.HighestMainPriority, layer.Priority); }
+				if(layer.Sub) { screen.HighestSubPriority = std::max(screen.HighestSubPriority, layer.Priority); }
+			}
+		}
+		// At most four native BG layers: order directly without general sort setup.
+		for(int i = 1; i < screen.Count; i++) {
+			auto layer = screen.Layers[i];
+			int position = i;
+			while(position > 0 && screen.Layers[position - 1].Source->Priority > layer.Source->Priority) {
+				screen.Layers[position] = screen.Layers[position - 1];
+				position--;
+			}
+			screen.Layers[position] = layer;
+		}
+		return screen;
+	}
+	static SnesResolvedScreen ComposeSnesBackgroundScreen(const SnesPreparedScreen& screen, const MetaBackgroundView& backgrounds,
+		bool mainScreen, int x, int y, int sx, int sy, int scale, bool objectVisible, uint32_t objectColor, uint8_t objectPriority, bool objectMath)
+	{
+		// Retain enabled layers even at transparent native texels. PNG alpha overlays
+		// its own native layer, then layer priority determines OBJ/BG occlusion.
+		// Each alpha outcome supplies an opaque OBJ color here. Lower BG layers
+		// cannot change that outcome, so do not sample their PNGs or sort them.
+		uint8_t highestPriority = mainScreen ? screen.HighestMainPriority : screen.HighestSubPriority;
+		if(objectVisible && objectPriority >= highestPriority) { return {objectColor, objectPriority, objectMath}; }
+		SnesResolvedScreen result {screen.Backdrop, 0, screen.BackdropMath};
+		if(highestPriority == 0) { return result; }
+		bool objectDrawn = false;
+		for(int i = 0; i < screen.Count; i++) {
+			const auto& layer = *screen.Layers[i].Source;
+			if(!(mainScreen ? layer.Main : layer.Sub)) { continue; }
+			if(objectVisible && !objectDrawn && objectPriority < layer.Priority) {
+				result = {objectColor, objectPriority, objectMath}; objectDrawn = true;
+			}
+			uint32_t color = layer.Opaque ? screen.Layers[i].Color : result.Color;
+			bool opaque = layer.Opaque;
+			for(const auto& background : backgrounds) {
+				uint32_t artwork;
+				if(background.SampleValidated(layer.Sample, x, y, sx, sy, scale, artwork) && (artwork >> 24)) {
+					color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true;
+				}
+			}
+			if(opaque) { result = {color, layer.Priority, layer.Math}; }
+		}
+		if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath}; }
 		return result;
 	}
 	// Apply captured GBA effects to an opaque artwork sample. PNG alpha is composed
@@ -132,7 +227,7 @@ public:
 	// Reselect the native GBA layer pair for each PNG-alpha outcome before effects.
 	// Object overrides replace source coverage; background PNGs overlay their
 	// native layer, matching the background editor's existing transparency behavior.
-	static uint32_t ComposeGbaLayers(const MetaSpritePixel& pixel, const std::vector<MetaBackgroundReplacement>& backgrounds,
+	static uint32_t ComposeGbaLayers(const MetaSpritePixel& pixel, const MetaBackgroundView& backgrounds,
 		int x, int y, int sx, int sy, int scale, bool overrideObject = false, uint32_t objectArtwork = 0,
 		uint8_t objectPriority = 0, bool objectSemiTransparent = false, bool preserveNativeObject = false)
 	{
@@ -248,9 +343,10 @@ public:
 	}
 	void SetGroups(std::vector<MetaSpriteReplacement> groups)
 	{
-		auto addresses = CompileMemoryAddresses(groups);
 		auto snapshot = std::make_shared<const std::vector<MetaSpriteReplacement>>(std::move(groups));
 		std::lock_guard<std::mutex> lock(_lock);
+		static const std::vector<MetaBackgroundReplacement> emptyBackgrounds;
+		auto addresses = CompileMemoryAddresses(*snapshot, _backgroundLayers ? *_backgroundLayers : emptyBackgrounds);
 		_groups = std::move(snapshot);
 		_memoryAddresses = std::move(addresses);
 	}
@@ -259,10 +355,12 @@ public:
 		auto snapshot = std::make_shared<const std::vector<MetaBackgroundReplacement>>(std::move(layers));
 		std::lock_guard<std::mutex> lock(_lock);
 		_backgroundLayers = std::move(snapshot);
+		static const std::vector<MetaSpriteReplacement> emptyGroups;
+		_memoryAddresses = CompileMemoryAddresses(_groups ? *_groups : emptyGroups, *_backgroundLayers);
 	}
 	void SetReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers)
 	{
-		auto addresses = CompileMemoryAddresses(groups);
+		auto addresses = CompileMemoryAddresses(groups, layers);
 		auto sprites = std::make_shared<const std::vector<MetaSpriteReplacement>>(std::move(groups));
 		auto backgrounds = std::make_shared<const std::vector<MetaBackgroundReplacement>>(std::move(layers));
 		std::lock_guard<std::mutex> lock(_lock);
@@ -288,6 +386,11 @@ public:
 	{
 		std::lock_guard<std::mutex> lock(_lock);
 		return (_groups && !_groups->empty()) || (_backgroundLayers && !_backgroundLayers->empty());
+	}
+	bool HasBackgroundLayers()
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		return _backgroundLayers && !_backgroundLayers->empty();
 	}
 
 	static std::vector<MetaSpriteGraphic> BuildGameboyCandidates(const MetaSpriteFrame& frame)
@@ -330,47 +433,63 @@ public:
 		std::shared_ptr<const std::vector<MetaSpriteReplacement>> groups;
 		std::shared_ptr<const std::vector<MetaBackgroundReplacement>> backgrounds;
 		{ std::lock_guard<std::mutex> lock(_lock); groups = _groups; backgrounds = _backgroundLayers; }
-		bool applyBackgrounds = backgrounds && !backgrounds->empty() && backgroundColor && !frame.GbaColorEffects && !frame.SnesColorEffects
+		_activeBackgrounds.Layers.clear();
+		if(backgrounds) { for(const auto& layer : *backgrounds) {
+			if(layer.IsValid() && MetaMemoryCondition::Matches(layer.MemoryConditions, frame.MemorySnapshot)) { _activeBackgrounds.Layers.push_back(&layer); }
+		} }
+		bool applyBackgrounds = !_activeBackgrounds.Layers.empty() && backgroundColor && !frame.GbaColorEffects && !frame.SnesColorEffects
 			&& frame.Pixels.size() == (size_t)frame.Width * frame.Height
 			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.BackgroundSample.Valid; });
-		bool applyGbaBackgrounds = backgrounds && !backgrounds->empty() && frame.GbaColorEffects
+		bool applyGbaBackgrounds = !_activeBackgrounds.Layers.empty() && frame.GbaColorEffects
 			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) {
 				return pixel.GbaFallbackCaptured && std::any_of(std::begin(pixel.GbaBackgroundSamples), std::end(pixel.GbaBackgroundSamples), [](const auto& sample) { return sample.Valid; });
 			});
+		bool applySnesBackgrounds = !_activeBackgrounds.Layers.empty() && frame.SnesColorEffects
+			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) {
+				return pixel.SnesFallbackCaptured && (pixel.BackgroundSample.Valid || pixel.SnesSubBackgroundSample.Valid);
+			});
+		if(!_activeBackgrounds.Layers.empty() && frame.SnesColorEffects && frame.SnesBackgrounds.size() == frame.Pixels.size()) {
+			applySnesBackgrounds |= std::any_of(frame.SnesBackgrounds.begin(), frame.SnesBackgrounds.end(), [](const auto& pixel) {
+				return pixel.Captured && std::any_of(std::begin(pixel.Layers), std::end(pixel.Layers), [](const auto& layer) { return layer.Sample.Valid && (layer.Main || layer.Sub); });
+			});
+		}
 		if(!original || cropLeft < 0 || cropTop < 0 || width + cropLeft > frame.Width || height + cropTop > frame.Height
-			|| ((!groups || groups->empty()) && !applyBackgrounds && !applyGbaBackgrounds)) { return original; }
+			|| frame.Pixels.size() != static_cast<uint64_t>(frame.Width) * frame.Height
+			|| ((!groups || groups->empty()) && !applyBackgrounds && !applyGbaBackgrounds && !applySnesBackgrounds)) { return original; }
 		if(!groups) { groups = std::make_shared<const std::vector<MetaSpriteReplacement>>(); }
 		auto candidates = !frame.NesRows.empty() ? BuildNesCandidates(frame, backgroundColor)
 			: frame.DecodedRows.empty() ? BuildGameboyCandidates(frame) : BuildDecodedCandidates(frame);
 		for(const auto& group : *groups) {
 			if(MetaMemoryCondition::Matches(group.MemoryConditions, frame.MemorySnapshot)) {
-				_outputScale = std::max(_outputScale, (uint32_t)std::clamp(group.ArtworkScale, 1, 10));
+				auto artwork = group.SelectArtwork(frame.MemorySnapshot);
+				_outputScale = std::max(_outputScale, (uint32_t)std::clamp(artwork.ArtworkScale, 1, 10));
 			}
 		}
-		if(applyBackgrounds || applyGbaBackgrounds) { for(const auto& layer : *backgrounds) { if(layer.IsValid()) { _outputScale = std::max(_outputScale, (uint32_t)layer.Scale); } } }
+		if(applyBackgrounds || applyGbaBackgrounds || applySnesBackgrounds) { for(const auto& layer : _activeBackgrounds) { if(layer.IsValid()) { _outputScale = std::max(_outputScale, (uint32_t)layer.Scale); } } }
 		uint32_t outputWidth = width * _outputScale;
 		_output.resize((size_t)outputWidth * height * _outputScale);
-		auto& effectMain = _effectMain;
-		auto& effectSecondary = _effectSecondary;
-		auto& effectChanged = _effectChanged;
-		auto& gbaCoverage = _gbaCoverage;
-		auto& gbaObjectArtwork = _gbaObjectArtwork;
-		auto& gbaObjectState = _gbaObjectState;
-		auto& snesMainCoverage = _snesMainCoverage;
-		auto& snesSubCoverage = _snesSubCoverage;
 		bool stagedEffects = frame.GbaColorEffects || frame.SnesColorEffects;
 		if(stagedEffects) {
-			effectMain.resize(_output.size()); effectSecondary.resize(_output.size()); effectChanged.assign(_output.size(), 0);
-			if(frame.GbaColorEffects) { gbaCoverage.assign(_output.size(), nullptr); }
-			if(applyGbaBackgrounds) { gbaObjectArtwork.resize(_output.size()); gbaObjectState.assign(_output.size(), 0); }
-			if(frame.SnesColorEffects) { snesMainCoverage.assign(_output.size(), nullptr); snesSubCoverage.assign(_output.size(), nullptr); }
+			_effectMain.resize(_output.size()); _effectSecondary.resize(_output.size()); _effectChanged.assign(_output.size(), 0);
+			if(frame.GbaColorEffects) { _gbaCoverage.assign(_output.size(), nullptr); }
+			if(applyGbaBackgrounds) { _gbaObjectArtwork.resize(_output.size()); _gbaObjectState.assign(_output.size(), 0); }
+			if(frame.SnesColorEffects) { _snesMainCoverage.assign(_output.size(), nullptr); _snesSubCoverage.assign(_output.size(), nullptr); }
 		}
+		// All staging buffers are fully sized above and remain fixed during the
+		// pixel loops. Cache their data once rather than checking vector access
+		// repeatedly for every alpha outcome in Debug builds.
+		auto* outputPixels = _output.data();
+		const auto* framePixels = frame.Pixels.data();
+		auto* effectMain = _effectMain.data(); auto* effectSecondary = _effectSecondary.data();
+		auto* effectChanged = _effectChanged.data(); auto* gbaCoverage = _gbaCoverage.data();
+		auto* gbaObjectArtwork = _gbaObjectArtwork.data(); auto* gbaObjectState = _gbaObjectState.data();
+		auto* snesMainCoverage = _snesMainCoverage.data(); auto* snesSubCoverage = _snesSubCoverage.data();
 		for(uint32_t y = 0; y < height * _outputScale; y++) {
 			for(uint32_t x = 0; x < outputWidth; x++) {
 				size_t offset = (size_t)y * outputWidth + x;
-				_output[offset] = original[(y / _outputScale) * width + x / _outputScale];
+				outputPixels[offset] = original[(y / _outputScale) * width + x / _outputScale];
 				if(stagedEffects) {
-					const auto& pixel = frame.Pixels[(y / _outputScale + cropTop) * frame.Width + x / _outputScale + cropLeft];
+					const auto& pixel = framePixels[(y / _outputScale + cropTop) * frame.Width + x / _outputScale + cropLeft];
 					effectMain[offset] = Rgb555(pixel.SpriteColor); effectSecondary[offset] = Rgb555(pixel.SecondaryColor);
 				}
 			}
@@ -386,25 +505,29 @@ public:
 				}
 				backgroundFrame = croppedBackground.get();
 			}
-			MetaBackgroundCompositor::Apply(*backgroundFrame, *backgrounds, _outputScale, _output, cropLeft, cropTop);
-			if(MetaBackgroundCompositor::BuildFallback(*backgroundFrame, *backgrounds, _outputScale, backgroundColor, generatedFallback, cropLeft, cropTop)) { backgroundFallback = &generatedFallback; }
+			MetaBackgroundCompositor::Apply(*backgroundFrame, _activeBackgrounds, _outputScale, _output, cropLeft, cropTop);
+			if(MetaBackgroundCompositor::BuildFallback(*backgroundFrame, _activeBackgrounds, _outputScale, backgroundColor, generatedFallback, cropLeft, cropTop)) { backgroundFallback = &generatedFallback; }
 		}
-		std::vector<bool> consumed(candidates.size());
+		std::vector<uint8_t> consumedStorage(candidates.size(), 0);
+		uint8_t* consumed = consumedStorage.data();
+		std::vector<size_t> matched;
 		for(const auto& group : *groups) {
 			if(!MetaMemoryCondition::Matches(group.MemoryConditions, frame.MemorySnapshot)) { continue; }
-			if(group.Members.empty() || group.ArtworkScale < 1 || group.ArtworkWidth < 1 || group.ArtworkHeight < 1
-				|| group.Artwork.size() != (size_t)group.ArtworkWidth * group.ArtworkHeight) { continue; }
+			auto artwork = group.SelectArtwork(frame.MemorySnapshot);
+			if(group.Members.empty() || artwork.ArtworkScale < 1 || artwork.ArtworkWidth < 1 || artwork.ArtworkHeight < 1
+				|| artwork.Artwork.size() != (size_t)artwork.ArtworkWidth * artwork.ArtworkHeight) { continue; }
 			const auto& anchor = group.Members[0];
 			for(size_t i = 0; i < candidates.size(); i++) {
 				if(consumed[i] || candidates[i].Width != anchor.Width || candidates[i].Height != anchor.Height || candidates[i].Pixels != anchor.Pixels) { continue; }
 				int left = candidates[i].X - anchor.X, top = candidates[i].Y - anchor.Y;
-				std::vector<size_t> matched { i };
+				matched.clear();
+				matched.push_back(i);
 				for(size_t m = 1; m < group.Members.size(); m++) {
 					const auto& member = group.Members[m];
 					for(size_t j = 0; j < candidates.size(); j++) {
 						const auto& candidate = candidates[j];
-						if(!consumed[j] && std::find(matched.begin(), matched.end(), j) == matched.end() && candidate.X == left + member.X && candidate.Y == top + member.Y
-							&& candidate.Width == member.Width && candidate.Height == member.Height && candidate.Pixels == member.Pixels) { matched.push_back(j); break; }
+						if(candidate.X == left + member.X && candidate.Y == top + member.Y && candidate.Width == member.Width && candidate.Height == member.Height
+							&& !consumed[j] && candidate.Pixels == member.Pixels && std::find(matched.begin(), matched.end(), j) == matched.end()) { matched.push_back(j); break; }
 					}
 					if(matched.size() != m + 1) { break; }
 				}
@@ -422,13 +545,13 @@ public:
 					// Preserve synthetic/future adapters with IDs beyond current hardware.
 					return id >= 128 && std::any_of(matched.begin(), matched.end(), [&](size_t index) { return candidates[index].HardwareSprite == id; });
 				};
-				int artworkLeft = left + group.OriginX - group.ArtworkOriginX;
-				int artworkTop = top + group.OriginY - group.ArtworkOriginY;
+				int artworkLeft = left + group.OriginX - artwork.ArtworkOriginX;
+				int artworkTop = top + group.OriginY - artwork.ArtworkOriginY;
 				// Include both artwork and fetched members: a smaller/shifted PNG
 				// must still remove original pixels outside its own canvas.
 				int64_t boundLeft = artworkLeft, boundTop = artworkTop;
-				int64_t boundRight = boundLeft + (group.ArtworkWidth + group.ArtworkScale - 1) / group.ArtworkScale;
-				int64_t boundBottom = boundTop + (group.ArtworkHeight + group.ArtworkScale - 1) / group.ArtworkScale;
+				int64_t boundRight = boundLeft + (artwork.ArtworkWidth + artwork.ArtworkScale - 1) / artwork.ArtworkScale;
+				int64_t boundBottom = boundTop + (artwork.ArtworkHeight + artwork.ArtworkScale - 1) / artwork.ArtworkScale;
 				for(auto index : matched) {
 					const auto& candidate = candidates[index];
 					boundLeft = std::min(boundLeft, (int64_t)candidate.X); boundTop = std::min(boundTop, (int64_t)candidate.Y);
@@ -441,7 +564,7 @@ public:
 				uint32_t yEnd = (uint32_t)std::clamp<int64_t>(boundBottom - cropTop, 0, height);
 				for(uint32_t y = yBegin; y < yEnd; y++) {
 					for(uint32_t x = xBegin; x < xEnd; x++) {
-						const auto& pixel = frame.Pixels[(y + cropTop) * frame.Width + x + cropLeft];
+						const auto& pixel = framePixels[(y + cropTop) * frame.Width + x + cropLeft];
 						bool memberVisible = matchesHardware(pixel.VisibleSprite);
 						bool originalMemberVisible = memberVisible;
 						const MetaGbaSpriteCoverage* insertedGbaSprite = nullptr;
@@ -473,9 +596,9 @@ public:
 						for(uint32_t sy = 0; sy < _outputScale; sy++) {
 							for(uint32_t sx = 0; sx < _outputScale; sx++) {
 								uint32_t color = 0;
-								int ax = ((int)x + cropLeft - artworkLeft) * group.ArtworkScale + (int)(sx * group.ArtworkScale / _outputScale);
-								int ay = ((int)y + cropTop - artworkTop) * group.ArtworkScale + (int)(sy * group.ArtworkScale / _outputScale);
-								if(ax >= 0 && ay >= 0 && ax < group.ArtworkWidth && ay < group.ArtworkHeight) { color = group.Artwork[ay * group.ArtworkWidth + ax]; }
+								int ax = ((int)x + cropLeft - artworkLeft) * artwork.ArtworkScale + (int)(sx * artwork.ArtworkScale / _outputScale);
+								int ay = ((int)y + cropTop - artworkTop) * artwork.ArtworkScale + (int)(sy * artwork.ArtworkScale / _outputScale);
+								if(ax >= 0 && ay >= 0 && ax < artwork.ArtworkWidth && ay < artwork.ArtworkHeight) { color = artwork.Artwork[ay * artwork.ArtworkWidth + ax]; }
 								size_t outputOffset = (size_t)(y * _outputScale + sy) * outputWidth + x * _outputScale + sx;
 								if(stagedEffects && ((color >> 24) == 255 || (frame.GbaColorEffects && pixel.GbaFallbackCaptured) || (frame.SnesColorEffects && pixel.SnesFallbackCaptured))) {
 									if(memberVisible) { effectMain[outputOffset] = color; }
@@ -499,11 +622,11 @@ public:
 								if(stagedEffects) { continue; }
 								uint32_t alpha = color >> 24, result = 0xFF000000;
 								uint32_t fallback = backgroundFallback && backgroundFallback->size() == _output.size() ? (*backgroundFallback)[outputOffset] : background;
-								if(!originalMemberVisible) { fallback = _output[outputOffset]; }
+								if(!originalMemberVisible) { fallback = outputPixels[outputOffset]; }
 								for(int shift : { 0, 8, 16 }) {
 									result |= ((((color >> shift) & 255) * alpha + ((fallback >> shift) & 255) * (255 - alpha) + 127) / 255) << shift;
 								}
-								_output[(size_t)(y * _outputScale + sy) * outputWidth + x * _outputScale + sx] = result;
+								outputPixels[(size_t)(y * _outputScale + sy) * outputWidth + x * _outputScale + sx] = result;
 							}
 						}
 					}
@@ -511,20 +634,30 @@ public:
 			}
 		}
 		if(stagedEffects) {
+			bool prepareSnesLayers = applySnesBackgrounds && frame.SnesBackgrounds.size() == frame.Pixels.size();
+			if(prepareSnesLayers) { _snesBackgroundRow.resize(width); }
+			auto* snesBackgroundRow = _snesBackgroundRow.data();
+			const auto* capturedSnesBackgrounds = frame.SnesBackgrounds.data();
 			for(uint32_t y = 0; y < height * _outputScale; y++) {
+				if(prepareSnesLayers && y % _outputScale == 0) {
+					for(uint32_t nx = 0; nx < width; nx++) {
+						const auto& rowBackgrounds = capturedSnesBackgrounds[(y / _outputScale + cropTop) * frame.Width + nx + cropLeft];
+						snesBackgroundRow[nx] = PrepareSnesBackgroundScreen(rowBackgrounds);
+					}
+				}
 				for(uint32_t x = 0; x < outputWidth; x++) {
 					size_t offset = (size_t)y * outputWidth + x;
-					if(!effectChanged[offset] && !applyGbaBackgrounds) { continue; }
-					const auto& pixel = frame.Pixels[(y / _outputScale + cropTop) * frame.Width + x / _outputScale + cropLeft];
+					if(!effectChanged[offset] && !applyGbaBackgrounds && !applySnesBackgrounds) { continue; }
+					const auto& pixel = framePixels[(y / _outputScale + cropTop) * frame.Width + x / _outputScale + cropLeft];
 					if(applyGbaBackgrounds) {
 						bool changed = gbaObjectState[offset] & 0x100;
-						for(const auto& layer : *backgrounds) {
+						for(const auto& layer : _activeBackgrounds) {
 							uint32_t color;
 							if(layer.Layer < 4 && layer.Layer >= 0 && layer.Sample(pixel.GbaBackgroundSamples[layer.Layer], x / _outputScale + cropLeft, y / _outputScale + cropTop, x % _outputScale, y % _outputScale, _outputScale, color) && (color >> 24)) { changed = true; break; }
 						}
 						if(changed) {
 							uint16_t state = gbaObjectState[offset];
-							_output[offset] = ComposeGbaLayers(pixel, *backgrounds, x / _outputScale + cropLeft, y / _outputScale + cropTop, x % _outputScale, y % _outputScale, _outputScale,
+							outputPixels[offset] = ComposeGbaLayers(pixel, _activeBackgrounds, x / _outputScale + cropLeft, y / _outputScale + cropTop, x % _outputScale, y % _outputScale, _outputScale,
 								state & 0x100, gbaObjectArtwork[offset], state & 0xFF, state & 0x200, state & 0x400);
 						}
 						continue;
@@ -541,8 +674,34 @@ public:
 								state.SnesUseSubscreen = pixel.SnesAddSubscreen && useSub;
 								state.SnesHalf = pixel.SnesHalfRequested && (!pixel.SnesAddSubscreen || state.SnesUseSubscreen);
 							}
-							return ApplySnesColorEffect(removeMain ? Rgb555(snesMainCoverage[offset] ? pixel.SpriteColor : pixel.SnesFallbackMainColor) : effectMain[offset],
-								removeSub ? Rgb555(snesSubCoverage[offset] ? pixel.SecondaryColor : pixel.SnesFallbackSubColor) : effectSecondary[offset], state);
+							uint32_t main = removeMain ? Rgb555(snesMainCoverage[offset] ? pixel.SpriteColor : pixel.SnesFallbackMainColor) : effectMain[offset];
+							uint32_t secondary = removeSub ? Rgb555(snesSubCoverage[offset] ? pixel.SecondaryColor : pixel.SnesFallbackSubColor) : effectSecondary[offset];
+							if(applySnesBackgrounds && pixel.SnesFallbackCaptured) {
+								bool mainBackground = removeMain ? !snesMainCoverage[offset] || pixel.VisibleSprite < 0 : !(effectChanged[offset] & 1) && pixel.VisibleSprite < 0;
+								bool subBackground = removeSub ? !snesSubCoverage[offset] || pixel.SecondarySprite < 0 : !(effectChanged[offset] & 2) && pixel.SecondarySprite < 0;
+								const MetaSnesBackgroundPixel* backgrounds = prepareSnesLayers
+									? &capturedSnesBackgrounds[(y / _outputScale + cropTop) * frame.Width + x / _outputScale + cropLeft] : nullptr;
+								if(backgrounds && backgrounds->Captured) {
+									uint8_t mainPriority = !removeMain && snesMainCoverage[offset] ? snesMainCoverage[offset]->Priority : backgrounds->MainPriority;
+									uint8_t subPriority = !removeSub && snesSubCoverage[offset] ? snesSubCoverage[offset]->Priority : backgrounds->SubPriority;
+									int px = x / _outputScale + cropLeft, py = y / _outputScale + cropTop;
+									auto resolvedMain = ComposeSnesBackgroundScreen(snesBackgroundRow[x / _outputScale], _activeBackgrounds, true, px, py, x % _outputScale, y % _outputScale,
+										_outputScale, !mainBackground, main, mainPriority, state.SnesMathEnabled);
+									auto resolvedSub = ComposeSnesBackgroundScreen(snesBackgroundRow[x / _outputScale], _activeBackgrounds, false, px, py, x % _outputScale, y % _outputScale,
+										_outputScale, !subBackground, secondary, subPriority, false);
+									main = resolvedMain.Color; secondary = resolvedSub.Color;
+									state.SnesMathEnabled = resolvedMain.Math && pixel.SnesWindowMathAllowed;
+									state.SnesUseSubscreen = pixel.SnesAddSubscreen && resolvedSub.Priority > 0;
+									state.SnesHalf = pixel.SnesHalfRequested && (!pixel.SnesAddSubscreen || state.SnesUseSubscreen);
+								} else for(const auto& layer : _activeBackgrounds) {
+									uint32_t artwork;
+									if(mainBackground && layer.SampleValidated(pixel.BackgroundSample, x / _outputScale + cropLeft, y / _outputScale + cropTop,
+										x % _outputScale, y % _outputScale, _outputScale, artwork)) { main = CompositeAlpha(artwork, main, artwork >> 24); }
+									if(subBackground && layer.SampleValidated(pixel.SnesSubBackgroundSample, x / _outputScale + cropLeft, y / _outputScale + cropTop,
+										x % _outputScale, y % _outputScale, _outputScale, artwork)) { secondary = CompositeAlpha(artwork, secondary, artwork >> 24); }
+								}
+							}
+							return ApplySnesColorEffect(main, secondary, state);
 						};
 						uint32_t mainAlpha = (effectChanged[offset] & 1) ? effectMain[offset] >> 24 : 255;
 						uint32_t subAlpha = (effectChanged[offset] & 2) ? effectSecondary[offset] >> 24 : 255;
@@ -553,7 +712,7 @@ public:
 							if(subAlpha < 255) { fallback = CompositeAlpha(fallback, compose(true, true), subAlpha); }
 							result = CompositeAlpha(result, fallback, mainAlpha);
 						}
-						_output[offset] = result;
+						outputPixels[offset] = result;
 						continue;
 					}
 					if(gbaCoverage[offset]) {
@@ -562,7 +721,7 @@ public:
 						state.SemiTransparent = gbaCoverage[offset]->SemiTransparent;
 						state.SecondaryBlendTarget = gbaCoverage[offset]->SecondaryBlendTarget;
 						uint32_t result = ApplyGbaColorEffect(effectMain[offset] | 0xFF000000, effectSecondary[offset], state);
-						_output[offset] = CompositeAlpha(result, _output[offset], effectMain[offset] >> 24);
+						outputPixels[offset] = CompositeAlpha(result, outputPixels[offset], effectMain[offset] >> 24);
 						continue;
 					}
 					uint32_t result = ApplyGbaColorEffect(effectMain[offset] | 0xFF000000, effectSecondary[offset], pixel);
@@ -575,7 +734,7 @@ public:
 					if((effectChanged[offset] & 1) && (effectMain[offset] >> 24) < 255) {
 						result = CompositeAlpha(result, Rgb555(pixel.GbaFallbackColor), effectMain[offset] >> 24);
 					}
-					_output[offset] = result;
+					outputPixels[offset] = result;
 				}
 			}
 		}

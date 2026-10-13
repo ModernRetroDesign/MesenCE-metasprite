@@ -55,8 +55,10 @@
 					<c:EnumComboBox SelectedItem="{Binding Config.Background}" Width="100" Grid.Column="1" Grid.Row="1" />
 				</Grid>
 				<c:GroupBox Header="Background PNG replacements" DataContext="{Binding BackgroundEditor}" x:DataType="dvm:MetaBackgroundEditorViewModel"><StackPanel>							<TextBlock Text="Background PNG layers" FontWeight="Bold" />
-							<TextBlock Text="Gameplay: GB/GBC layers 0/1, SMS Mode 4 layer 0, WonderSwan layers 0/1." TextWrapping="Wrap" />
+							<TextBlock Text="Background layers: NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. Export uses the selected tilemap and current display settings." TextWrapping="Wrap" />
+							<Button Content="Export selected tilemap PNG" Click="OnExportMetaBackground" />
 							<Button Content="Import background PNG" Click="OnImportMetaBackground" />
+							<Button Content="Replace selected PNG" Click="OnReplaceMetaBackground" ToolTip.Tip="Keep the selected background's placement, scale and CPU conditions while loading new artwork." />
 							<ComboBox ItemsSource="{Binding MetaBackgrounds}" SelectedItem="{Binding SelectedMetaBackground}" />
 							<Button Content="Remove selected background layer" Click="OnRemoveMetaBackground" />
 							<Border Background="#404040" MaxHeight="200">
@@ -77,7 +79,11 @@
 							<CheckBox Content="Wrap horizontally" IsChecked="{Binding SelectedMetaBackground.WrapX}" />
 							<CheckBox Content="Wrap vertically" IsChecked="{Binding SelectedMetaBackground.WrapY}" />
 							<CheckBox Content="Enable background in gameplay" IsChecked="{Binding SelectedMetaBackground.Enabled}" />
+							<TextBlock Text="CPU memory conditions (hex, all must match)" />
+							<TextBox Text="{Binding MemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 = 01 / FF" />
+							<TextBlock Text="One ADDRESS = VALUE / MASK per line. Mask defaults to FF. At least one condition is required for gameplay replacement; all must match." TextWrapping="Wrap" />
 							<Button Content="Save and apply background edits" Click="OnSaveMetaBackgrounds" />
+							<Button Content="Reload saved backgrounds" Click="OnReloadMetaBackgrounds" ToolTip.Tip="Reload layers from disk, discarding unsaved background edits." />
 <TextBlock Text="{Binding MetaStatus}" TextWrapping="Wrap" /></StackPanel></c:GroupBox>
 				<CheckBox Content="{l:Translate chkShowGrid}" IsChecked="{Binding Config.ShowGrid}" />
 				<CheckBox Content="{l:Translate chkNesShowAttributeGrid}" IsChecked="{Binding Config.NesShowAttributeGrid}" IsVisible="{Binding IsNes}" />

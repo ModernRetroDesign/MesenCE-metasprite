@@ -100,7 +100,8 @@ Debugger::Debugger(Emulator* emu, IConsole* console)
 			default: throw std::runtime_error("Unsupported CPU type");
 		}
 
-		_debuggers[(int)type].Evaluator.reset(new ExpressionEvaluator(this, _debuggers[(int)type].Debugger.get(), type));
+		_debuggers[(int)type].Instance = debugger.get();
+		_debuggers[(int)type].Evaluator.reset(new ExpressionEvaluator(this, _debuggers[(int)type].Instance, type));
 	}
 
 	for(CpuType type : _cpuTypes) {
@@ -160,7 +161,7 @@ void Debugger::Reset()
 template<CpuType type, typename DebuggerType>
 DebuggerType* Debugger::GetDebugger()
 {
-	return (DebuggerType*)_debuggers[(int)type].Debugger.get();
+	return (DebuggerType*)_debuggers[(int)type].Instance;
 }
 
 IDebugger* Debugger::GetCpuDebugger(CpuType cpuType)
@@ -213,7 +214,7 @@ bool Debugger::ProcessStepBack(IDebugger* debugger)
 template<CpuType type>
 void Debugger::ProcessInstruction()
 {
-	IDebugger* debugger = _debuggers[(int)type].Debugger.get();
+	IDebugger* debugger = _debuggers[(int)type].Instance;
 	if(debugger->IsStepBack() && ProcessStepBack(debugger)) {
 		debugger->AllowChangeProgramCounter = true; //set to true temporarily to allow debugger to pause on break requests when rewinding/step back is active
 		SleepOnBreakRequest<type>();
@@ -253,7 +254,7 @@ void Debugger::ProcessInstruction()
 template<CpuType type, uint8_t accessWidth, MemoryAccessFlags flags, typename T>
 void Debugger::ProcessMemoryRead(uint32_t addr, T& value, MemoryOperationType opType)
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		SleepOnBreakRequest<type>();
 		return;
 	}
@@ -286,7 +287,7 @@ void Debugger::ProcessMemoryRead(uint32_t addr, T& value, MemoryOperationType op
 template<CpuType type, uint8_t accessWidth, MemoryAccessFlags flags, typename T>
 bool Debugger::ProcessMemoryWrite(uint32_t addr, T& value, MemoryOperationType opType)
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		SleepOnBreakRequest<type>();
 		return !_debuggers[(int)type].Debugger->GetFrozenAddressManager().IsFrozenAddress(addr);
 	}
@@ -354,7 +355,7 @@ void Debugger::ProcessMemoryAccess(uint32_t addr, T& value)
 template<CpuType type>
 void Debugger::ProcessIdleCycle()
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		SleepOnBreakRequest<type>();
 		return;
 	}
@@ -407,7 +408,7 @@ void Debugger::SleepOnBreakRequest()
 template<CpuType type, typename T>
 void Debugger::ProcessPpuRead(uint16_t addr, T& value, MemoryType memoryType, MemoryOperationType opType)
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		return;
 	}
 
@@ -428,7 +429,7 @@ void Debugger::ProcessPpuRead(uint16_t addr, T& value, MemoryType memoryType, Me
 template<CpuType type, typename T>
 void Debugger::ProcessPpuWrite(uint16_t addr, T& value, MemoryType memoryType)
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		return;
 	}
 
@@ -449,7 +450,7 @@ void Debugger::ProcessPpuWrite(uint16_t addr, T& value, MemoryType memoryType)
 template<CpuType type>
 void Debugger::ProcessPpuCycle()
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	if(_debuggers[(int)type].Instance->IsStepBack()) {
 		return;
 	}
 
@@ -568,11 +569,12 @@ void Debugger::ProcessPredictiveBreakpoint(CpuType sourceCpu, BreakpointManager*
 template<CpuType type>
 void Debugger::ProcessInterrupt(uint32_t originalPc, uint32_t currentPc, bool forNmi)
 {
-	if(_debuggers[(int)type].Debugger->IsStepBack()) {
+	IDebugger* debugger = _debuggers[(int)type].Instance;
+	if(debugger->IsStepBack()) {
 		return;
 	}
 
-	_debuggers[(int)type].Debugger->ProcessInterrupt(originalPc, currentPc, forNmi);
+	debugger->ProcessInterrupt(originalPc, currentPc, forNmi);
 	ProcessEvent(forNmi ? EventType::Nmi : EventType::Irq, type);
 }
 

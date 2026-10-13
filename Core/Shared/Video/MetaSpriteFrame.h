@@ -1,7 +1,59 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include <utility>
+#include <memory>
+#include <array>
 #include "MetaMemoryCondition.h"
+
+// Most pixels have no overlapping OBJ coverage. Avoid constructing two checked
+// STL vector iterator proxies for every pixel in Debug builds. Storage is only
+// allocated when coverage is actually recorded; iteration uses bounded pointers.
+template<typename T> class MetaSpriteCoverageList
+{
+	T* _items = nullptr;
+	size_t _size = 0, _capacity = 0;
+public:
+	MetaSpriteCoverageList() = default;
+	~MetaSpriteCoverageList() { delete[] _items; }
+	MetaSpriteCoverageList(const MetaSpriteCoverageList& other)
+	{
+		if(other._size) {
+			_items = new T[other._size];
+			_size = _capacity = other._size;
+			std::copy_n(other._items, _size, _items);
+		}
+	}
+	MetaSpriteCoverageList(MetaSpriteCoverageList&& other) noexcept
+		: _items(std::exchange(other._items, nullptr)), _size(std::exchange(other._size, 0)), _capacity(std::exchange(other._capacity, 0)) {}
+	MetaSpriteCoverageList& operator=(MetaSpriteCoverageList other) noexcept
+	{
+		swap(other);
+		return *this;
+	}
+	void swap(MetaSpriteCoverageList& other) noexcept
+	{
+		std::swap(_items, other._items); std::swap(_size, other._size); std::swap(_capacity, other._capacity);
+	}
+	void clear() { _size = 0; }
+	void push_back(T value)
+	{
+		if(_size == _capacity) {
+			size_t capacity = _capacity ? _capacity * 2 : 4;
+			T* items = new T[capacity];
+			if(_size) { std::copy_n(_items, _size, items); }
+			delete[] _items; _items = items; _capacity = capacity;
+		}
+		_items[_size++] = value;
+	}
+	T& operator[](size_t index) { return _items[index]; }
+	const T& operator[](size_t index) const { return _items[index]; }
+	T* begin() { return _items; }
+	T* end() { return _size ? _items + _size : _items; }
+	const T* begin() const { return _items; }
+	const T* end() const { return _size ? _items + _size : _items; }
+};
 
 // Captured at pixel composition time, before source identity is lost in the framebuffer.
 // Hardware IDs are transient references within a frame, never pack matching keys.
@@ -20,7 +72,23 @@ struct MetaGbaSpriteCoverage
 	uint8_t Priority = 0;
 };
 
-struct MetaSpritePixel
+struct MetaSnesBackgroundLayer
+{
+	MetaBackgroundSample Sample;
+	uint16_t Color = 0;
+	uint8_t Priority = 0;
+	bool Opaque = false, Main = false, Sub = false, Math = false;
+};
+
+struct MetaSnesBackgroundPixel
+{
+	MetaSnesBackgroundLayer Layers[4];
+	uint16_t BackdropColor = 0;
+	uint8_t MainPriority = 0, SubPriority = 0;
+	bool Captured = false, BackdropMath = false;
+};
+
+struct MetaSpritePixelState
 {
 	struct GbaBackgroundLayer {
 		uint16_t Color = 0;
@@ -28,6 +96,7 @@ struct MetaSpritePixel
 		bool Opaque = false;
 	};
 	MetaBackgroundSample BackgroundSample;
+	MetaBackgroundSample SnesSubBackgroundSample;
 	MetaBackgroundSample GbaBackgroundSamples[4];
 	GbaBackgroundLayer GbaBackgroundLayers[4];
 	uint8_t GbaBlendMainMask = 0, GbaBlendSubMask = 0;
@@ -69,21 +138,27 @@ struct MetaSpritePixel
 	uint16_t GbaFallbackMainColor = 0;
 	bool GbaFallbackBlendTarget = false;
 	bool GbaFallbackCaptured = false;
-	std::vector<MetaGbaSpriteCoverage> GbaCoverage;
+	bool SnesMathEnabled = false, SnesSubtract = false, SnesHalf = false;
+	bool SnesClip = false, SnesUseSubscreen = false;
+	uint16_t SnesFixedColor = 0;
+	uint16_t SnesFallbackMainColor = 0, SnesFallbackSubColor = 0;
+	uint8_t SnesFallbackMainFlags = 0, SnesFallbackSubPriority = 0;
+	// BG0..BG3 identities before OBJ composition; 0xFF denotes backdrop.
+	uint8_t SnesFallbackMainLayer = 0xFF, SnesFallbackSubLayer = 0xFF;
+	bool SnesFallbackCaptured = false;
+	bool SnesWindowMathAllowed = true, SnesAddSubscreen = false, SnesHalfRequested = false;
+};
+
+struct MetaSpritePixel : MetaSpritePixelState
+{
+	MetaSpriteCoverageList<MetaGbaSpriteCoverage> GbaCoverage;
 	struct SnesCoverageSample {
 		int16_t Sprite = -1;
 		uint16_t Order = 0;
 		uint8_t Priority = 0, Palette = 0;
 		bool Main = false, Sub = false, Math = false;
 	};
-	std::vector<SnesCoverageSample> SnesCoverage;
-	bool SnesMathEnabled = false, SnesSubtract = false, SnesHalf = false;
-	bool SnesClip = false, SnesUseSubscreen = false;
-	uint16_t SnesFixedColor = 0;
-	uint16_t SnesFallbackMainColor = 0, SnesFallbackSubColor = 0;
-	uint8_t SnesFallbackMainFlags = 0, SnesFallbackSubPriority = 0;
-	bool SnesFallbackCaptured = false;
-	bool SnesWindowMathAllowed = true, SnesAddSubscreen = false, SnesHalfRequested = false;
+	MetaSpriteCoverageList<SnesCoverageSample> SnesCoverage;
 };
 
 struct MetaSpriteRow
@@ -118,6 +193,8 @@ struct MetaSpriteFrame
 	bool GbaColorEffects = false;
 	bool SnesColorEffects = false;
 	std::vector<MetaSpritePixel> Pixels;
+	// Keep SNES layer capture separate so other systems pay no per-pixel cost.
+	std::vector<MetaSnesBackgroundPixel> SnesBackgrounds;
 	std::vector<MetaSpriteRow> Rows;
 	std::vector<MetaSpriteDecodedRow> DecodedRows;
 	// NES palettes contain PPU color indices/emphasis, rather than RGB555 values.
@@ -126,4 +203,36 @@ struct MetaSpriteFrame
 	mutable MetaMemorySnapshot MemorySnapshot;
 
 	MetaSpriteFrame(uint32_t width, uint32_t height) : Width(width), Height(height), Pixels(width * height) {}
+	void Reset()
+	{
+		FrameNumber = 0; GbaColorEffects = SnesColorEffects = false;
+		const MetaSpritePixelState blank;
+		MetaSpritePixel* pixels = Pixels.data();
+		for(size_t i = 0, count = Pixels.size(); i < count; i++) {
+			static_cast<MetaSpritePixelState&>(pixels[i]) = blank;
+			pixels[i].GbaCoverage.clear(); pixels[i].SnesCoverage.clear();
+		}
+		SnesBackgrounds.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+	}
+};
+
+// Owned by each PPU and accessed only on the emulation thread. A published
+// frame remains immutable until all decoder/renderer references are released.
+class MetaSpriteFramePool
+{
+	std::array<std::shared_ptr<MetaSpriteFrame>, 3> _frames;
+public:
+	std::shared_ptr<MetaSpriteFrame> Acquire(uint32_t width, uint32_t height)
+	{
+		for(auto& frame : _frames) {
+			if(frame && frame.use_count() == 1 && frame->Width == width && frame->Height == height) {
+				frame->Reset(); return frame;
+			}
+		}
+		auto frame = std::make_shared<MetaSpriteFrame>(width, height);
+		for(auto& slot : _frames) {
+			if(!slot || slot.use_count() == 1) { slot = frame; break; }
+		}
+		return frame;
+	}
 };

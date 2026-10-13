@@ -322,11 +322,6 @@ namespace Mesen.Windows
 				case ConsoleNotificationType.GameLoaded:
 					CheatCodes.ApplyCheats();
 					RomInfo romInfo = EmuApi.GetRomInfo();
-					if((romInfo.ConsoleType == ConsoleType.Gameboy && romInfo.Format == RomFormat.Gb) || romInfo.ConsoleType == ConsoleType.Sms || romInfo.ConsoleType == ConsoleType.PcEngine || romInfo.ConsoleType == ConsoleType.Gba || romInfo.ConsoleType == ConsoleType.Ws || romInfo.ConsoleType == ConsoleType.Nes || (romInfo.ConsoleType == ConsoleType.Snes && romInfo.Format == RomFormat.Sfc)) {
-						string expectedMetaRomHash = EmuApi.GetRomHash(HashType.Sha1);
-						CpuType metaCpu = romInfo.ConsoleType == ConsoleType.PcEngine ? CpuType.Pce : romInfo.ConsoleType == ConsoleType.Sms ? CpuType.Sms : romInfo.ConsoleType == ConsoleType.Gba ? CpuType.Gba : romInfo.ConsoleType == ConsoleType.Ws ? CpuType.Ws : romInfo.ConsoleType == ConsoleType.Nes ? CpuType.Nes : romInfo.ConsoleType == ConsoleType.Snes ? CpuType.Snes : CpuType.Gameboy;
-						Dispatcher.UIThread.Post(() => MetaSpriteRuntimeLoader.LoadForGame(expectedMetaRomHash, metaCpu));
-					}
 
 					Dispatcher.UIThread.Post(() => {
 						bool wasAudioFile = _model.AudioPlayer != null;
@@ -348,6 +343,13 @@ namespace Mesen.Windows
 					});
 
 					GameConfig.LoadGameConfig(romInfo).ApplyConfig();
+					if((romInfo.ConsoleType == ConsoleType.Gameboy && romInfo.Format == RomFormat.Gb) || romInfo.ConsoleType == ConsoleType.Sms || romInfo.ConsoleType == ConsoleType.PcEngine || romInfo.ConsoleType == ConsoleType.Gba || romInfo.ConsoleType == ConsoleType.Ws || romInfo.ConsoleType == ConsoleType.Nes || (romInfo.ConsoleType == ConsoleType.Snes && romInfo.Format == RomFormat.Sfc)) {
+						string expectedMetaRomHash = EmuApi.GetRomHash(HashType.Sha1);
+						CpuType metaCpu = romInfo.ConsoleType == ConsoleType.PcEngine ? CpuType.Pce : romInfo.ConsoleType == ConsoleType.Sms ? CpuType.Sms : romInfo.ConsoleType == ConsoleType.Gba ? CpuType.Gba : romInfo.ConsoleType == ConsoleType.Ws ? CpuType.Ws : romInfo.ConsoleType == ConsoleType.Nes ? CpuType.Nes : romInfo.ConsoleType == ConsoleType.Snes ? CpuType.Snes : CpuType.Gameboy;
+						// GameLoaded is delivered before the core starts emulation/video threads.
+						// Decode saved artwork here so activation does not compete with gameplay.
+						MetaSpriteRuntimeLoader.LoadForGame(expectedMetaRomHash, metaCpu);
+					}
 
 					GameLoadedEventParams evtParams = Marshal.PtrToStructure<GameLoadedEventParams>(e.Parameter);
 					if(!evtParams.IsPowerCycle) {

@@ -81,16 +81,18 @@ extern "C"
 			auto nes = dynamic_cast<NesConsole*>(console.get());
 			auto gba = dynamic_cast<GbaConsole*>(console.get());
 			auto layers = MetaBackgroundPacket(packet, length).Parse();
+			auto snes = dynamic_cast<SnesConsole*>(console.get());
+			if(snes && _emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
 			auto pce = dynamic_cast<PceConsole*>(console.get());
-			if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba) || (pce && pce->IsSuperGrafx()) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
-				|| (nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole()))
-				|| (sms && !sms->GetVdp()->GetState().UseMode4))) { return false; }
+			if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba && !snes) || (pce && pce->IsSuperGrafx()) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
+				|| (nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole())))) { return false; }
 			if(gameboy && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 1; })) { return false; }
 			if(sms && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
 			if(ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 1; })) { return false; }
 			if(nes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
 			if(pce && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer != 0; })) { return false; }
 			if(gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 3; })) { return false; }
+			if(snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 3; })) { return false; }
 			_emu->GetVideoDecoder()->SetMetaBackgroundLayers(std::move(layers));
 			if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
 			if(sms) { sms->GetVdp()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
@@ -98,6 +100,7 @@ extern "C"
 			if(nes) { nes->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
 			if(pce) { pce->GetVdc()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
 			if(gba) { gba->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
+			if(snes) { snes->GetPpu()->SetMetaSpriteCapture(_emu->GetVideoDecoder()->HasMetaReplacements()); }
 			return true;
 		} catch(...) { return false; }
 	}
@@ -119,8 +122,10 @@ extern "C"
 			auto groups = MetaSpritePacket(packet, length).Parse();
 			if(combined) {
 				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength).Parse();
-				if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba) || (sms && !sms->GetVdp()->GetState().UseMode4))) { return false; }
-				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba ? 3 : 1); })) { return false; }
+				// Accept SMS assets before its program selects the VDP mode. Capture
+				// remains guarded by UseMode4 at rendering time.
+				if(!layers.empty() && !gameboy && !sms && !ws && !nes && !pce && !gba && !snes) { return false; }
+				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba || snes ? 3 : 1); })) { return false; }
 				_emu->GetVideoDecoder()->SetMetaReplacements(std::move(groups), std::move(layers));
 			} else { _emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups)); }
 			bool enabled = _emu->GetVideoDecoder()->HasMetaReplacements();

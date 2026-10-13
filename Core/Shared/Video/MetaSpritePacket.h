@@ -42,7 +42,7 @@ public:
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t magic = Read();
-		if(magic != 0x3150534D && magic != 0x3250534D) { throw std::runtime_error("Invalid metasprite packet"); }
+		if(magic != 0x3150534D && magic != 0x3250534D && magic != 0x3350534D) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t count = Read();
 		if(count > 1024) { throw std::runtime_error("Too many groups"); }
 		std::vector<MetaSpriteReplacement> groups;
@@ -65,13 +65,32 @@ public:
 				group.Members.push_back(std::move(member));
 			}
 			group.Artwork = Pixels(group.ArtworkWidth, group.ArtworkHeight);
-			if(magic == 0x3250534D) {
+			if(magic != 0x3150534D) {
 				uint32_t conditions = Read();
 				if(conditions > 64) { throw std::runtime_error("Too many memory conditions"); }
 				for(uint32_t c = 0; c < conditions; c++) {
 					uint32_t address = Read(), value = Read(), mask = Read();
 					if(value > 255 || mask > 255) { throw std::runtime_error("Invalid memory condition byte"); }
 					group.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+				}
+			}
+			if(magic == 0x3350534D) {
+				uint32_t alternates = Read();
+				if(alternates > 64) { throw std::runtime_error("Too many alternate images"); }
+				for(uint32_t a = 0; a < alternates; a++) {
+					MetaAlternateArtwork alternate;
+					alternate.ArtworkOriginX = Coordinate(); alternate.ArtworkOriginY = Coordinate();
+					alternate.ArtworkScale = Dimension(10);
+					alternate.ArtworkWidth = Dimension(8192); alternate.ArtworkHeight = Dimension(8192);
+					if(alternate.ArtworkWidth % alternate.ArtworkScale || alternate.ArtworkHeight % alternate.ArtworkScale) { throw std::runtime_error("Invalid alternate scale"); }
+					alternate.Artwork = Pixels(alternate.ArtworkWidth, alternate.ArtworkHeight);
+					int conditions = Dimension(64);
+					for(int c = 0; c < conditions; c++) {
+						uint32_t address = Read(), value = Read(), mask = Read();
+						if(value > 255 || mask > 255) { throw std::runtime_error("Invalid alternate condition byte"); }
+						alternate.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+					}
+					group.AlternateArtwork.push_back(std::move(alternate));
 				}
 			}
 			groups.push_back(std::move(group));

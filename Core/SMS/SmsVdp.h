@@ -65,6 +65,7 @@ private:
 	uint16_t* _currentOutputBuffer = nullptr;
 	std::atomic<bool> _metaCaptureRequested{false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaSpriteFramePool _metaFramePool;
 
 	SmsVdpState _state = {};
 	uint64_t _lastMasterClock = 0;

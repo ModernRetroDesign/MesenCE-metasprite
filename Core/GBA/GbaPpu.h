@@ -108,6 +108,7 @@ private:
 	GbaPpuState _state = {};
 	std::atomic<bool> _metaCaptureRequested{false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
+	MetaSpriteFramePool _metaFramePool;
 
 	uint16_t _vblankStartScanline = 160;
 	uint16_t _lastScanline = 227;
@@ -131,7 +132,11 @@ private:
 	GbaPixelData _renderSprPixel = {};
 
 	GbaPixelData _oamOutputBuffers[2][GbaConstants::ScreenWidth] = {};
+	std::vector<GbaPixelData> _metaOamCoverage[2][GbaConstants::ScreenWidth];
+	int _metaOamRead = 0, _metaOamWrite = 1;
 	GbaPixelData _layerOutput[4][GbaConstants::ScreenWidth] = {};
+	MetaBackgroundSample _metaBgSamples[4][GbaConstants::ScreenWidth] = {};
+	int _metaBgMapXBase[4] = {}, _metaBgMapY[4] = {}, _metaBgMapWidthMask[4] = {};
 
 	uint8_t _oamWindow[GbaConstants::ScreenWidth] = {};
 	uint8_t _activeWindow[256] = {};

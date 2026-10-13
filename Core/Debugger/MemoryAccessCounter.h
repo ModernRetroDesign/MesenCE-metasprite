@@ -33,13 +33,19 @@ enum class ReadResult
 class MemoryAccessCounter
 {
 private:
+	static constexpr int CounterTypeCount = DebugUtilities::GetMemoryTypeCount();
 	vector<AddressCounters> _counters[DebugUtilities::GetMemoryTypeCount()];
+	// Counter buffers are allocated once in the constructor and never resized.
+	AddressCounters* _counterData[DebugUtilities::GetMemoryTypeCount()] = {};
+	uint32_t _counterSizes[DebugUtilities::GetMemoryTypeCount()] = {};
 
 	Debugger* _debugger = nullptr;
 	bool _enableBreakOnUninitRead = false;
 
 public:
 	MemoryAccessCounter(Debugger* debugger);
+	MemoryAccessCounter(const MemoryAccessCounter&) = delete;
+	MemoryAccessCounter& operator=(const MemoryAccessCounter&) = delete;
 
 	template<uint8_t accessWidth = 1> ReadResult ProcessMemoryRead(AddressInfo& addressInfo, uint64_t masterClock);
 	template<uint8_t accessWidth = 1> void ProcessMemoryWrite(AddressInfo& addressInfo, uint64_t masterClock);

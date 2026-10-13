@@ -23,8 +23,9 @@ public partial class SpriteViewerViewModel
 	public ObservableCollection<MetaSpriteGroup> MetaGroups { get; } = new();
 	[ObservableProperty] public partial MetaSpriteGroup? SelectedMetaGroup { get; set; }
 	[ObservableProperty] public partial string MetaStatus { get; set; } = "Ctrl-click sprites to select group members.";
-	[ObservableProperty] public partial bool SetMetaOrigin { get; set; }
+	
 	[ObservableProperty] public partial string MetaMatchStatus { get; set; } = "";
+	[ObservableProperty] public partial string MetaMemoryConditionsText { get; set; } = "";
 	private readonly Dictionary<int, HashSet<int>> _matchedMetaGroupsBySprite = new();
 	[ObservableProperty] public partial Bitmap? MetaPreview { get; set; }
 	[ObservableProperty] public partial double MetaPreviewWidth { get; set; } = 1;
@@ -36,10 +37,15 @@ public partial class SpriteViewerViewModel
 	private readonly Dictionary<int, PixelPoint> _metaWrapOffsets = new();
 	private MetaSpritePack _metaPack = new();
 	private string _metaPackPath = "";
+	private string _savedSpriteDefinitions = "";
 	private bool _metaLoadFailed;
 	private MetaSpriteGroup? _removedMetaGroup;
 	private int _removedMetaGroupIndex;
 	public bool MetaSelectionDragging { get; set; }
+	private DebugSpriteInfo[] _metaMatchSprites = Array.Empty<DebugSpriteInfo>();
+	private uint[] _metaMatchPixels = Array.Empty<uint>();
+	private uint[] _metaMatchFrame = Array.Empty<uint>();
+	private readonly Dictionary<int, uint[]> _metaMatchGraphics = new();
 
 
 	private unsafe void UpdateLiveMetaMatches()
@@ -48,16 +54,24 @@ public partial class SpriteViewerViewModel
 		MetaMatchStatus = "";
 		if(MetaGroups.Count == 0 || _data.PpuState == null || _data.PpuToolsState == null || _data.Palette == null) { return; }
 		try {
-			DebugSpriteInfo[] sprites = Array.Empty<DebugSpriteInfo>();
-			uint[] pixels = Array.Empty<uint>();
-			uint[] frame = new uint[ViewerBitmap.PixelSize.Width * ViewerBitmap.PixelSize.Height];
-			fixed(uint* output = frame) {
-				DebugApi.GetSpriteList(ref sprites, ref pixels, CpuType, new GetSpritePreviewOptions() { Background = SpriteBackground.Transparent, Filter = Config.Filter },
-					_data.PpuState, _data.PpuToolsState, _data.Vram, _data.SpriteRam, _data.Palette.Value.GetRgbPalette(), (IntPtr)output);
+			uint[] pixels = _spritePreviews;
+			if(Config.Background != SpriteBackground.Transparent) {
+				int frameSize = ViewerBitmap.PixelSize.Width * ViewerBitmap.PixelSize.Height;
+				if(_metaMatchFrame.Length != frameSize) { _metaMatchFrame = new uint[frameSize]; }
+				fixed(uint* output = _metaMatchFrame) {
+					DebugApi.GetSpriteList(ref _metaMatchSprites, ref _metaMatchPixels, CpuType, new GetSpritePreviewOptions() { Background = SpriteBackground.Transparent, Filter = Config.Filter },
+						_data.PpuState, _data.PpuToolsState, _data.Vram, _data.SpriteRam, _data.Palette.Value.GetRgbPalette(), (IntPtr)output);
+				}
+				pixels = _metaMatchPixels;
 			}
 			List<MetaSpriteMember> candidates = new();
 			foreach(var sprite in SpritePreviews.Where(s => s.Visibility != SpriteVisibility.Disabled && s.Width > 0 && s.Height > 0)) {
-				uint[] graphic = new uint[sprite.Width * sprite.Height];
+				// Candidates are consumed within this refresh. Keep their graphic buffers
+				// separate from saved group members, which own their captured pixels.
+				int graphicSize = sprite.Width * sprite.Height;
+				if(!_metaMatchGraphics.TryGetValue(sprite.SpriteIndex, out uint[]? graphic) || graphic.Length != graphicSize) {
+					_metaMatchGraphics[sprite.SpriteIndex] = graphic = new uint[graphicSize];
+				}
 				Array.Copy(pixels, sprite.SpriteIndex * 128 * 128, graphic, 0, graphic.Length);
 				var (main, a, b, c) = sprite.GetPreviewRect();
 				foreach(var rect in new[] { main, a, b, c }.Where(r => r != default)) {
@@ -99,13 +113,20 @@ public partial class SpriteViewerViewModel
 
 	protected override void DisposeView()
 	{
+		foreach(var sprite in SpritePreviews) { sprite.ReleasePreview(); }
+		ViewerBitmap?.Dispose();
 		if(SelectedMetaGroup != null) { SelectedMetaGroup.PropertyChanged -= MetaGroupPropertyChanged; }
 		MetaPreview?.Dispose();
+		MetaAlternatePreview?.Dispose(); MetaAlternatePreview = null;
+		if(SelectedMetaAlternate != null) { SelectedMetaAlternate.PropertyChanged -= MetaAlternatePropertyChanged; }
 		base.DisposeView();
 	}
 
 	public void LoadMetaGroups()
 	{
+		_metaMatchGraphics.Clear();
+		_invalidMetaConditionDrafts.Clear();
+		_invalidAlternateConditionDrafts.Clear();
 		_removedMetaGroup = null;
 		_metaSelection.Clear();
 		_metaWrapOffsets.Clear();
@@ -116,6 +137,7 @@ public partial class SpriteViewerViewModel
 			string hash = EmuApi.GetRomHash(HashType.Sha1);
 			_metaPackPath = MetaSpriteRuntimeLoader.GetPackPath(hash, CpuType);
 			_metaPack = MetaSpritePack.Load(_metaPackPath, hash, CpuType.ToString());
+			_savedSpriteDefinitions = _metaPack.GetSpriteDefinitionsSnapshot();
 			foreach(MetaSpriteGroup group in _metaPack.Groups) { MetaGroups.Add(group); }
 			MetaStatus = "Ctrl-click sprites to select group members.";
 			if(_metaPack.Groups.Any(g => g.Enabled) || _metaPack.BackgroundLayers.Any(layer => layer.Enabled)) { ApplyMetaReplacements(); }
@@ -142,9 +164,9 @@ public partial class SpriteViewerViewModel
 	{
 		_metaSelection.Clear();
 		_metaWrapOffsets.Clear();
-		foreach(var sprite in SpritePreviews) {
+		foreach(var sprite in SpritePreviews.Where(s => s.Visibility != SpriteVisibility.Disabled && s.Width > 0 && s.Height > 0)) {
 			var (main, a, b, c) = sprite.GetPreviewRect();
-			var copies = new[] { main, a, b, c }.Where(r => r != default && r.Intersects(rectangle))
+			var copies = new[] { main, a, b, c }.Where(r => r != default && r.Intersect(rectangle) is Rect overlap && overlap.Width > 0 && overlap.Height > 0)
 				.OrderByDescending(r => { Rect intersection = r.Intersect(rectangle); return intersection.Width * intersection.Height; }).ToList();
 			if(copies.Count > 0) {
 				_metaSelection.Add(sprite.SpriteIndex);
@@ -160,7 +182,7 @@ public partial class SpriteViewerViewModel
 		_metaSelection.Clear();
 		_metaWrapOffsets.Clear();
 		SelectionRect = default;
-		MetaStatus = "Ctrl-click sprites to select group members.";
+		MetaStatus = "Drag a rectangle or Ctrl-click sprites to select group members.";
 	}
 
 	private PixelPoint MetaPosition(SpritePreviewModel sprite)
@@ -171,13 +193,16 @@ public partial class SpriteViewerViewModel
 
 	private void UpdateMetaSelection()
 	{
-		var members = SpritePreviews.Where(s => _metaSelection.Contains(s.SpriteIndex)).ToList();
-		if(members.Count > 0) {
-			double left = members.Min(s => MetaPosition(s).X), top = members.Min(s => MetaPosition(s).Y);
-			SelectionRect = new Rect(left, top, members.Max(s => MetaPosition(s).X + s.Width) - left, members.Max(s => MetaPosition(s).Y + s.Height) - top);
-		} else {
-			SelectionRect = default;
+		double left = double.PositiveInfinity, top = double.PositiveInfinity;
+		double right = double.NegativeInfinity, bottom = double.NegativeInfinity;
+		foreach(var sprite in SpritePreviews) {
+			if(!_metaSelection.Contains(sprite.SpriteIndex)) { continue; }
+			PixelPoint position = MetaPosition(sprite);
+			left = Math.Min(left, position.X); top = Math.Min(top, position.Y);
+			right = Math.Max(right, (double)position.X + sprite.Width);
+			bottom = Math.Max(bottom, (double)position.Y + sprite.Height);
 		}
+		SelectionRect = double.IsPositiveInfinity(left) ? default : new Rect(left, top, right - left, bottom - top);
 	}
 
 	public unsafe void CreateMetaGroup(bool asPose = false)
@@ -187,6 +212,7 @@ public partial class SpriteViewerViewModel
 		bool creationSaved = false;
 		if(asPose && poseSource == null) { MetaStatus = "Choose an existing group before adding a pose."; return; }
 		if(_metaLoadFailed || _data.PpuState == null || _data.PpuToolsState == null || _data.Palette == null) { return; }
+		if(EmuApi.GetRomHash(HashType.Sha1) != _metaPack.RomHash) { MetaStatus = "The game changed. Refresh the sprite viewer before creating a group."; return; }
 		var selected = SpritePreviews.Where(s => _metaSelection.Contains(s.SpriteIndex) && s.Width > 0 && s.Height > 0).OrderBy(s => s.SpriteIndex).ToList();
 		if(selected.Count == 0) { MetaStatus = "Select sprites with Ctrl-click first."; return; }
 		try {
@@ -215,28 +241,7 @@ public partial class SpriteViewerViewModel
 				Array.Copy(previews, sprite.SpriteIndex * 128 * 128, pixels, 0, pixels.Length);
 				group.Members.Add(new() { X = MetaPosition(sprite).X - left, Y = MetaPosition(sprite).Y - top, Width = sprite.Width, Height = sprite.Height, Pixels = pixels });
 			}
-			string directory = Path.GetDirectoryName(_metaPackPath)!;
-			Directory.CreateDirectory(directory);
-			string artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}.png");
-			if(File.Exists(artworkPath)) { artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}-{Guid.NewGuid():N}.png"); }
-			using(var bitmap = BuildMetaBitmap(group)) {
-				using var file = new FileStream(artworkPath, FileMode.CreateNew, FileAccess.Write);
-				bitmap.Save(file, PngBitmapEncoderOptions.Default);
-			}
-			group.ReplacementPath = Path.GetFileName(artworkPath);
-			group.ReplacementWidth = group.Width; group.ReplacementHeight = group.Height;
-			group.ReplacementScale = 1;
-			group.ReplacementOriginX = group.OriginX; group.ReplacementOriginY = group.OriginY;
-			group.Enabled = true;
-			int previousNextId = _metaPack.NextGroupId;
-			_metaPack.NextGroupId++;
-			_metaPack.Groups.Add(group);
-			try { SaveSpritePack(); }
-			catch {
-				_metaPack.Groups.Remove(group); _metaPack.NextGroupId = previousNextId;
-				if(poseSource != null) { poseSource.PoseFamilyId = previousFamilyId; }
-				throw;
-			}
+			SaveNewMetaGroup(_metaPack, group, _metaPackPath, SaveSpritePack);
 			creationSaved = true;
 			MetaGroups.Add(group);
 			SelectedMetaGroup = group;
@@ -245,6 +250,37 @@ public partial class SpriteViewerViewModel
 		} catch(Exception ex) {
 			if(!creationSaved && poseSource != null) { poseSource.PoseFamilyId = previousFamilyId; }
 			MetaStatus = (creationSaved ? "Group and PNG saved; could not finish activation: " : "Could not create group: ") + ex.Message;
+		}
+	}
+
+	private static void SaveNewMetaGroup(MetaSpritePack pack, MetaSpriteGroup group, string packPath, Action savePack)
+	{
+		string directory = Path.GetDirectoryName(packPath)!;
+		Directory.CreateDirectory(directory);
+		string artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}.png");
+		if(File.Exists(artworkPath)) { artworkPath = Path.Combine(directory, $"meta-{group.Id:D3}-{Guid.NewGuid():N}.png"); }
+		bool artworkCreated = false, groupAdded = false;
+		int previousNextId = pack.NextGroupId;
+		try {
+			using(var bitmap = BuildMetaBitmap(group)) {
+				using var file = new FileStream(artworkPath, FileMode.CreateNew, FileAccess.Write);
+				artworkCreated = true;
+				bitmap.Save(file, PngBitmapEncoderOptions.Default);
+			}
+			group.UseExportedArtwork(Path.GetFileName(artworkPath));
+			pack.Groups.Add(group);
+			groupAdded = true;
+			pack.NextGroupId++;
+			savePack();
+		} catch(Exception saveError) {
+			if(groupAdded) { pack.Groups.Remove(group); pack.NextGroupId = previousNextId; }
+			if(artworkCreated) {
+				try { File.Delete(artworkPath); }
+				catch(Exception cleanupError) {
+					throw new IOException($"{saveError.Message} Could not remove unsaved PNG '{artworkPath}': {cleanupError.Message}", saveError);
+				}
+			}
+			throw;
 		}
 	}
 
@@ -307,6 +343,23 @@ public partial class SpriteViewerViewModel
 		MetaStatus += $" Aligned {count} animation pose origins with Meta {source.Id:D3}.";
 	}
 
+	public void AlignMetaPoseArtworkOrigins()
+	{
+		if(_metaLoadFailed || SelectedMetaGroup is not MetaSpriteGroup source) { return; }
+		var previous = _metaPack.Groups.Select(g => (Group: g, X: g.ReplacementOriginX, Y: g.ReplacementOriginY)).ToList();
+		try {
+			int count = _metaPack.AlignPoseArtworkOrigins(source);
+			if(count == 0) { MetaStatus = "Add replacement PNGs to an animation pose family before aligning artwork origins."; return; }
+			SaveSpritePack();
+			ApplyMetaReplacements();
+			RefreshMetaPreviewPlacement();
+			MetaStatus += $" Aligned {count} PNG pose origins with Meta {source.Id:D3}.";
+		} catch(Exception ex) {
+			foreach(var item in previous) { item.Group.ReplacementOriginX = item.X; item.Group.ReplacementOriginY = item.Y; }
+			MetaStatus = "Could not save PNG pose origins: " + ex.Message;
+		}
+	}
+
 	public void UndoRemoveMetaGroup()
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0 || _removedMetaGroup is not MetaSpriteGroup group) { return; }
@@ -328,19 +381,46 @@ public partial class SpriteViewerViewModel
 
  private void SaveSpritePack()
  {
+  if(EmuApi.GetRomHash(HashType.Sha1) != _metaPack.RomHash) { throw new InvalidDataException("The game changed. Reopen the sprite viewer before saving."); }
   var latest = MetaSpritePack.Load(_metaPackPath, _metaPack.RomHash, CpuType.ToString());
+  if(latest.GetSpriteDefinitionsSnapshot() != _savedSpriteDefinitions) { throw new InvalidDataException("Sprite groups were saved by another editor. Reload saved groups before editing again."); }
+  MetaSpriteRuntimeLoader.ValidateSpriteArtworkCanvases(_metaPack, _metaPackPath);
   _metaPack.BackgroundLayers = latest.BackgroundLayers;
   _metaPack.NextBackgroundId = latest.NextBackgroundId;
   _metaPack.Save(_metaPackPath);
+  _savedSpriteDefinitions = _metaPack.GetSpriteDefinitionsSnapshot();
  }
-	public void SaveMetaGroups()
+	public void SaveMetaGroups() => TrySaveMetaGroups();
+	public void SetSelectedMetaOrigin(int x, int y)
 	{
-		if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
-		try {
-			foreach(var layer in _metaPack.BackgroundLayers) { layer.Validate(); }
-			SaveSpritePack(); MetaStatus = "Groups saved."; ApplyMetaReplacements();
+		if(SelectedMetaGroup is not MetaSpriteGroup group) { return; }
+		int oldX = group.OriginX, oldY = group.OriginY;
+		int oldArtworkX = group.ReplacementOriginX, oldArtworkY = group.ReplacementOriginY;
+		x = Math.Clamp(x, -4096, 4096); y = Math.Clamp(y, -4096, 4096);
+		if(PreviewUsesReplacement) { group.ReplacementOriginX = x; group.ReplacementOriginY = y; }
+		else { group.OriginX = x; group.OriginY = y; }
+		if(!TrySaveMetaGroups()) {
+			group.OriginX = oldX; group.OriginY = oldY;
+			group.ReplacementOriginX = oldArtworkX; group.ReplacementOriginY = oldArtworkY;
 		}
-		catch(Exception ex) { MetaStatus = "Could not save groups: " + ex.Message; }
+	}
+	private bool TrySaveMetaGroups()
+	{
+		if(_metaLoadFailed || _metaPackPath.Length == 0) { return false; }
+		try {
+			if(SelectedMetaGroup is MetaSpriteGroup selected) { selected.MemoryConditions = MetaMemoryConditionText.Parse(MetaMemoryConditionsText); }
+			if(SelectedMetaAlternate is MetaAlternateArtwork alternate) {
+				alternate.MemoryConditions = MetaMemoryConditionText.Parse(MetaAlternateConditionsText); alternate.Validate();
+				if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
+			}
+			foreach(var layer in _metaPack.BackgroundLayers) { layer.Validate(); }
+			SaveSpritePack();
+		}
+		catch(Exception ex) { MetaStatus = "Could not save groups: " + ex.Message; return false; }
+		// Persistence succeeded: later preview/runtime errors must not roll back
+		// the editor list against a definition that has already been saved.
+		MetaStatus = "Groups saved."; ApplyMetaReplacements(); RefreshMetaAlternatePreview();
+		return true;
 	}
 
 	public void ApplyMetaReplacements()
@@ -364,6 +444,7 @@ public partial class SpriteViewerViewModel
 		} catch(Exception ex) { MetaStatus = "Could not apply replacements: " + ex.Message; }
 	}
 
+	private readonly Dictionary<MetaSpriteGroup, string> _invalidMetaConditionDrafts = new();
 	partial void OnSelectedMetaGroupChanging(MetaSpriteGroup? value)
 	{
 		if(SelectedMetaGroup != null) { SelectedMetaGroup.PropertyChanged -= MetaGroupPropertyChanged; }
@@ -373,6 +454,10 @@ public partial class SpriteViewerViewModel
 
 	partial void OnSelectedMetaGroupChanged(MetaSpriteGroup? value)
 	{
+		SelectedMetaAlternate = null; MetaAlternates.Clear();
+		if(value != null) { foreach(var alternate in value.AlternateArtwork) { MetaAlternates.Add(alternate); } }
+		RefreshMetaArtworkNavigation();
+		MetaMemoryConditionsText = value == null ? "" : _invalidMetaConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaMemoryConditionText.Format(value.MemoryConditions);
 		MetaPreview?.Dispose();
 		MetaPreview = null;
 		if(value == null) { return; }
@@ -383,6 +468,13 @@ public partial class SpriteViewerViewModel
 			MetaPreview = PreviewUsesReplacement ? new Bitmap(path) : BuildMetaBitmap(value);
 			RefreshMetaPreviewPlacement();
 		} catch(Exception ex) { MetaStatus = "Could not preview group: " + ex.Message; }
+	}
+
+	partial void OnMetaMemoryConditionsTextChanged(string value)
+	{
+		if(SelectedMetaGroup is not MetaSpriteGroup group) { return; }
+		try { group.MemoryConditions = MetaMemoryConditionText.Parse(value); _invalidMetaConditionDrafts.Remove(group); }
+		catch(InvalidDataException ex) { _invalidMetaConditionDrafts[group] = value; MetaStatus = ex.Message; }
 	}
 
 	public void RefreshMetaPreviewPlacement()
@@ -429,9 +521,30 @@ public partial class SpriteViewerViewModel
 
 	public async Task LoadMetaReplacement(Window window)
 	{
-		if(SelectedMetaGroup is not MetaSpriteGroup group) { return; }
-		string? path = await FileDialogHelper.OpenFile(Path.GetDirectoryName(_metaPackPath), window, FileDialogHelper.PngExt);
+		if(_metaLoadFailed || _metaPackPath.Length == 0 || SelectedMetaGroup is not MetaSpriteGroup group) { return; }
+		var requestedPack = _metaPack;
+		var requestedAlternate = SelectedMetaAlternate;
+		string requestedPackPath = _metaPackPath;
+		string? path = await FileDialogHelper.OpenFile(Path.GetDirectoryName(requestedPackPath), window, FileDialogHelper.PngExt);
 		if(path == null) { return; }
+		if(!ReferenceEquals(requestedPack, _metaPack) || !ReferenceEquals(group, SelectedMetaGroup)
+			|| !ReferenceEquals(requestedAlternate, SelectedMetaAlternate)
+			|| requestedPackPath != _metaPackPath || EmuApi.GetRomHash(HashType.Sha1) != requestedPack.RomHash) {
+			MetaStatus = "The game or group changed while choosing the PNG. Select the group and import again."; return;
+		}
+		ImportMetaReplacementPng(path);
+	}
+
+	public void ImportMetaReplacementPng(string path)
+	{
+		if(_metaLoadFailed || _metaPackPath.Length == 0 || SelectedMetaGroup is not MetaSpriteGroup group) { return; }
+		if(EmuApi.GetRomHash(HashType.Sha1) != _metaPack.RomHash) { MetaStatus = "The game changed. Reopen the sprite viewer."; return; }
+		if(SelectedMetaAlternate != null) { ImportMetaAlternateReplacementPng(path); return; }
+		string? createdPath = null;
+		bool saved = false;
+		string previousPath = group.ReplacementPath;
+		int previousScale = group.ReplacementScale, previousWidth = group.ReplacementWidth, previousHeight = group.ReplacementHeight;
+		int previousOriginX = group.ReplacementOriginX, previousOriginY = group.ReplacementOriginY;
 		try {
 			using Bitmap bitmap = new(path);
 			int scale = group.ReplacementScale;
@@ -441,9 +554,13 @@ public partial class SpriteViewerViewModel
 				scale = bitmap.PixelSize.Width / group.Width;
 			}
 			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, scale);
-			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-replacement.png");
+			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-replacement-{Guid.NewGuid():N}.png");
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-			if(!string.Equals(Path.GetFullPath(path), Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase)) { File.Copy(path, destination, true); }
+			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+				using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write);
+				createdPath = destination;
+				source.CopyTo(output);
+			}
 			if(group.ReplacementPath.Length == 0) {
 				group.ReplacementOriginX = group.OriginX;
 				group.ReplacementOriginY = group.OriginY;
@@ -452,13 +569,25 @@ public partial class SpriteViewerViewModel
 			group.ReplacementScale = scale;
 			group.ReplacementWidth = bitmap.PixelSize.Width;
 			group.ReplacementHeight = bitmap.PixelSize.Height;
-			SaveMetaGroups();
+			saved = TrySaveMetaGroups();
+			if(!saved) { return; }
 			MetaPreview?.Dispose();
 			MetaPreview = new Bitmap(destination);
 			PreviewUsesReplacement = true;
 			RefreshMetaPreviewPlacement();
 			if(!group.Enabled) { MetaStatus = "Replacement PNG loaded. Enable the group and apply to use it in gameplay."; }
 		} catch(Exception ex) { MetaStatus = "Could not load PNG: " + ex.Message; }
+		finally {
+			if(!saved) {
+				group.ReplacementPath = previousPath; group.ReplacementScale = previousScale;
+				group.ReplacementWidth = previousWidth; group.ReplacementHeight = previousHeight;
+				group.ReplacementOriginX = previousOriginX; group.ReplacementOriginY = previousOriginY;
+				if(createdPath != null) {
+					try { File.Delete(createdPath); }
+					catch(Exception ex) { MetaStatus += $" Could not remove unsaved PNG '{createdPath}': {ex.Message}"; }
+				}
+			}
+		}
 	}
 }
 

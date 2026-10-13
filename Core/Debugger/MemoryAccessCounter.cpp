@@ -5,6 +5,7 @@
 #include "Debugger/DebugUtilities.h"
 #include "Debugger/MemoryDumper.h"
 #include "Shared/Interfaces/IConsole.h"
+#include <cassert>
 
 MemoryAccessCounter::MemoryAccessCounter(Debugger* debugger)
 {
@@ -17,6 +18,8 @@ MemoryAccessCounter::MemoryAccessCounter(Debugger* debugger)
 		uint32_t memSize = _debugger->GetMemoryDumper()->GetMemorySize((MemoryType)i);
 		if(memSize > 0) {
 			_counters[i] = vector<AddressCounters>(memSize);
+			_counterData[i] = _counters[i].data();
+			_counterSizes[i] = memSize;
 		}
 	}
 }
@@ -27,10 +30,13 @@ ReadResult MemoryAccessCounter::ProcessMemoryRead(AddressInfo& addressInfo, uint
 	if(addressInfo.Address < 0) {
 		return ReadResult::Normal;
 	}
+	assert((int)addressInfo.Type >= 0 && (int)addressInfo.Type < CounterTypeCount);
+	assert(static_cast<uint64_t>(addressInfo.Address) + accessWidth <= _counterSizes[(int)addressInfo.Type]);
+	AddressCounters* counters = _counterData[(int)addressInfo.Type] + addressInfo.Address;
 
 	ReadResult result = ReadResult::Normal;
 	for(int i = 0; i < accessWidth; i++) {
-		AddressCounters& counts = _counters[(int)addressInfo.Type][addressInfo.Address + i];
+		AddressCounters& counts = counters[i];
 		if(_enableBreakOnUninitRead && counts.WriteStamp == 0 && DebugUtilities::IsVolatileRam(addressInfo.Type)) {
 			result = (ReadResult)((int)result | (int)(counts.ReadStamp == 0 ? ReadResult::FirstUninitRead : ReadResult::UninitRead));
 		}
@@ -46,9 +52,12 @@ void MemoryAccessCounter::ProcessMemoryWrite(AddressInfo& addressInfo, uint64_t 
 	if(addressInfo.Address < 0) {
 		return;
 	}
+	assert((int)addressInfo.Type >= 0 && (int)addressInfo.Type < CounterTypeCount);
+	assert(static_cast<uint64_t>(addressInfo.Address) + accessWidth <= _counterSizes[(int)addressInfo.Type]);
+	AddressCounters* counters = _counterData[(int)addressInfo.Type] + addressInfo.Address;
 
 	for(int i = 0; i < accessWidth; i++) {
-		AddressCounters& counts = _counters[(int)addressInfo.Type][addressInfo.Address + i];
+		AddressCounters& counts = counters[i];
 		counts.WriteStamp = masterClock;
 		counts.WriteCounter++;
 	}
@@ -60,9 +69,12 @@ void MemoryAccessCounter::ProcessMemoryExec(AddressInfo& addressInfo, uint64_t m
 	if(addressInfo.Address < 0) {
 		return;
 	}
+	assert((int)addressInfo.Type >= 0 && (int)addressInfo.Type < CounterTypeCount);
+	assert(static_cast<uint64_t>(addressInfo.Address) + accessWidth <= _counterSizes[(int)addressInfo.Type]);
+	AddressCounters* counters = _counterData[(int)addressInfo.Type] + addressInfo.Address;
 
 	for(int i = 0; i < accessWidth; i++) {
-		AddressCounters& counts = _counters[(int)addressInfo.Type][addressInfo.Address + i];
+		AddressCounters& counts = counters[i];
 		counts.ExecStamp = masterClock;
 		counts.ExecCounter++;
 	}

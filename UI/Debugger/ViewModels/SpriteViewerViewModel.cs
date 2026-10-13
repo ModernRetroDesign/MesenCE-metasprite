@@ -412,7 +412,9 @@ namespace Mesen.Debugger.ViewModels
 		private void InitBitmap(int width, int height)
 		{
 			if(ViewerBitmap == null || ViewerBitmap.PixelSize.Width != width || ViewerBitmap.PixelSize.Height != height) {
+				DynamicBitmap? previous = ViewerBitmap;
 				ViewerBitmap = new DynamicBitmap(new PixelSize(width, height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+				previous?.Dispose();
 			}
 		}
 
@@ -491,7 +493,9 @@ namespace Mesen.Debugger.ViewModels
 					model.Init(ref sprites[i], spritePreviews, previewInfo);
 					previews.Add(model);
 				}
+				var previous = SpritePreviews;
 				SpritePreviews = previews;
+				foreach(var model in previous) { model.ReleasePreview(); }
 			} else {
 				for(int i = 0; i < sprites.Length; i++) {
 					SpritePreviews[i].Init(ref sprites[i], spritePreviews, previewInfo);

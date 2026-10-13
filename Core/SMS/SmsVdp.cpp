@@ -673,7 +673,7 @@ void SmsVdp::ProcessEndOfScanline()
 		_console->ProcessEndOfFrame();
 	} else if(_state.Scanline >= _scanlineCount) {
 		_state.Scanline = 0;
-		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(256, 240) : nullptr;
+		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 240) : nullptr;
 		_state.VerticalScrollLatch = _state.VerticalScroll;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Sms);
 		_currentOutputBuffer = _currentOutputBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
@@ -1157,6 +1157,7 @@ uint16_t SmsVdp::GetPixelColor()
 			row.Row = fetched.CapturedDisplayRow; row.Y = _state.Scanline + GetViewportYOffset() - row.Row;
 			int horizontalScale = IsZoomedSpriteAllowed(i) ? 2 : 1;
 			row.Width = 8 * horizontalScale; row.Height = (_state.UseLargeSprites ? 16 : 8) << (uint8_t)_state.EnableDoubleSpriteSize;
+			row.Pixels.reserve(row.Width);
 			for(int x = 0; x < row.Width; x++) {
 				int color = 0;
 				for(int plane = 0; plane < 4; plane++) { color |= ((fetched.CapturedTileData[plane] >> (7 - x / horizontalScale)) & 1) << plane; }

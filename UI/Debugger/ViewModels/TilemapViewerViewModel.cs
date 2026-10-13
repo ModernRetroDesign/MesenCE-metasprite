@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Mesen.Debugger.ViewModels
 {
@@ -27,6 +28,13 @@ namespace Mesen.Debugger.ViewModels
 
 		public TilemapViewerConfig Config { get; }
 		public MetaBackgroundEditorViewModel BackgroundEditor { get; }
+		public Bitmap CaptureBackgroundPngSnapshot() => ViewerBitmap.CropBitmap(new PixelRect(0, 0, ViewerBitmap.PixelSize.Width, ViewerBitmap.PixelSize.Height));
+		public async Task ExportBackgroundPng(Window window)
+		{
+			using Bitmap snapshot = CaptureBackgroundPngSnapshot();
+			string? filename = await FileDialogHelper.SaveFile(null, EmuApi.GetRomInfo().GetRomName() + " - tilemap.png", window, FileDialogHelper.PngExt);
+			if(filename != null) { snapshot.Save(filename, PngBitmapEncoderOptions.Default); }
+		}
 		public (int? Layer, string Context) GetBackgroundImportLayer()
 		{
 			int layer = SelectedTab?.Layer ?? 0;
@@ -44,6 +52,8 @@ namespace Mesen.Debugger.ViewModels
 			}
 			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Gameplay currently requires Mode 4 and the default filter."
 				: CpuType == CpuType.Ws ? "Imported for the selected WonderSwan background. Gameplay requires the default filter, frame blending off, and LCD icons off."
+				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer}. Gameplay currently requires low-resolution noninterlaced output, the default filter and neutral color settings; artwork follows enabled layers, including transparent texels, with native priority and windows."
+				: CpuType == CpuType.Gba ? $"Imported as GBA BG{layer}. Gameplay requires the default filter with color adjustment and frame blending disabled."
 				: "Definitions can be authored here; gameplay background integration for this system is pending.");
 		}
 		[ObservableProperty] public partial RefreshTimingViewModel RefreshTiming { get; private set; }

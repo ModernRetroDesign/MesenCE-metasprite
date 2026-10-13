@@ -88,7 +88,7 @@ void WsPpu::ProcessEndOfScanline()
 		}
 		_state.Mode = _state.NextMode;
 		_state.Scanline = 0;
-		_metaFrame = _metaCaptureRequested.load() ? std::make_shared<MetaSpriteFrame>(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
+		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Ws);
 		_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 		_showIcons = _emu->GetSettings()->GetWsConfig().LcdShowIcons;
@@ -165,6 +165,7 @@ void WsPpu::DrawSprites()
 			uint16_t tileDataAddr = (bank0Addr + tileIndex * tileSize + tileRow * tileBytesPerRow);
 			if(_metaFrame) {
 				MetaSpriteDecodedRow captured {i, sprX >= 224 ? (int)sprX - 256 : sprX, y, (int)(scanline - y), 8, 8, {}};
+				captured.Pixels.reserve(8);
 				for(int column = 0; column < 8; column++) {
 					uint8_t index = GetPixelColor<mode>(tileDataAddr, hMirror ? 7 - column : column);
 					uint16_t rgb = GetPixelRgbColor(mode, index, palette);

@@ -139,6 +139,9 @@
     <ClInclude Include="Debugger\PpuTools.h">
       <Filter>Debugger</Filter>
     </ClInclude>
+    <ClInclude Include="Debugger\ViewerRefreshSchedule.h">
+      <Filter>Debugger</Filter>
+    </ClInclude>
     <ClCompile Include="Debugger\Profiler.cpp">
       <Filter>Debugger</Filter>
     </ClCompile>
