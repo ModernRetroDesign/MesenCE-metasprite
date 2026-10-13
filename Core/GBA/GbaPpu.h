@@ -133,6 +133,7 @@ private:
 
 	GbaPixelData _oamOutputBuffers[2][GbaConstants::ScreenWidth] = {};
 	std::vector<GbaPixelData> _metaOamCoverage[2][GbaConstants::ScreenWidth];
+	std::vector<GbaPixelData> _metaOamNativeObjects[2][GbaConstants::ScreenWidth];
 	int _metaOamRead = 0, _metaOamWrite = 1;
 	GbaPixelData _layerOutput[4][GbaConstants::ScreenWidth] = {};
 	MetaBackgroundSample _metaBgSamples[4][GbaConstants::ScreenWidth] = {};

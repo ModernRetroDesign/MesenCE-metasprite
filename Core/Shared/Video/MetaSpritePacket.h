@@ -55,7 +55,6 @@ public:
 			group.ArtworkOriginX = Coordinate(); group.ArtworkOriginY = Coordinate();
 			group.ArtworkScale = Dimension(10);
 			group.ArtworkWidth = Dimension(8192); group.ArtworkHeight = Dimension(8192);
-			if(group.ArtworkWidth % group.ArtworkScale || group.ArtworkHeight % group.ArtworkScale) { throw std::runtime_error("Invalid artwork scale"); }
 			int members = Dimension(128);
 			for(int m = 0; m < members; m++) {
 				MetaSpriteGraphic member;
@@ -82,7 +81,6 @@ public:
 					alternate.ArtworkOriginX = Coordinate(); alternate.ArtworkOriginY = Coordinate();
 					alternate.ArtworkScale = Dimension(10);
 					alternate.ArtworkWidth = Dimension(8192); alternate.ArtworkHeight = Dimension(8192);
-					if(alternate.ArtworkWidth % alternate.ArtworkScale || alternate.ArtworkHeight % alternate.ArtworkScale) { throw std::runtime_error("Invalid alternate scale"); }
 					alternate.Artwork = Pixels(alternate.ArtworkWidth, alternate.ArtworkHeight);
 					int conditions = Dimension(64);
 					for(int c = 0; c < conditions; c++) {

@@ -1025,6 +1025,7 @@ DeserializeResult Emulator::Deserialize(istream& in, uint32_t fileFormatVersion,
 	if(s.HasError()) {
 		return DeserializeResult::SpecificError;
 	}
+	_videoDecoder->ResetFrameBlendHistory();
 
 	if(sendNotification) {
 		_notificationManager->SendNotification(ConsoleNotificationType::StateLoaded);

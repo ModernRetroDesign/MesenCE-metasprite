@@ -62,6 +62,9 @@ struct MetaBackgroundSample
 	int32_t X = 0, Y = 0;
 	uint8_t Layer = 0;
 	bool Valid = false;
+	// Number of captured output pixels per native background texel and the
+	// current pixel's phase within it. Other adapters use the default 1:1 grid.
+	uint8_t PixelScaleX = 1, PixelScaleY = 1, PixelOffsetX = 0, PixelOffsetY = 0;
 };
 
 struct MetaGbaSpriteCoverage
@@ -72,12 +75,23 @@ struct MetaGbaSpriteCoverage
 	uint8_t Priority = 0;
 };
 
+struct MetaGbaNativeObject
+{
+	int16_t Sprite = -1;
+	uint16_t Color = 0;
+	uint8_t Priority = 0;
+	bool SemiTransparent = false;
+};
+
 struct MetaSnesBackgroundLayer
 {
 	MetaBackgroundSample Sample;
+	MetaBackgroundSample SubSample;
 	uint16_t Color = 0;
+	uint16_t SubColor = 0;
 	uint8_t Priority = 0;
 	bool Opaque = false, Main = false, Sub = false, Math = false;
+	bool SeparateSub = false, SubOpaque = false;
 };
 
 struct MetaSnesBackgroundPixel
@@ -104,8 +118,18 @@ struct MetaSpritePixelState
 	uint16_t GbaBackdropColor = 0, GbaObjectColor = 0;
 	int16_t GbaObjectSprite = -1;
 	uint8_t GbaObjectPriority = 0xFF;
+	bool GbaObjectsEnabled = false;
 	bool GbaObjectSemiTransparent = false;
 	int16_t VisibleSprite = -1;
+	// Destination eligibility for artwork outside fetched sprite rectangles.
+	// Class bits are supplied by each adapter, not inferred from source alpha.
+	uint8_t ExpandedSpriteClasses = 0;
+	// Sprite classes below artwork on the captured background layer. Unlike
+	// eligibility, this also applies when the original background texel is clear.
+	uint8_t BackgroundOverlayOccludesClasses = 0;
+	// Lower values win. DMG includes hardware X before OAM index; NES/SMS
+	// and GBC use OAM order. This is frame-local rendering metadata.
+	int16_t ExpandedSpriteOccluder = -1;
 	// Adapter-approved sprite coverage, independent of source texel alpha.
 	// Bits are transient hardware IDs (0..127), never persistent matching keys.
 	uint64_t ReplacementEligibleSprites = 0;
@@ -139,6 +163,7 @@ struct MetaSpritePixelState
 	bool GbaFallbackBlendTarget = false;
 	bool GbaFallbackCaptured = false;
 	bool SnesMathEnabled = false, SnesSubtract = false, SnesHalf = false;
+	bool SnesHiresBackgrounds = false;
 	bool SnesClip = false, SnesUseSubscreen = false;
 	uint16_t SnesFixedColor = 0;
 	uint16_t SnesFallbackMainColor = 0, SnesFallbackSubColor = 0;
@@ -147,11 +172,20 @@ struct MetaSpritePixelState
 	uint8_t SnesFallbackMainLayer = 0xFF, SnesFallbackSubLayer = 0xFF;
 	bool SnesFallbackCaptured = false;
 	bool SnesWindowMathAllowed = true, SnesAddSubscreen = false, SnesHalfRequested = false;
+	bool SnesObjectsMain = false, SnesObjectsSub = false, SnesObjectMath = false;
+	uint8_t SnesObjectPriorities[4] = {};
+	int16_t SnesObjectSprite = -1;
+	uint16_t SnesObjectColor = 0, SnesObjectOrder = 0;
+	uint8_t SnesObjectPriorityCode = 0xFF, SnesObjectPalette = 0;
+	uint8_t SnesFirstObject = 0;
+	uint8_t SnesField = 0; // 0: ordinary frame; 1/2: even/odd woven field.
+	uint8_t SnesOutputSampleOffsetY = 0;
 };
 
 struct MetaSpritePixel : MetaSpritePixelState
 {
 	MetaSpriteCoverageList<MetaGbaSpriteCoverage> GbaCoverage;
+	MetaSpriteCoverageList<MetaGbaNativeObject> GbaNativeObjects;
 	struct SnesCoverageSample {
 		int16_t Sprite = -1;
 		uint16_t Order = 0;
@@ -159,6 +193,14 @@ struct MetaSpritePixel : MetaSpritePixelState
 		bool Main = false, Sub = false, Math = false;
 	};
 	MetaSpriteCoverageList<SnesCoverageSample> SnesCoverage;
+};
+
+struct MetaSnesSubOutputPhase : MetaSpritePixelState
+{
+	// Color math reads main-screen flags and subscreen priority at this
+	// logical X, independently of where the primary output pixel is located.
+	int16_t MathControlX = -1;
+	bool Captured = false;
 };
 
 struct MetaSpriteRow
@@ -175,6 +217,7 @@ struct MetaSpriteRow
 	uint16_t Palette[4] = {};
 	// Game Boy's evaluated scanline slot, captured while the sprite is fetched.
 	uint8_t ScanlineSpriteIndex = 0xFF;
+	int ExpansionOrder = -1;
 };
 
 // Decoded fetched row for systems with more than two bitplanes.
@@ -183,6 +226,12 @@ struct MetaSpriteDecodedRow
 	int Sprite = -1, X = 0, Y = 0, Row = 0, Width = 0, Height = 0;
 	std::vector<uint32_t> Pixels;
 	int OffsetX = 0; // A fetched slice within a wider hardware sprite.
+	uint8_t ExpansionClass = 0;
+	uint8_t GbaPriority = 0xFF;
+	bool GbaSemiTransparent = false;
+	uint8_t SnesPriorityCode = 0xFF, SnesPalette = 0;
+	uint16_t SnesFetchOrder = 0;
+	uint8_t SnesField = 0;
 };
 
 struct MetaSpriteFrame
@@ -192,9 +241,17 @@ struct MetaSpriteFrame
 	uint32_t FrameNumber = 0;
 	bool GbaColorEffects = false;
 	bool SnesColorEffects = false;
+	// Captured output pixels may be denser than the decoded hardware-sprite
+	// coordinates used for recognition and persistent group origins.
+	uint8_t SpriteCoordinateScale = 1;
+	uint8_t SnesOutputOffsetY = 0;
 	std::vector<MetaSpritePixel> Pixels;
 	// Keep SNES layer capture separate so other systems pay no per-pixel cost.
 	std::vector<MetaSnesBackgroundPixel> SnesBackgrounds;
+	// Hires even-column output is the current subscreen pixel, with math
+	// controlled by the previous main pixel. Keep that phase independent of
+	// the current main pixel's state. Allocated only on double-width scanlines.
+	std::vector<MetaSnesSubOutputPhase> SnesSubOutput;
 	std::vector<MetaSpriteRow> Rows;
 	std::vector<MetaSpriteDecodedRow> DecodedRows;
 	// NES palettes contain PPU color indices/emphasis, rather than RGB555 values.
@@ -205,14 +262,14 @@ struct MetaSpriteFrame
 	MetaSpriteFrame(uint32_t width, uint32_t height) : Width(width), Height(height), Pixels(width * height) {}
 	void Reset()
 	{
-		FrameNumber = 0; GbaColorEffects = SnesColorEffects = false;
+		FrameNumber = 0; GbaColorEffects = SnesColorEffects = false; SpriteCoordinateScale = 1; SnesOutputOffsetY = 0;
 		const MetaSpritePixelState blank;
 		MetaSpritePixel* pixels = Pixels.data();
 		for(size_t i = 0, count = Pixels.size(); i < count; i++) {
 			static_cast<MetaSpritePixelState&>(pixels[i]) = blank;
-			pixels[i].GbaCoverage.clear(); pixels[i].SnesCoverage.clear();
+			pixels[i].GbaCoverage.clear(); pixels[i].GbaNativeObjects.clear(); pixels[i].SnesCoverage.clear();
 		}
-		SnesBackgrounds.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+		SnesBackgrounds.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
 	}
 };
 

@@ -151,12 +151,11 @@ internal static class Program
 			saveButton.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
 			model.LoadMetaGroups(); model.SelectedMetaGroup = model.MetaGroups[0];
 			if(model.SelectedMetaGroup.ReplacementOriginX != 4 || model.SelectedMetaGroup.ReplacementOriginY != 5) { throw new Exception("Numeric artwork controls did not persist through Save/reload."); }
-			string packPath = Path.Combine(ConfigManager.HdPackFolder, "MetaSprites", EmuApi.GetRomHash(HashType.Sha1), cpu.ToString(), "groups.json");
-			string beforeInvalidScale = File.ReadAllText(packPath);
+			string packPath = Path.Combine(ConfigManager.HdPackFolder, "MetaSprites", cpu.ToString(), EmuApi.GetRomHash(HashType.Sha1), "groups.json");
 			var scaleControl = window.FindControl<NumericUpDown>("metaReplacementScale")!;
 			scaleControl.Value = 3; ClickScaleSave();
 			void ClickScaleSave() => saveButton.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
-			if(File.ReadAllText(packPath) != beforeInvalidScale || !model.MetaStatus.Contains("divisible")) { throw new Exception("Incompatible base artwork scale overwrote the saved pack."); }
+			if(!model.MetaStatus.StartsWith("Replacements applied.") || MetaSpritePack.Load(packPath, EmuApi.GetRomHash(HashType.Sha1), cpu.ToString()).Groups[0].ReplacementScale != 3) { throw new Exception("Partial native canvas scale did not save/apply for the default PNG."); }
 			scaleControl.Value = 1; ClickScaleSave();
 			if(!model.MetaStatus.StartsWith("Replacements applied.")) { throw new Exception("Correcting the artwork scale did not restore saving."); }
 			string sourcePng = Path.Combine(Path.GetDirectoryName(packPath)!, model.SelectedMetaGroup.ReplacementPath);
@@ -201,12 +200,11 @@ internal static class Program
 			if(model.ViewingMetaAlternate) { throw new Exception("Next did not wrap from the last alternate to the default PNG."); }
 			Click(previousButton);
 			if(model.SelectedMetaAlternate != secondAlternate) { throw new Exception("Previous did not wrap from default to the last alternate."); }
-			string beforeInvalidAlternateScale = File.ReadAllText(packPath);
 			window.FindControl<NumericUpDown>("metaAlternateScale")!.Value = 3;
 			Click(nextButton);
-			if(model.SelectedMetaAlternate != secondAlternate || !model.MetaStatus.Contains("divisible")) { throw new Exception("Browsing discarded incompatible alternate scale edits."); }
+			if(model.ViewingMetaAlternate || secondAlternate.Scale != 3) { throw new Exception("Browsing failed to preserve partial native canvas scale edits."); }
 			model.SelectedMetaAlternate = null; Click(saveButton);
-			if(File.ReadAllText(packPath) != beforeInvalidAlternateScale || !model.MetaStatus.Contains("divisible")) { throw new Exception("Saving another PNG failed to validate an unselected alternate's canvas."); }
+			if(!model.MetaStatus.StartsWith("Replacements applied.") || MetaSpritePack.Load(packPath, EmuApi.GetRomHash(HashType.Sha1), cpu.ToString()).Groups[0].AlternateArtwork[1].Scale != 3) { throw new Exception("Saving another PNG failed to preserve an unselected alternate's partial canvas scale."); }
 			secondAlternate.Scale = 1; model.SelectedMetaAlternate = secondAlternate;
 			model.MetaAlternateConditionsText = "invalid condition";
 			var conditionsGroup = model.SelectedMetaGroup;
@@ -236,6 +234,30 @@ internal static class Program
 				throw new Exception("Removing the last alternate failed to return to default, persist removal or retain source artwork.");
 			}
 			Console.WriteLine($"PASS: actual {cpu} previous/next/remove buttons browse and wrap default/alternates, save draft conditions and retain removed PNG files.");
+			string oversizedInput = Path.Combine(ConfigManager.HomeFolder, "oversized-partial-input.png");
+			using(var oversizedBitmap = new WriteableBitmap(new PixelSize(17, 19), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Unpremul)) {
+				using(var pixels = oversizedBitmap.Lock()) {
+					var pngRow = Enumerable.Repeat(unchecked((int)0xFF00FF00), 17).ToArray();
+					for(int y = 0; y < 19; y++) { if(y == 18) { pngRow[16] = unchecked((int)0xFFFF00FF); } Marshal.Copy(pngRow, 0, pixels.Address + y * pixels.RowBytes, 17); }
+				}
+				oversizedBitmap.Save(oversizedInput, PngBitmapEncoderOptions.Default);
+			}
+			model.SelectedMetaGroup!.ReplacementScale = 2;
+			model.ImportMetaReplacementPng(oversizedInput);
+			if(!model.MetaStatus.StartsWith("Replacements applied.") || model.SelectedMetaGroup.ReplacementScale != 2
+				|| model.MetaPreview?.PixelSize != new PixelSize(17, 19) || model.MetaPreviewWidth != 8.5 || model.MetaPreviewHeight != 9.5) {
+				throw new Exception("Oversized default PNG lost its full canvas or selected scale during import.");
+			}
+			model.AddMetaAlternatePng(oversizedInput, false);
+			if(model.SelectedMetaAlternate?.Scale != 2 || model.MetaAlternatePreview?.PixelSize != new PixelSize(17, 19)) {
+				throw new Exception("Oversized alternate import reset the selected scale or changed its PNG canvas.");
+			}
+			model.LoadMetaGroups(); model.SelectedMetaGroup = model.MetaGroups[0];
+			if(model.SelectedMetaGroup.ReplacementWidth != 17 || model.SelectedMetaGroup.ReplacementHeight != 19
+				|| model.SelectedMetaGroup.ReplacementScale != 2 || model.SelectedMetaGroup.AlternateArtwork[0].Scale != 2) {
+				throw new Exception("Oversized PNG canvas/scale did not persist across pack reload.");
+			}
+			Console.WriteLine($"PASS: actual {cpu} imports/persists a 17x19 default and alternate PNG at scale 2, with full fractional preview bounds.");
 			string screenshotPath = Path.Combine(ConfigManager.HomeFolder, "sprite-viewer-layout.png");
 			var content = (DockPanel)window.Content!;
 			// The offscreen content render does not include the Window background.
@@ -308,7 +330,7 @@ internal static class Program
 				if(mode == "disabled") {
 					// Change only the isolated copy. Keep recognition metadata for the
 					// same viewer workload, but omit native replacement capture/rendering.
-					string path = Path.Combine(home, "HdPacks", "MetaSprites", hash, cpu.ToString(), "groups.json");
+					string path = Path.Combine(home, "HdPacks", "MetaSprites", cpu.ToString(), hash, "groups.json");
 					var disabledPack = MetaSpritePack.Load(path, hash, cpu.ToString());
 					foreach(var group in disabledPack.Groups) { group.Enabled = false; }
 					foreach(var layer in disabledPack.BackgroundLayers) { layer.Enabled = false; }
@@ -336,7 +358,7 @@ internal static class Program
 				}
 				using var viewer = new SpriteViewerViewModel(cpu, new PictureViewer(), new ScrollPictureViewer(), new Grid(), new Grid(), new Window());
 				string hash = EmuApi.GetRomHash(HashType.Sha1);
-				var pack = MetaSpritePack.Load(Path.Combine(home, "HdPacks", "MetaSprites", hash, cpu.ToString(), "groups.json"), hash, cpu.ToString());
+				var pack = MetaSpritePack.Load(Path.Combine(home, "HdPacks", "MetaSprites", cpu.ToString(), hash, "groups.json"), hash, cpu.ToString());
 				// Populate recognition metadata without activating again: only the
 				// selected GameLoaded path may decode/apply assets in this comparison.
 				foreach(var group in pack.Groups) { viewer.MetaGroups.Add(group); }
@@ -486,7 +508,7 @@ internal static class Program
 					throw new Exception("Actual Create flow failed: " + viewer.MetaStatus);
 				}
 				string hash = EmuApi.GetRomHash(HashType.Sha1);
-				string packPath = Path.Combine(home, "HdPacks", "MetaSprites", hash, cpu.ToString(), "groups.json");
+				string packPath = Path.Combine(home, "HdPacks", "MetaSprites", cpu.ToString(), hash, "groups.json");
 				var saved = MetaSpritePack.Load(packPath, hash, cpu.ToString());
 				if(saved.Groups.Count != 1 || !saved.Groups[0].Enabled || !File.Exists(Path.Combine(Path.GetDirectoryName(packPath)!, saved.Groups[0].ReplacementPath))) {
 					throw new Exception("Actual Create flow did not persist its enabled PNG group in the default folder.");
@@ -574,6 +596,21 @@ internal static class Program
 					Dispatcher.UIThread.RunJobs();
 					string exported = Path.Combine(home, "tilemap.png");
 					using(var snapshot = tilemap.CaptureBackgroundPngSnapshot()) { snapshot.Save(exported, PngBitmapEncoderOptions.Default); }
+					byte[] transparentExport = File.ReadAllBytes(exported);
+					foreach(var backdrop in new[] { TilemapBackground.Black, TilemapBackground.White, TilemapBackground.Magenta }) {
+						tilemap.Config.Background = backdrop;
+						using var snapshot = tilemap.CaptureBackgroundPngSnapshot();
+						snapshot.Save(exported, PngBitmapEncoderOptions.Default);
+						if(!transparentExport.SequenceEqual(File.ReadAllBytes(exported))) { throw new Exception("Tilemap export depends on the viewer backdrop."); }
+					}
+					tilemap.SelectionRect = new Rect(0, 0, 8, 8);
+					tilemap.ExportBackgroundPng(new Window()).GetAwaiter().GetResult();
+					tilemap.ExportBackgroundPng(new Window()).GetAwaiter().GetResult();
+					string exportStem = $"tilemap-{cpu}-layer-{tilemap.SelectedTab.Layer:D2}";
+					foreach(string suffix in new[] { "", "-002" }) {
+						string exportedTilemapPath = Path.Combine(Path.GetDirectoryName(packPath)!, exportStem + suffix + ".png");
+						if(!File.Exists(exportedTilemapPath) || !transparentExport.SequenceEqual(File.ReadAllBytes(exportedTilemapPath))) { throw new Exception("Default tilemap export naming, transparency or full canvas failed: " + tilemap.BackgroundEditor.MetaStatus); }
+					}
 					tilemap.BackgroundEditor.ImportMetaBackgroundPng(exported, 0);
 					var background = tilemap.BackgroundEditor.SelectedMetaBackground ?? throw new Exception("Actual tilemap PNG import failed: " + tilemap.BackgroundEditor.MetaStatus);
 					string beforeUngatedBackground = File.ReadAllText(packPath);
@@ -719,6 +756,7 @@ internal static class Program
 					throw new Exception($"Pre-emulation PNG activation failed: loads={loads}, applied={applied}, frames={before}/{after}, clocks={beforeClock}/{afterClock}.");
 				}
 				Console.WriteLine($"PASS: {system} saved PNG decode/native activation completed during GameLoaded with frame/clock unchanged ({before}/{beforeClock}); {preloadMs:F3} ms.");
+				Console.WriteLine($"CLEANUP: {system} activation check returned; finishing viewer scope.");
 				if(startupTiming) {
 					const int viewerId = 19071;
 					listener.OnNotification += e => {
@@ -747,8 +785,18 @@ internal static class Program
 					File.WriteAllText(Path.Combine(home, "startup-timing.csv"), report);
 					Console.WriteLine("Startup timing saved: " + Path.Combine(home, "startup-timing.csv"));
 				}
-			} finally { DebugApi.ReleaseDebugger(); }
-		} finally { EmuApi.Stop(); EmuApi.Release(); }
+			} finally {
+				Console.WriteLine($"CLEANUP: {system} releasing debugger.");
+				DebugApi.ReleaseDebugger();
+				Console.WriteLine($"CLEANUP: {system} debugger released.");
+			}
+		} finally {
+			Console.WriteLine($"CLEANUP: {system} stopping emulator.");
+			EmuApi.Stop();
+			Console.WriteLine($"CLEANUP: {system} releasing emulator.");
+			EmuApi.Release();
+			Console.WriteLine($"PASS: {system} viewer verification shutdown completed.");
+		}
 	}
 
 	private static void CheckCreationSave()
@@ -888,13 +936,15 @@ internal static class Program
 		Console.WriteLine("PASS: actual viewer export and shared gameplay PNG loader preserve transparent canvas, partial alpha and relative member placement: " + path);
 		string corrupt = Path.Combine(directory, "corrupt.png");
 		File.WriteAllBytes(corrupt, new byte[] { 137, 80, 78, 71 });
-		foreach(var invalid in new[] { (Path: corrupt, Scale: 1), (Path: path, Scale: 2) }) {
+		var partialCanvas = ((int Width, int Height, uint[] Pixels))loadPng.Invoke(null, new object[] { path, 2 })!;
+		if(partialCanvas.Width != 4 || partialCanvas.Height != 3 || !partialCanvas.Pixels.SequenceEqual(gameplay.Pixels)) { throw new Exception("Partial native canvas dropped PNG pixels or changed scale."); }
+		foreach(var invalid in new[] { (Path: corrupt, Scale: 1), (Path: path, Scale: 0), (Path: path, Scale: 11) }) {
 			bool rejected = false;
 			try { loadPng.Invoke(null, new object[] { invalid.Path, invalid.Scale }); }
 			catch(TargetInvocationException ex) when(ex.InnerException is InvalidDataException) { rejected = true; }
 			if(!rejected) { throw new Exception("Invalid PNG or canvas scale was accepted."); }
 		}
-		Console.WriteLine("PASS: gameplay PNG loader rejects corrupt data and incompatible canvas scale.");
+		Console.WriteLine("PASS: gameplay PNG loader preserves partial native canvases and rejects corrupt data/out-of-range scale.");
 		uint[] rampPixels = new uint[256];
 		for(uint alpha = 1; alpha < 256; alpha++) { rampPixels[alpha] = (alpha << 24) | 0x00E741A5; }
 		var ramp = new MetaSpriteGroup { Width = 256, Height = 1 };

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Video/MetaSnesCapture.h"
 #include "SNES/SnesPpu.h"
 #include "SNES/SnesConsole.h"
 #include "SNES/SnesMemoryManager.h"
@@ -206,7 +207,7 @@ void SnesPpu::GetTilemapData(uint8_t layerIndex, uint8_t columnIndex)
 		int width = (config.LargeTiles || hiResMode ? 512 : 256) * (config.DoubleWidth ? 2 : 1);
 		int height = (config.LargeTiles ? 512 : 256) * (config.DoubleHeight ? 2 : 1);
 		_metaTileSamples[layerIndex][columnIndex] = {
-			((columnIndex * 8 + hScroll) & ~7) & (width - 1), (realY + vScroll) & (height - 1), layerIndex, true};
+			(((columnIndex * 8 + hScroll) & ~7) * (hiResMode ? 2 : 1)) & (width - 1), (realY + vScroll) & (height - 1), layerIndex, true};
 	}
 }
 
@@ -458,6 +459,7 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t& hClock)
 			if(_metaFrame) { memcpy(_metaSpriteIds, _metaSpriteIdsCopy, sizeof(_metaSpriteIds)); }
 			if(_metaFrame) {
 				for(int x = 0; x < 256; x++) { _metaSpriteCoverage[x].swap(_metaSpriteCoverageCopy[x]); _metaSpriteOrder[x] = _metaSpriteOrderCopy[x]; }
+				_metaFirstObject = _metaFirstObjectCopy;
 			}
 
 			memset(_spriteIndexes, 0xFF, sizeof(_spriteIndexes));
@@ -643,6 +645,7 @@ void SnesPpu::EvaluateNextLineSprites()
 	if(_spriteEvalStart == 0) {
 		_spriteCount = 0;
 		_oamEvaluationIndex = _state.EnableOamPriority ? ((_state.InternalOamAddress & 0x1FC) >> 2) : 0;
+		_metaFirstObjectEvaluation = _oamEvaluationIndex;
 	}
 
 	if(_state.ForcedBlank) {
@@ -678,6 +681,7 @@ void SnesPpu::FetchSpriteData()
 			for(auto& coverage : _metaSpriteCoverageCopy) { coverage.clear(); }
 			std::fill(std::begin(_metaSpriteOrderCopy), std::end(_metaSpriteOrderCopy), 0);
 			_metaFetchOrder = 0;
+			_metaFirstObjectCopy = _metaFirstObjectEvaluation;
 		}
 
 		_orgSpriteCount = _spriteCount;
@@ -828,6 +832,9 @@ void SnesPpu::FetchSpriteTile(bool secondCycle)
 				MetaSpriteDecodedRow row {_metaFetchedSprite.Index, _metaFetchedSprite.X, y + (_overscanFrame ? 0 : 7), rowIndex,
 					_metaFetchedSprite.Width, _metaFetchedSprite.Height, {}, offset};
 				row.Pixels.reserve(8);
+				row.SnesPriorityCode = _currentSprite.Priority;
+				row.SnesPalette = _currentSprite.Palette;
+				row.SnesFetchOrder = fetchOrder;
 				for(int x = 0; x < 8; x++) {
 					uint8_t color = GetTilePixelColor<4>(_currentSprite.ChrData, _currentSprite.HorizontalMirror ? x : 7 - x);
 					uint16_t rgb = _cgram[128 + (_currentSprite.Palette << 4) + color];
@@ -1044,6 +1051,7 @@ void SnesPpu::RenderScanline()
 				pixel.VisibleSprite = _metaMainIds[x]; pixel.SecondarySprite = _metaSubIds[x];
 				pixel.SpriteColor = _mainScreenBuffer[x]; pixel.SecondaryColor = _subScreenBuffer[x];
 				pixel.Brightness = _state.ScreenBrightness;
+				pixel.SnesHiresBackgrounds = _state.BgMode == 5 || _state.BgMode == 6;
 				pixel.SnesFallbackMainColor = _metaBgMain[x]; pixel.SnesFallbackSubColor = _metaBgSub[x];
 				pixel.SnesFallbackMainFlags = _metaBgMainFlags[x]; pixel.SnesFallbackSubPriority = _metaBgSubPriority[x];
 				pixel.SnesFallbackMainLayer = _metaBgMainLayer[x]; pixel.SnesFallbackSubLayer = _metaBgSubLayer[x];
@@ -1133,6 +1141,18 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 		}
 		uint16_t y = _overscanFrame ? _scanline - 1 : _scanline + 6;
 		if(_metaFrame && y < 239) {
+			auto& destination = _metaFrame->Pixels[y * 256 + x];
+			destination.SnesObjectsMain = drawMain && !ProcessMaskWindow<SnesPpu::SpriteLayerIndex>(mainWindowCount, x);
+			destination.SnesObjectsSub = drawSub && !ProcessMaskWindow<SnesPpu::SpriteLayerIndex>(subWindowCount, x);
+			destination.SnesObjectMath = (_state.ColorMathEnabled & 0x10) != 0;
+			destination.SnesFirstObject = _metaFirstObject;
+			std::copy_n(priority, 4, destination.SnesObjectPriorities);
+			if(_spritePriority[x] <= 3) {
+				destination.SnesObjectSprite = _metaSpriteIds[x];
+				destination.SnesObjectColor = _cgram[128 + (_spritePalette[x] << 4) + _spriteColors[x]];
+				destination.SnesObjectOrder = _metaSpriteOrder[x];
+				destination.SnesObjectPriorityCode = _spritePriority[x]; destination.SnesObjectPalette = _spritePalette[x];
+			}
 			for(auto coverage : _metaSpriteCoverage[x]) {
 				if(coverage.Order < _metaSpriteOrder[x]) { continue; }
 				coverage.Priority = priority[coverage.Priority];
@@ -1148,7 +1168,7 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 template<uint8_t layerIndex, uint8_t bpp, uint8_t normalPriority, uint8_t highPriority, uint16_t basePaletteOffset, bool hiResMode, bool applyMosaic, bool directColorMode>
 void SnesPpu::RenderTilemap()
 {
-	const bool captureBackgrounds = _metaFrame && !_metaFrame->SnesBackgrounds.empty() && !hiResMode;
+	const bool captureBackgrounds = _metaFrame && !_metaFrame->SnesBackgrounds.empty();
 	bool drawMain = (bool)(((_state.MainScreenLayers & _configVisibleLayers) >> layerIndex) & 0x01);
 	bool drawSub = (bool)(((_state.SubScreenLayers & _configVisibleLayers) >> layerIndex) & 0x01);
 
@@ -1176,10 +1196,13 @@ void SnesPpu::RenderTilemap()
 			lookupIndex = (x + (hScrollOriginal & 0x07)) >> 3;
 		}
 
-		MetaBackgroundSample metaSample;
+		MetaBackgroundSample metaSample, metaSubSample;
 		if(_metaFrame) {
 			metaSample = _metaTileSamples[layerIndex][lookupIndex];
-			metaSample.X += (x + hScroll) & 7;
+			if constexpr(hiResMode) {
+				metaSample.X += ((x + hScrollOriginal) & 7) * 2 + 1;
+				metaSubSample = metaSample; metaSubSample.X--;
+			} else { metaSample.X += (x + hScroll) & 7; }
 		}
 		uint16_t tilemapData = tileData[lookupIndex].TilemapData;
 		uint16_t* chrData = tileData[lookupIndex].ChrData;
@@ -1209,7 +1232,7 @@ void SnesPpu::RenderTilemap()
 					color = hiresSubColor;
 				}
 				_mosaicColor[layerIndex] = (paletteIndex << 8) | color;
-				if(_metaFrame) { _metaMosaicSample[layerIndex] = metaSample; }
+				if(_metaFrame) { _metaMosaicSample[layerIndex] = hiResMode ? metaSubSample : metaSample; }
 				_mosaicPriority[layerIndex] = priority;
 			} else {
 				color = _mosaicColor[layerIndex] & 0xFF;
@@ -1220,6 +1243,9 @@ void SnesPpu::RenderTilemap()
 					hiresSubColor = color;
 				}
 			}
+			if constexpr(hiResMode) {
+				if(_metaFrame) { metaSample = metaSubSample = _metaMosaicSample[layerIndex]; }
+			}
 
 			if(++mosaicCounter == _state.MosaicSize) {
 				mosaicCounter = 0;
@@ -1228,13 +1254,20 @@ void SnesPpu::RenderTilemap()
 
 		uint16_t rgbColor = color > 0 ? GetRgbColor<bpp, directColorMode, basePaletteOffset>(paletteIndex, color) : 0;
 		const bool mainVisible = (captureBackgrounds || color > 0) && drawMain && !ProcessMaskWindow<layerIndex>(mainWindowCount, x);
-		const bool subVisible = !hiResMode && (captureBackgrounds || color > 0) && drawSub && !ProcessMaskWindow<layerIndex>(subWindowCount, x);
+		const bool subVisible = (captureBackgrounds || (hiResMode ? hiresSubColor > 0 : color > 0)) && drawSub && !ProcessMaskWindow<layerIndex>(subWindowCount, x);
 		if(captureBackgrounds) {
 			auto& captured = _metaBgLayers[x][layerIndex];
 			captured.Sample = metaSample; captured.Color = rgbColor; captured.Priority = priority;
 			captured.Opaque = color > 0; captured.Math = pixelFlags != 0;
 			captured.Main = mainVisible;
 			captured.Sub = subVisible;
+			if constexpr(hiResMode) {
+				captured.SeparateSub = true; captured.SubSample = metaSubSample;
+				uint16_t savedCgramAddress = _state.InternalCgramAddress;
+				captured.SubColor = hiresSubColor > 0 ? GetRgbColor<bpp, directColorMode, basePaletteOffset>(paletteIndex, hiresSubColor) : 0;
+				_state.InternalCgramAddress = savedCgramAddress;
+				captured.SubOpaque = hiresSubColor > 0;
+			}
 		}
 		if(color > 0) {
 			if(mainVisible) {
@@ -1250,9 +1283,12 @@ void SnesPpu::RenderTilemap()
 		}
 
 		if constexpr(hiResMode) {
-			if(hiresSubColor > 0 && drawSub && _subScreenPriority[x] < priority && !ProcessMaskWindow<layerIndex>(subWindowCount, x)) {
+			if(hiresSubColor > 0 && subVisible) {
+				uint16_t savedCgramAddress = _state.InternalCgramAddress;
 				uint16_t hiresSubRgbColor = GetRgbColor<bpp, directColorMode, basePaletteOffset>(paletteIndex, hiresSubColor);
-				DrawSubPixel(x, hiresSubRgbColor, priority);
+				if(_metaFrame) { CaptureBackgroundPixel(x, hiresSubRgbColor, priority, false, layerIndex, metaSubSample); }
+				if(_subScreenPriority[x] < priority) { DrawSubPixel(x, hiresSubRgbColor, priority); }
+				else { _state.InternalCgramAddress = savedCgramAddress; }
 			}
 		}
 	}
@@ -1486,9 +1522,14 @@ void SnesPpu::ApplyColorMath()
 	uint8_t activeWindowCount = (uint8_t)_state.Window[0].ActiveLayers[SnesPpu::ColorWindowIndex] + (uint8_t)_state.Window[1].ActiveLayers[SnesPpu::ColorWindowIndex];
 	bool hiResMode = _state.HiResMode || _state.BgMode == 5 || _state.BgMode == 6;
 	const uint16_t captureY = _overscanFrame ? _scanline - 1 : _scanline + 6;
-	MetaSpritePixel* captureRow = _metaFrame && !IsDoubleWidth() && captureY < 239 ? _metaFrame->Pixels.data() + captureY * 256 : nullptr;
+	MetaSpritePixel* captureRow = _metaFrame && captureY < 239 ? _metaFrame->Pixels.data() + captureY * 256 : nullptr;
 
 	if(hiResMode) {
+		MetaSnesSubOutputPhase* subCaptureRow = nullptr;
+		if(captureRow) {
+			if(_metaFrame->SnesSubOutput.empty()) { _metaFrame->SnesSubOutput.resize(_metaFrame->Pixels.size()); }
+			subCaptureRow = _metaFrame->SnesSubOutput.data() + captureY * 256;
+		}
 		for(int x = _drawStartX; x <= _drawEndX; x++) {
 			bool isInsideWindow = ProcessMaskWindow<SnesPpu::ColorWindowIndex>(activeWindowCount, x);
 
@@ -1498,22 +1539,39 @@ void SnesPpu::ApplyColorMath()
 			uint16_t prevMainPixel = x > 0 ? _prevMainPixel : 0;
 			_prevMainPixel = _mainScreenBuffer[x];
 			int prevX = x > 0 ? x - 1 : 0;
-			ApplyColorMathToPixel(_subScreenBuffer[x], prevMainPixel, prevX, isInsideWindow, captureRow);
+			MetaSnesSubOutputPhase* subCapture = subCaptureRow ? subCaptureRow + x : nullptr;
+			if(subCapture) {
+				const auto& current = captureRow[x];
+				const auto& previous = captureRow[prevX];
+				static_cast<MetaSpritePixelState&>(*subCapture) = current;
+				subCapture->MathControlX = prevX; subCapture->Captured = !_state.ForcedBlank;
+				subCapture->VisibleSprite = current.SecondarySprite;
+				subCapture->SecondarySprite = x > 0 ? previous.VisibleSprite : -1;
+				subCapture->SpriteColor = subPixel; subCapture->SecondaryColor = prevMainPixel;
+				subCapture->SnesFallbackMainColor = current.SnesFallbackSubColor;
+				subCapture->SnesFallbackSubColor = x > 0 ? previous.SnesFallbackMainColor : 0;
+				subCapture->SnesFallbackMainFlags = current.SnesFallbackSubPriority | (previous.SnesFallbackMainFlags & PixelFlags::AllowColorMath);
+				subCapture->SnesFallbackSubPriority = x > 0 ? previous.SnesFallbackMainFlags & 15 : 0;
+				subCapture->SnesFallbackMainLayer = current.SnesFallbackSubLayer;
+				subCapture->SnesFallbackSubLayer = x > 0 ? previous.SnesFallbackMainLayer : 0xFF;
+				subCapture->BackgroundSample = current.SnesSubBackgroundSample;
+				subCapture->SnesSubBackgroundSample = x > 0 ? previous.BackgroundSample : MetaBackgroundSample{};
+			}
+			ApplyColorMathToPixel(_subScreenBuffer[x], prevMainPixel, prevX, isInsideWindow, subCapture);
 
-			ApplyColorMathToPixel(_mainScreenBuffer[x], subPixel, x, isInsideWindow, captureRow);
+			ApplyColorMathToPixel(_mainScreenBuffer[x], subPixel, x, isInsideWindow, captureRow ? captureRow + x : nullptr);
 		}
 	} else {
 		for(int x = _drawStartX; x <= _drawEndX; x++) {
 			bool isInsideWindow = ProcessMaskWindow<SnesPpu::ColorWindowIndex>(activeWindowCount, x);
-			ApplyColorMathToPixel(_mainScreenBuffer[x], _subScreenBuffer[x], x, isInsideWindow, captureRow);
+			ApplyColorMathToPixel(_mainScreenBuffer[x], _subScreenBuffer[x], x, isInsideWindow, captureRow ? captureRow + x : nullptr);
 		}
 	}
 }
 
-void SnesPpu::ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow, MetaSpritePixel* captureRow)
+void SnesPpu::ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow, MetaSpritePixelState* capture)
 {
 	uint8_t halfShift = (uint8_t)_state.ColorMathHalveResult;
-	MetaSpritePixel* capture = captureRow ? captureRow + x : nullptr;
 	if(capture) {
 		capture->Window = isInsideWindow;
 		capture->SnesMathEnabled = false;
@@ -1756,10 +1814,40 @@ void SnesPpu::SendFrame()
 	_needFullFrame = false;
 
 	RenderedFrame frame(_currentBuffer, width, height, _useHighResOutput ? 0.5 : 1.0, _frameCount, _console->GetControlManager()->GetPortStates());
-	// Capture currently describes 256x239 logical pixels. Hires output alternates
-	// subscreen/main pixels and interlace output carries field parity; attaching
-	// that capture to 512x478 output would misrepresent color math and placement.
-	if(_metaFrame && !_useHighResOutput && !_interlacedFrame) { _metaFrame->FrameNumber = _frameCount; frame.MetaSprites = _metaFrame; }
+	bool weaveCapture = _metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+		&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Weave;
+	if(weaveCapture) {
+		_metaFrame->FrameNumber = _frameCount;
+		_metaInterlaceFields[_oddFrame ? 1 : 0] = _metaFrame;
+		const auto& previous = _metaInterlaceFields[_oddFrame ? 0 : 1];
+		if(previous && previous->FrameNumber + 1 == _frameCount) {
+			auto output = _metaOutputFramePool.Acquire(width, height);
+			if(MetaSnesCapture::WeaveFieldsWithoutMath(*_metaInterlaceFields[0], *_metaInterlaceFields[1], *output)) { frame.MetaSprites = output; }
+		}
+	} else {
+		_metaInterlaceFields[0].reset(); _metaInterlaceFields[1].reset();
+		if(_metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+			&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
+			_metaFrame->FrameNumber = _frameCount;
+			auto output = _metaOutputFramePool.Acquire(width, height);
+			if(MetaSnesCapture::MapFieldWithoutMath(*_metaFrame, *output, _oddFrame)) { frame.MetaSprites = output; }
+		}
+		if(_metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+			&& (_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Bob
+				|| _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::BobBlend)) {
+			_metaFrame->FrameNumber = _frameCount;
+			auto output = _metaOutputFramePool.Acquire(width, height);
+			if(MetaSnesCapture::MapBobWithoutMath(*_metaFrame, *output, _oddFrame, _overscanFrame ? 0 : 7)) { frame.MetaSprites = output; }
+		}
+	}
+	if(_metaFrame && !_interlacedFrame) {
+		_metaFrame->FrameNumber = _frameCount;
+		if(!_useHighResOutput) { frame.MetaSprites = _metaFrame; }
+		else if(MetaSnesCapture::CanExpandWithoutMath(*_metaFrame)) {
+			auto output = _metaOutputFramePool.Acquire(width, height);
+			if(MetaSnesCapture::ExpandWithoutMath(*_metaFrame, *output)) { frame.MetaSprites = output; }
+		}
+	}
 	if(_interlacedFrame) {
 		frame.Flags = FrameFlags::Interlaced;
 	}
@@ -2535,7 +2623,7 @@ void SnesPpu::Write(uint32_t addr, uint8_t value)
 
 void SnesPpu::Serialize(Serializer& s)
 {
-	if(!s.IsSaving()) { _metaFrame.reset(); }
+	if(!s.IsSaving()) { _metaFrame.reset(); _metaInterlaceFields[0].reset(); _metaInterlaceFields[1].reset(); }
 	SV(_state.ForcedBlank);
 	SV(_state.ScreenBrightness);
 	SV(_scanline);

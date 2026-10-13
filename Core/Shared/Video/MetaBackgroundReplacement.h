@@ -41,15 +41,17 @@ struct MetaBackgroundReplacement
 	{
 		color = 0;
 		if(!source.Valid || source.Layer != Layer || outputScale < 1
+			|| source.PixelScaleX < 1 || source.PixelScaleY < 1
+			|| source.PixelOffsetX >= source.PixelScaleX || source.PixelOffsetY >= source.PixelScaleY
 			|| subX < 0 || subY < 0 || subX >= outputScale || subY >= outputScale) { return false; }
-		int64_t x = static_cast<int64_t>(FollowScroll ? source.X : screenX) - X;
-		int64_t y = static_cast<int64_t>(FollowScroll ? source.Y : screenY) - Y;
+		int64_t x = static_cast<int64_t>(FollowScroll ? source.X : screenX / source.PixelScaleX) - X;
+		int64_t y = static_cast<int64_t>(FollowScroll ? source.Y : screenY / source.PixelScaleY) - Y;
 		int nativeWidth = Width / Scale, nativeHeight = Height / Scale;
 		if(WrapX) { x = WrapCoordinate(x, nativeWidth); }
 		if(WrapY) { y = WrapCoordinate(y, nativeHeight); }
 		if(x < 0 || y < 0 || x >= nativeWidth || y >= nativeHeight) { return false; }
-		x = x * Scale + (Scale == outputScale ? subX : static_cast<int64_t>(subX) * Scale / outputScale);
-		y = y * Scale + (Scale == outputScale ? subY : static_cast<int64_t>(subY) * Scale / outputScale);
+		x = x * Scale + (static_cast<int64_t>(source.PixelOffsetX) * outputScale + subX) * Scale / (source.PixelScaleX * outputScale);
+		y = y * Scale + (static_cast<int64_t>(source.PixelOffsetY) * outputScale + subY) * Scale / (source.PixelScaleY * outputScale);
 		color = Artwork[static_cast<size_t>(y) * Width + static_cast<size_t>(x)];
 		return true;
 	}

@@ -17,6 +17,8 @@ private:
 	OverscanDimensions _overscan = {};
 	bool _isOddFrame = false;
 	uint32_t _videoPhase = 0;
+	uint32_t _blendWidth = 0, _blendHeight = 0;
+	bool _blendDeferred = false;
 
 	void UpdateBufferSize();
 
@@ -36,6 +38,7 @@ protected:
 
 	virtual void ApplyFilter(uint16_t* ppuOutputBuffer) = 0;
 	virtual void OnBeforeApplyFilter();
+	virtual bool DeferFrameBlend() const { return false; }
 	bool IsOddFrame();
 	uint32_t GetVideoPhase();
 	uint32_t GetBufferSize();
@@ -46,6 +49,8 @@ public:
 	virtual ~BaseVideoFilter();
 
 	uint32_t* GetOutputBuffer();
+	void FinishFrameBlend(uint32_t* output, uint32_t size);
+	void ResetFrameBlendHistory() { _blendFilter.ResetHistory(); }
 	FrameInfo SendFrame(uint16_t* ppuOutputBuffer, uint32_t frameNumber, uint32_t videoPhase, void* frameData, bool enableOverscan = true, RenderedFrame frame = {});
 	void TakeScreenshot(string romName, VideoFilterType filterType);
 	void TakeScreenshot(VideoFilterType filterType, string filename, std::stringstream* stream = nullptr);

@@ -23,6 +23,7 @@ private:
 
 protected:
 	void OnBeforeApplyFilter() override;
+	bool DeferFrameBlend() const override { return _frame.MetaSprites && SupportsMetaSprites(); }
 	FrameInfo GetFrameInfo() override;
 
 public:

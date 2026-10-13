@@ -1,7 +1,9 @@
 #include "../../Core/Shared/Video/MetaSpriteCompositor.h"
+#include "../../Core/Shared/Video/MetaSnesCapture.h"
 #include "../../Core/Shared/Video/MetaSpritePacket.h"
 #include "../../Core/Shared/Video/MetaBackgroundReplacement.h"
 #include "../../Core/Shared/Video/MetaBackgroundPacket.h"
+#include "../../Core/Shared/Video/BlendFilter.h"
 #include "../../Core/Debugger/ViewerRefreshSchedule.h"
 #include <cassert>
 #include <iostream>
@@ -103,6 +105,562 @@ static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 
 int main(int argc, char** argv)
 {
+	{
+		BlendFilter blend; blend.SetEnabled(true);
+		uint32_t pixels[] = {0xFFFF0000, 0xFF0000FF};
+		blend.ApplyFilter(pixels, 2, 10);
+		assert(pixels[0] == 0xFFFF0000);
+		pixels[0] = 0xFF00FF00; pixels[1] = 0xFFFFFF00;
+		blend.ApplyFilter(pixels, 2, 11);
+		assert(pixels[0] == 0xFF7F7F00 && pixels[1] == 0xFF7F7F7F);
+		blend.ResetHistory(); pixels[0] = 0xFF0000FF;
+		blend.ApplyFilter(pixels, 2, 12); assert(pixels[0] == 0xFF0000FF);
+		blend.SetEnabled(false); blend.ApplyFilter(pixels, 2, 13);
+		blend.SetEnabled(true); pixels[0] = 0xFFFF0000;
+		blend.ApplyFilter(pixels, 2, 14); assert(pixels[0] == 0xFFFF0000);
+		pixels[0] = 0xFF00FF00; blend.ApplyFilter(pixels, 2, 17);
+		assert(pixels[0] == 0xFF00FF00);
+		std::cout << "PASS: final-frame blend averages consecutive PNG colors and clears history on explicit reset, disable and discontinuity." << std::endl;
+	}
+	{
+		MetaSpriteFrame logicalField(2, 2), mappedField(4, 4);
+		logicalField.SnesColorEffects = true;
+		logicalField.SnesBackgrounds.resize(4);
+		logicalField.FrameNumber = 17; logicalField.MemorySnapshot = {{0x10u, uint8_t(7)}};
+		logicalField.DecodedRows = {{3, 0, 0, 0, 1, 1, {0xFFFF0000}}};
+		for(size_t index = 0; index < 4; index++) {
+			auto& pixel = logicalField.Pixels[index];
+			pixel.SnesFallbackCaptured = true; pixel.VisibleSprite = 3;
+			pixel.SpriteColor = (uint16_t)(index + 1); pixel.SnesObjectsMain = true;
+			logicalField.SnesBackgrounds[index].Captured = true;
+			auto& fieldLayer = logicalField.SnesBackgrounds[index].Layers[0];
+			fieldLayer.Main = fieldLayer.Opaque = true;
+			fieldLayer.Sample.Valid = true; fieldLayer.Sample.X = (int)index * 3; fieldLayer.Sample.Y = (int)index * 5;
+			fieldLayer.Color = (uint16_t)(index + 9);
+		}
+		for(bool odd : {false, true}) {
+			assert(MetaSnesCapture::MapFieldWithoutMath(logicalField, mappedField, odd));
+			assert(mappedField.FrameNumber == 17 && mappedField.MemorySnapshot.size() == 1 && mappedField.DecodedRows.size() == 1);
+			for(int y = 0; y < 4; y++) { for(int x = 0; x < 4; x++) {
+				bool active = (y & 1) == (odd ? 1 : 0);
+				const auto& pixel = mappedField.Pixels[y * 4 + x];
+				assert(pixel.SnesFallbackCaptured == active && pixel.SnesObjectsMain == active);
+				assert(mappedField.SnesBackgrounds[y * 4 + x].Captured == active);
+				assert(pixel.VisibleSprite == (active ? 3 : -1));
+				if(active) { assert(pixel.SpriteColor == logicalField.Pixels[y / 2 * 2 + x / 2].SpriteColor); }
+			} }
+		}
+		assert(MetaSnesCapture::MapBobWithoutMath(logicalField, mappedField, true, 0));
+		assert(mappedField.SnesOutputOffsetY == 1);
+		assert(mappedField.Pixels[0].SpriteColor == logicalField.Pixels[0].SpriteColor);
+		assert(mappedField.Pixels[8].SpriteColor == logicalField.Pixels[0].SpriteColor);
+		assert(mappedField.Pixels[12].SpriteColor == logicalField.Pixels[2].SpriteColor);
+		for(int y = 0; y < 4; y++) { for(int x = 0; x < 4; x++) {
+			int sourceRow = y == 0 ? 0 : (y - 1) / 2;
+			const auto& fieldLayer = mappedField.SnesBackgrounds[y * 4 + x].Layers[0];
+			const auto& originalLayer = logicalField.SnesBackgrounds[sourceRow * 2 + x / 2].Layers[0];
+			assert(fieldLayer.Main && fieldLayer.Opaque && fieldLayer.Sample.Valid);
+			assert(fieldLayer.Sample.X == originalLayer.Sample.X && fieldLayer.Sample.Y == originalLayer.Sample.Y && fieldLayer.Color == originalLayer.Color);
+			assert(fieldLayer.Sample.PixelScaleX == 2 && fieldLayer.Sample.PixelScaleY == 2);
+			assert(fieldLayer.Sample.PixelOffsetX == x % 2 && fieldLayer.Sample.PixelOffsetY == (y == 0 ? 0 : (y - 1) % 2));
+		} }
+		assert(MetaSnesCapture::MapBobWithoutMath(logicalField, mappedField, false, 0));
+		assert(mappedField.SnesOutputOffsetY == 0 && mappedField.Pixels[8].SpriteColor == logicalField.Pixels[2].SpriteColor);
+		logicalField.Pixels[0].SnesMathEnabled = true;
+		assert(!MetaSnesCapture::MapFieldWithoutMath(logicalField, mappedField, false));
+		std::cout << "PASS: SNES even/odd field mapping keeps only the current field's capture and preserves configured memory samples." << std::endl;
+	}
+	{
+		MetaSpriteFrame logicalBackground(2, 2), bobBackground(4, 4);
+		logicalBackground.SnesColorEffects = true; logicalBackground.SnesBackgrounds.resize(4);
+		logicalBackground.MemorySnapshot = {{0x10u, uint8_t(7)}};
+		for(int y = 0; y < 2; y++) { for(int x = 0; x < 2; x++) {
+			auto& pixel = logicalBackground.Pixels[y * 2 + x];
+			pixel.SnesFallbackCaptured = true; pixel.Brightness = 15;
+			pixel.SnesFallbackMainColor = 31; pixel.SnesFallbackMainFlags = 1; pixel.SnesFallbackMainLayer = 0;
+			auto& captured = logicalBackground.SnesBackgrounds[y * 2 + x];
+			captured.Captured = true; captured.BackdropColor = 0x7C00; captured.MainPriority = 1;
+			auto& fieldLayer = captured.Layers[0];
+			fieldLayer.Main = fieldLayer.Opaque = true; fieldLayer.Priority = 1; fieldLayer.Color = 31;
+			fieldLayer.Sample = {x, y, 0, true};
+		} }
+		MetaBackgroundReplacement background;
+		background.Id = 1; background.Width = background.Height = 4; background.Scale = 2;
+		background.MemoryConditions = {{0x10u, 7, 0xFF}};
+		for(uint32_t i = 0; i < 16; i++) { background.Artwork.push_back(0xFF000000u | ((i + 1) * 0x00110307u)); }
+		background.Artwork[0] = 0; background.Artwork[1] = 0x8000FF00;
+		uint32_t originalBackground[16]; std::fill(std::begin(originalBackground), std::end(originalBackground), 0xFFFF0000);
+		MetaSpriteCompositor backgroundCompositor; backgroundCompositor.SetBackgroundLayers({background});
+		std::vector<uint32_t> previousBackground;
+		BlendFilter backgroundBlend; backgroundBlend.SetEnabled(true);
+		for(bool odd : {false, true}) {
+			assert(MetaSnesCapture::MapBobWithoutMath(logicalBackground, bobBackground, odd, 0));
+			const auto* outputBackground = backgroundCompositor.Apply(originalBackground, 4, 4, bobBackground);
+			assert(backgroundCompositor.GetOutputScale() == 2);
+			for(int y = 0; y < 4; y++) { for(int x = 0; x < 4; x++) {
+				int artworkY = odd && y > 0 ? y - 1 : y;
+				for(int sy = 0; sy < 2; sy++) { for(int sx = 0; sx < 2; sx++) {
+					uint32_t artworkPixel = background.Artwork[artworkY * 4 + x];
+					uint32_t expectedBackground = !(artworkPixel >> 24) ? 0xFFFF0000 : (artworkPixel >> 24) == 128 ? 0xFF7F8000 : artworkPixel;
+					assert(outputBackground[(y * 2 + sy) * 8 + x * 2 + sx] == expectedBackground);
+				} }
+			} }
+			std::vector<uint32_t> currentBackground(outputBackground, outputBackground + 64);
+			std::vector<uint32_t> blendedBackground = currentBackground;
+			backgroundBlend.ApplyFilter(blendedBackground.data(), 64, odd ? 31 : 30);
+			for(size_t i = 0; i < 64; i++) {
+				uint32_t expectedBlend = odd ? (((currentBackground[i] ^ previousBackground[i]) & 0xFFFEFEFEu) >> 1) + (currentBackground[i] & previousBackground[i]) : currentBackground[i];
+				assert(blendedBackground[i] == expectedBlend);
+			}
+			previousBackground = std::move(currentBackground);
+		}
+		bobBackground.MemorySnapshot[0x10] = 8;
+		logicalBackground.DecodedRows = {{0, 0, 1, 0, 1, 1, {0xFFFF0000}}};
+		logicalBackground.DecodedRows[0].SnesPriorityCode = 0;
+		logicalBackground.Pixels[2].SnesObjectSprite = 0;
+		for(auto& pixel : logicalBackground.Pixels) { pixel.SnesObjectsMain = true; pixel.SnesObjectPriorities[0] = 3; }
+		MetaSpriteReplacement foreground;
+		foreground.ArtworkWidth = foreground.ArtworkHeight = 2; foreground.ArtworkScale = 2;
+		foreground.Artwork.assign(4, 0xFF00FFFF);
+		foreground.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		backgroundCompositor.SetGroups({foreground});
+		for(bool odd : {false, true}) {
+			assert(MetaSnesCapture::MapBobWithoutMath(logicalBackground, bobBackground, odd, 0));
+			const auto* withForeground = backgroundCompositor.Apply(originalBackground, 4, 4, bobBackground);
+			int firstRow = odd ? 3 : 2;
+			for(int y = firstRow * 2; y < 8; y++) { for(int x = 0; x < 4; x++) { assert(withForeground[y * 8 + x] == 0xFF00FFFF); } }
+			assert(withForeground[0] == 0xFFFF0000 && withForeground[2] == 0xFF7F8000);
+		}
+		backgroundCompositor.SetGroups({});
+		logicalBackground.DecodedRows[0].Y = 0;
+		logicalBackground.Pixels[2].SnesObjectSprite = -1; logicalBackground.Pixels[0].SnesObjectSprite = 0;
+		backgroundCompositor.SetGroups({foreground});
+		assert(MetaSnesCapture::MapBobWithoutMath(logicalBackground, bobBackground, true, 0));
+		const auto* firstPictureArtwork = backgroundCompositor.Apply(originalBackground, 4, 4, bobBackground);
+		for(int y = 0; y < 6; y++) { for(int x = 0; x < 4; x++) { assert(firstPictureArtwork[y * 8 + x] == 0xFF00FFFF); } }
+		backgroundCompositor.SetGroups({});
+		bobBackground.MemorySnapshot[0x10] = 8;
+		const auto* suppressedBackground = backgroundCompositor.Apply(originalBackground, 4, 4, bobBackground);
+		for(int i = 0; i < 16; i++) { assert(suppressedBackground[i] == originalBackground[i]); }
+		std::cout << "PASS: Bob background PNGs preserve both field mappings, 2x subpixel artwork and configured CPU gating." << std::endl;
+	}
+	{
+		MetaSpriteFrame canvas(4, 1); canvas.SnesColorEffects = true;
+		canvas.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}};
+		canvas.DecodedRows[0].SnesPriorityCode = 0; canvas.DecodedRows[0].SnesPalette = 5; canvas.DecodedRows[0].SnesFetchOrder = 1;
+		for(auto& pixel : canvas.Pixels) {
+			pixel.SnesFallbackCaptured = true; pixel.Brightness = 15;
+			pixel.SnesObjectsMain = true; pixel.SnesObjectPriorities[0] = 3;
+			pixel.SnesFallbackMainColor = pixel.SnesFallbackSubColor = 0x7C00; pixel.SnesFallbackMainFlags = 2;
+		}
+		canvas.Pixels[0].SnesObjectSprite = 0; canvas.Pixels[0].SnesObjectPriorityCode = 0; canvas.Pixels[0].SnesObjectOrder = 1;
+		canvas.Pixels[3].SnesObjectsMain = false;
+		MetaSpriteReplacement group; group.ArtworkWidth = 4; group.ArtworkHeight = 1;
+		group.Artwork.assign(4, 0xFF00FF00); group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		uint32_t original[] = {0xFFFF0000, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+		MetaSpriteCompositor compositor; compositor.SetGroups({group});
+		auto output = compositor.Apply(original, 4, 1, canvas);
+		assert(output[0] == 0xFF00FF00 && output[1] == 0xFF00FF00 && output[2] == 0xFF00FF00 && output[3] == original[3]);
+		for(auto& pixel : canvas.Pixels) { pixel.SnesObjectPriorities[0] = 1; }
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFF0000FF);
+		for(auto& pixel : canvas.Pixels) { pixel.SnesObjectPriorities[0] = 3; pixel.SnesObjectMath = true; pixel.SnesFixedColor = 31; }
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFFFFFF00);
+		for(auto& pixel : canvas.Pixels) { pixel.SnesObjectMath = false; }
+		group.Artwork.assign(4, 0x8000FF00); compositor.SetGroups({group});
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFF00807F);
+		group.Artwork.assign(4, 0); compositor.SetGroups({group});
+		assert(compositor.Apply(original, 4, 1, canvas)[0] == 0xFF0000FF);
+		std::cout << "PASS: SNES full canvas uses destination windows, BG priority, color math, PNG alpha and source removal." << std::endl;
+	}
+	{
+		MetaSpriteFrame even(2, 1), odd(2, 1), woven(4, 2);
+		even.FrameNumber = 20; odd.FrameNumber = 21;
+		even.MemorySnapshot = {{0x10u, uint8_t(3)}}; odd.MemorySnapshot = {{0x10u, uint8_t(7)}};
+		even.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}};
+		odd.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFF0000FF}}};
+		for(auto* field : {&even, &odd}) {
+			field->SnesColorEffects = true;
+			field->DecodedRows[0].SnesPriorityCode = 0;
+			for(auto& pixel : field->Pixels) {
+				pixel.SnesFallbackCaptured = true; pixel.Brightness = 15;
+				pixel.SnesObjectsMain = true; pixel.SnesObjectPriorities[0] = 3;
+				pixel.SnesFallbackMainColor = 0x7C00;
+			}
+			field->Pixels[0].VisibleSprite = field->Pixels[0].SnesObjectSprite = 0;
+		}
+		assert(MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		assert(woven.FrameNumber == 21 && woven.MemorySnapshot == odd.MemorySnapshot);
+		assert(woven.DecodedRows.size() == 2 && woven.DecodedRows[1].Sprite == 128);
+		assert(woven.Pixels[0].SnesField == 1 && woven.Pixels[4].SnesField == 2);
+		assert(woven.Pixels[4].SnesObjectSprite == 128 && woven.Pixels[4].VisibleSprite == 128);
+		MetaSpriteReplacement first, second;
+		first.ArtworkWidth = second.ArtworkWidth = 2; first.ArtworkHeight = second.ArtworkHeight = 1;
+		first.Artwork.assign(2, 0xFF00FF00); second.Artwork.assign(2, 0xFFFFFF00);
+		first.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		second.Members = {{0, 0, 1, 1, -1, {0xFF0000FF}}};
+		uint32_t original[8] = {};
+		MetaSpriteCompositor compositor; compositor.SetGroups({first, second});
+		const auto* output = compositor.Apply(original, 4, 2, woven);
+		for(int x = 0; x < 4; x++) { assert(output[x] == 0xFF00FF00 && output[4 + x] == 0xFFFFFF00); }
+		// A moving odd-field pose must not shift the retained even-field PNG.
+		odd.DecodedRows[0].X = 1;
+		odd.Pixels[0].VisibleSprite = odd.Pixels[0].SnesObjectSprite = -1;
+		odd.Pixels[1].VisibleSprite = odd.Pixels[1].SnesObjectSprite = 0;
+		odd.FrameNumber = 22; even.FrameNumber = 23;
+		std::fill(std::begin(original), std::end(original), 0xFF0000FF);
+		assert(MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		assert(woven.FrameNumber == 23 && woven.MemorySnapshot == even.MemorySnapshot);
+		output = compositor.Apply(original, 4, 2, woven);
+		for(int x = 0; x < 4; x++) { assert(output[x] == 0xFF00FF00 && output[4 + x] == (x < 2 ? 0xFF0000FF : 0xFFFFFF00)); }
+		odd.DecodedRows[0].X = 0;
+		odd.Pixels[0].VisibleSprite = odd.Pixels[0].SnesObjectSprite = 0;
+		odd.Pixels[1].VisibleSprite = odd.Pixels[1].SnesObjectSprite = -1;
+		assert(MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		// A group assembled from one member in each field must never match.
+		first.Members.push_back(second.Members[0]); compositor.SetGroups({first});
+		assert(compositor.Apply(original, 4, 2, woven)[0] != 0xFF00FF00);
+		odd.DecodedRows[0].Sprite = 128;
+		assert(!MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		assert(woven.DecodedRows[1].Sprite == 128 && woven.FrameNumber == 23);
+		odd.DecodedRows[0].Sprite = 0;
+		odd.Pixels[0].SnesField = 2;
+		assert(!MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		odd.Pixels[0].SnesField = 0;
+		odd.Pixels[0].SnesMathEnabled = true;
+		assert(!MetaSnesCapture::WeaveFieldsWithoutMath(even, odd, woven));
+		std::cout << "PASS: woven SNES fields retain independent poses, hardware IDs and configured memory samples; recognition never mixes fields." << std::endl;
+	}
+	{
+		MetaSpriteFrame canvas(4, 1); canvas.GbaColorEffects = true;
+		canvas.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}}; canvas.DecodedRows[0].GbaPriority = 0;
+		for(auto& pixel : canvas.Pixels) {
+			pixel.GbaObjectsEnabled = true; pixel.GbaBackdropColor = 0x7C00;
+			pixel.GbaBackgroundSamples[0] = {0, 0, 0, true}; pixel.GbaBackgroundLayers[0] = {0x7C00, 1, true};
+			pixel.GbaWindowEffectsEnabled = true; pixel.GbaBlendMainMask = 16;
+		}
+		canvas.Pixels[0].GbaObjectSprite = 0; canvas.Pixels[0].GbaObjectPriority = 0;
+		canvas.Pixels[3].GbaObjectsEnabled = false;
+		MetaSpriteReplacement group; group.ArtworkWidth = 4; group.ArtworkHeight = 1;
+		group.Artwork.assign(4, 0xFF00FF00); group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		uint32_t original[] = {0xFFFF0000, 0xFF0000FF, 0xFF0000FF, 0xFF0000FF};
+		MetaSpriteCompositor compositor; compositor.SetGroups({group});
+		auto output = compositor.Apply(original, 4, 1, canvas);
+		assert(output[0] == 0xFF00FF00 && output[1] == 0xFF00FF00 && output[2] == 0xFF00FF00 && output[3] == original[3]);
+		canvas.DecodedRows[0].GbaPriority = 2;
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFF0000FF);
+		canvas.DecodedRows[0].GbaPriority = 0;
+		for(auto& pixel : canvas.Pixels) { pixel.Effect = 3; pixel.Brightness = 8; }
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFF007F00);
+		for(auto& pixel : canvas.Pixels) { pixel.Effect = 0; }
+		group.Artwork.assign(4, 0x8000FF00); compositor.SetGroups({group});
+		assert(compositor.Apply(original, 4, 1, canvas)[1] == 0xFF00807F);
+		group.Artwork.assign(4, 0); compositor.SetGroups({group});
+		assert(compositor.Apply(original, 4, 1, canvas)[0] == 0xFF0000FF);
+		for(auto& pixel : canvas.Pixels) { pixel.Effect = 3; pixel.GbaBlendMainMask = 49; }
+		assert(compositor.Apply(original, 4, 1, canvas)[0] == 0xFF00007B);
+		std::cout << "PASS: GBA full canvas uses destination OBJ windows, BG priority, brightness, PNG alpha and source removal." << std::endl;
+	}
+	{
+		MetaSpriteFrame metadata(1, 1);
+		// The background must participate in fallback selection after removing a matched OBJ.
+		MetaSpriteFrame layered(4, 1); layered.GbaColorEffects = true;
+		layered.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}}; layered.DecodedRows[0].GbaPriority = 0;
+		for(auto& pixel : layered.Pixels) {
+			pixel.GbaObjectsEnabled = true; pixel.GbaBackdropColor = 0x7C00;
+			pixel.GbaBackgroundSamples[0] = {0, 0, 0, true};
+			pixel.GbaBackgroundLayers[0] = {0x7C1F, 1, true};
+			pixel.GbaNativeObjects.push_back({2, 0x03FF, 3, false});
+		}
+		layered.Pixels[0].GbaObjectSprite = 0; layered.Pixels[0].GbaObjectPriority = 0;
+		layered.Pixels[0].GbaNativeObjects.push_back({0, 31, 0, false});
+		MetaSpriteReplacement layerArtwork; layerArtwork.ArtworkWidth = 4; layerArtwork.ArtworkHeight = 1;
+		layerArtwork.Artwork = {0, 0x8000FF00, 0xFF00FF00, 0};
+		layerArtwork.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		MetaSpriteCompositor layerCompositor; layerCompositor.SetGroups({layerArtwork});
+		uint32_t layeredNative[] = {0xFFFF0000, 0xFFFF00FF, 0xFFFF00FF, 0xFFFF00FF};
+		for(uint8_t priority = 0; priority < 4; priority++) {
+			for(auto& pixel : layered.Pixels) { pixel.GbaNativeObjects[0].Priority = priority; }
+			auto result = layerCompositor.Apply(layeredNative, 4, 1, layered);
+			uint32_t fallback = priority <= 1 ? 0xFFFFFF00 : 0xFFFF00FF;
+			assert(result[0] == fallback && result[3] == fallback && result[2] == 0xFF00FF00);
+			assert(result[1] == (priority <= 1 ? 0xFF7FFF00 : 0xFF7F807F));
+		}
+		std::cout << "PASS: GBA PNG alpha reselects background versus hidden native OBJ across all four priorities, including ties." << std::endl;
+		MetaSpriteFrame mixed(6, 1); mixed.GbaColorEffects = true;
+		mixed.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}, {1, 2, 0, 0, 1, 1, {0xFFFF0000}}};
+		mixed.DecodedRows[0].GbaPriority = 0; mixed.DecodedRows[1].GbaPriority = 3;
+		for(auto& pixel : mixed.Pixels) {
+			pixel.GbaObjectsEnabled = true; pixel.GbaBackdropColor = 0x7C00;
+			pixel.GbaBackgroundSamples[0] = {0, 0, 0, true}; pixel.GbaBackgroundLayers[0] = {0x7C1F, 1, true};
+		}
+		mixed.Pixels[0].GbaObjectSprite = 0; mixed.Pixels[0].GbaObjectPriority = 0;
+		MetaSpriteReplacement mixedGroup; mixedGroup.ArtworkWidth = 6; mixedGroup.ArtworkHeight = 1;
+		mixedGroup.Artwork = {0, 0x8000FF00, 0xFF00FF00, 0xFF00FF00, 0xFF00FF00, 0xFF00FF00};
+		mixedGroup.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}, {2, 0, 1, 1, -1, {0xFFFF0000}}};
+		uint32_t mixedNative[] = {0xFFFF0000, 0xFFFF00FF, 0xFFFF00FF, 0xFFFF00FF, 0xFFFF00FF, 0xFFFF00FF};
+		layerCompositor.SetGroups({mixedGroup});
+		auto mixedOutput = layerCompositor.Apply(mixedNative, 6, 1, mixed);
+		assert(mixedOutput[0] == 0xFFFF00FF && mixedOutput[1] == 0xFF7F807F);
+		for(int x = 2; x < 6; x++) { assert(mixedOutput[x] == 0xFFFF00FF); }
+		std::cout << "PASS: mixed-priority GBA groups preserve member rectangles and nearest-member margin priority without source-alpha masking." << std::endl;
+		metadata.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}};
+		metadata.Pixels[0].VisibleSprite = 0;
+		MetaSpriteReplacement artwork;
+		artwork.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		artwork.ArtworkWidth = artwork.ArtworkHeight = 1; artwork.Artwork = {0xFF00FF00};
+		MetaSpriteCompositor compositor; compositor.SetGroups({artwork});
+		uint32_t original = 0xFFFF0000;
+		for(uint8_t priority = 0; priority < 4; priority++) { for(bool semi : {false, true}) {
+			metadata.DecodedRows[0].GbaPriority = priority;
+			metadata.DecodedRows[0].GbaSemiTransparent = semi;
+			metadata.DecodedRows[0].SnesPriorityCode = priority;
+			metadata.DecodedRows[0].SnesPalette = 5; metadata.DecodedRows[0].SnesFetchOrder = 42;
+			auto candidates = MetaSpriteCompositor::BuildDecodedCandidates(metadata);
+			assert(candidates.size() == 1 && candidates[0].GbaPriority == priority && candidates[0].GbaSemiTransparent == semi);
+			assert(candidates[0].SnesPriorityCode == priority && candidates[0].SnesPalette == 5 && candidates[0].SnesFetchOrder == 42);
+			assert(compositor.Apply(&original, 1, 1, metadata)[0] == 0xFF00FF00);
+		} }
+		std::cout << "PASS: GBA decoded priority/blend metadata survives reconstruction without changing content recognition." << std::endl;
+	}
+	{
+		// Front source has a hole, but replacement PNG alpha controls overlap.
+		MetaSpriteFrame overlap(4, 1);
+		overlap.DecodedRows = {{0, 0, 0, 0, 2, 1, {0xFFFF0000, 0}}, {1, 0, 0, 0, 2, 1, {0xFF0000FF, 0xFF0000FF}}};
+		for(auto& row : overlap.DecodedRows) { row.ExpansionClass = 1; }
+		for(auto& pixel : overlap.Pixels) { pixel.ExpandedSpriteClasses = 3; }
+		overlap.Pixels[0].VisibleSprite = 0; overlap.Pixels[0].AllowReplacementSprite(0); overlap.Pixels[0].ExpandedSpriteOccluder = 0;
+		overlap.Pixels[1].VisibleSprite = 1; overlap.Pixels[1].AllowReplacementSprite(0); overlap.Pixels[1].AllowReplacementSprite(1); overlap.Pixels[1].ExpandedSpriteOccluder = 1;
+		MetaSpriteReplacement front, back;
+		front.ArtworkWidth = back.ArtworkWidth = 4; front.ArtworkHeight = back.ArtworkHeight = 1;
+		back.Artwork.assign(4, 0xFFFFFF00);
+		front.Members = {{0, 0, 2, 1, -1, {0xFFFF0000, 0}}};
+		back.Members = {{0, 0, 2, 1, -1, {0xFF0000FF, 0xFF0000FF}}};
+		uint32_t original[] = {0xFFFF0000, 0xFF0000FF, 0xFF000000, 0xFF000000};
+		for(int system = 0; system < 3; system++) {
+			overlap.GbaColorEffects = system == 1; overlap.SnesColorEffects = system == 2;
+			for(auto& row : overlap.DecodedRows) { row.GbaPriority = 0; }
+			for(auto& pixel : overlap.Pixels) { pixel.GbaObjectsEnabled = true; pixel.GbaObjectSprite = pixel.VisibleSprite; pixel.GbaObjectPriority = 0; pixel.GbaBackdropColor = 0x7C00; }
+			// Tile fetch counts can vary by scanline and must not reorder OAM.
+			for(auto& row : overlap.DecodedRows) { row.SnesPriorityCode = 0; row.SnesFetchOrder = (uint16_t)(row.Sprite ? 99 : 1); }
+			for(auto& pixel : overlap.Pixels) {
+				pixel.SnesFallbackCaptured = true; pixel.Brightness = 15; pixel.SnesObjectsMain = true; pixel.SnesObjectPriorities[0] = 3;
+				pixel.SnesObjectSprite = pixel.VisibleSprite; pixel.SnesFallbackMainColor = pixel.SnesFallbackSubColor = 0x7C00;
+			}
+			overlap.Pixels[1].SnesFirstObject = 1;
+		for(uint32_t alpha : {255u, 128u, 0u}) {
+			front.Artwork.assign(4, (alpha << 24) | 0x0000FF00);
+			uint32_t expected = 0xFF00FF00 | ((255 - alpha) << 16);
+			for(bool reverse : {false, true}) {
+				MetaSpriteCompositor compositor; compositor.SetGroups(reverse ? std::vector<MetaSpriteReplacement>{back, front} : std::vector<MetaSpriteReplacement>{front, back});
+				const auto* output = compositor.Apply(original, 4, 1, overlap);
+				for(int x = 0; x < 4; x++) { assert(output[x] == (system == 2 && x == 1 ? 0xFFFFFF00 : expected)); }
+			}
+		}
+		}
+		std::cout << "PASS: shared and GBA crossing replacement canvases use PNG alpha and hardware order inside source bounds and margins, independent of pack order." << std::endl;
+	}
+	{
+		// Oversized PNG margins use destination rules, not original coverage.
+		MetaSpriteFrame frame(4, 1);
+		frame.DecodedRows = {{5, 1, 0, 0, 1, 1, {0xFFFF0000}}};
+		frame.DecodedRows[0].ExpansionClass = 2;
+		for(int x = 0; x < 4; x++) {
+			frame.Pixels[x].ExpandedSpriteClasses = 3;
+			frame.Pixels[x].BackgroundColor = 0x7C00;
+			frame.Pixels[x].BackgroundSample = {x, 0, 0, true};
+			frame.Pixels[x].BackgroundOverlayOccludesClasses = 2;
+		}
+		frame.Pixels[1].VisibleSprite = 5;
+		MetaSpriteReplacement group;
+		group.ArtworkWidth = 4; group.ArtworkHeight = 1; group.ArtworkOriginX = 1;
+		group.Artwork = {0xFF00FF00, 0xFF00FF00, 0xFF00FF00, 0x8000FF00};
+		group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		MetaBackgroundReplacement bg; bg.Id = 1; bg.Width = 4; bg.Height = 1;
+		bg.Artwork = {0, 0x80FFFFFF, 0xFFFFFFFF, 0x80FFFFFF};
+		MetaSpriteCompositor compositor; compositor.SetReplacements({group}, {bg});
+		std::vector<uint32_t> original = {0xFF0000FF, 0xFFFF0000, 0xFF0000FF, 0xFF0000FF};
+		const auto* output = compositor.Apply(original.data(), 4, 1, frame, 0, 0, [](uint16_t) { return 0xFF0000FF; });
+		assert(output[0] == 0xFF00FF00 && output[1] == 0xFF80FF80 && output[2] == 0xFFFFFFFF && output[3] == 0xFF80C0BF);
+		frame.DecodedRows[0].ExpansionClass = 1;
+		output = compositor.Apply(original.data(), 4, 1, frame, 0, 0, [](uint16_t) { return 0xFF0000FF; });
+		assert(output[0] == 0xFF00FF00 && output[1] == 0xFF00FF00 && output[2] == 0xFF00FF00 && output[3] == 0xFF40C07F);
+		frame.DecodedRows[0].ExpansionClass = 2;
+		for(auto& pixel : frame.Pixels) { pixel.BackgroundOverlayOccludesClasses = 0; }
+		output = compositor.Apply(original.data(), 4, 1, frame, 0, 0, [](uint16_t) { return 0xFF0000FF; });
+		assert(output[1] == 0xFF00FF00 && output[2] == 0xFF00FF00 && output[3] == 0xFF40C07F);
+		std::cout << "PASS: background PNG alpha stays above behind-background full canvases, including partial sprite alpha." << std::endl;
+	}
+	{
+		// Oversized PNG margins use destination rules, not original coverage.
+		MetaSpriteFrame frame(6, 4);
+		frame.DecodedRows = {{5, 2, 1, 0, 1, 1, {0xFFFF0000}}};
+		frame.DecodedRows[0].ExpansionClass = 1;
+		std::vector<uint32_t> original(24, 0xFF0000FF);
+		original[8] = 0xFFFF0000; frame.Pixels[8].VisibleSprite = 5;
+		for(auto& pixel : frame.Pixels) { pixel.ExpandedSpriteClasses = 3; pixel.BackgroundColor = 0x7C00; }
+		MetaSpriteReplacement group;
+		group.ArtworkWidth = 4; group.ArtworkHeight = 3;
+		group.ArtworkOriginX = group.ArtworkOriginY = 1;
+		group.Artwork.assign(12, 0xFF00FF00);
+		group.Artwork[0] = 0; group.Artwork[1] = 0x80FFFFFF;
+		group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		MetaSpriteCompositor compositor; compositor.SetGroups({group});
+		const auto* output = compositor.Apply(original.data(), 6, 4, frame);
+		for(int y = 0; y < 4; y++) { for(int x = 0; x < 6; x++) {
+			uint32_t expected = x >= 1 && x < 5 && y < 3 ? 0xFF00FF00 : original[y * 6 + x];
+			if(y == 0 && x == 1) { expected = original[1]; }
+			if(y == 0 && x == 2) { expected = 0xFF8080FF; }
+			assert(output[y * 6 + x] == expected);
+		} }
+		frame.Pixels[3].ExpandedSpriteClasses = 0; // Masked destination.
+		frame.Pixels[4].ExpandedSpriteOccluder = 4; // Earlier hardware sprite.
+		frame.Pixels[13].ExpandedSpriteOccluder = 6; // Later sprite loses.
+		output = compositor.Apply(original.data(), 6, 4, frame);
+		assert(output[3] == original[3] && output[4] == original[4] && output[13] == 0xFF00FF00);
+		frame.DecodedRows[0].ExpansionClass = 2;
+		frame.Pixels[13].ExpandedSpriteClasses = 1; // Opaque BG blocks behind-BG OBJ.
+		assert(compositor.Apply(original.data(), 6, 4, frame)[13] == original[13]);
+		MetaAlternateArtwork alternate;
+		alternate.ArtworkWidth = 6; alternate.ArtworkHeight = 4;
+		alternate.ArtworkOriginX = 3; alternate.ArtworkOriginY = 2;
+		alternate.Artwork.assign(24, 0xFFFFFF00); alternate.MemoryConditions = {{0x20, 1, 0xFF}};
+		group.AlternateArtwork = {alternate}; compositor.SetGroups({group});
+		frame.MemorySnapshot = {{0x20u, uint8_t(1)}};
+		output = compositor.Apply(original.data(), 6, 4, frame);
+		assert(output[0] == 0xFFFFFF00 && output[6] == 0xFFFFFF00 && output[5] == original[5]);
+		// Runtime class metadata never becomes a graphic matching requirement.
+		assert(output[8] == 0xFFFFFF00);
+		group.AlternateArtwork.clear(); frame.DecodedRows[0].ExpansionClass = 1;
+		for(auto& pixel : frame.Pixels) { pixel.ExpandedSpriteClasses = 3; pixel.ExpandedSpriteOccluder = -1; }
+		for(int scale : {2, 3}) { for(int edge : {0, 1}) {
+			group.ArtworkScale = scale; group.ArtworkWidth = 4 * scale + edge; group.ArtworkHeight = 3 * scale + edge;
+			group.Artwork.assign(group.ArtworkWidth * group.ArtworkHeight, 0xFF00FF00);
+			if(edge) { group.Artwork.back() = 0xFFFF00FF; }
+			compositor.SetGroups({group}); output = compositor.Apply(original.data(), 6, 4, frame);
+			assert(compositor.GetOutputScale() == (uint32_t)scale);
+			for(int y = 0; y < 4 * scale; y++) { for(int x = 0; x < 6 * scale; x++) {
+				bool inside = x >= scale && x < 5 * scale + edge && y < 3 * scale + edge;
+				uint32_t color = edge && x == 5 * scale && y == 3 * scale ? 0xFFFF00FF : 0xFF00FF00;
+				assert(output[y * 6 * scale + x] == (inside ? color : original[y / scale * 6 + x / scale]));
+			} }
+		} }
+		std::cout << "PASS: full PNG canvas, 1x/2x/3x scales, transparent/partial-alpha margins, destination masks/occlusion and oversized alternate origins." << std::endl;
+	}
+	{
+		MetaSpriteFrame frame(24, 12);
+		for(int id = 0; id < 2; id++) { for(int y = 0; y < 8; y++) {
+			MetaSpriteRow row;
+			row.Sprite = (uint16_t)id; row.X = id ? 4 : 8; row.Y = 0; row.Scanline = (uint16_t)y;
+			row.LowByte = 255; row.Palette[1] = id ? 0x7FFF : 31;
+			row.ExpansionOrder = (row.X + 8) * 64 + id;
+			frame.Rows.push_back(row);
+		} }
+		for(auto& pixel : frame.Pixels) { pixel.ExpandedSpriteClasses = 3; }
+		std::vector<uint32_t> original(24 * 12, 0xFF0000FF);
+		MetaSpriteReplacement first, second;
+		first.Members = {{0, 0, 8, 8, -1, std::vector<uint32_t>(64, 0xFFFF0000)}};
+		second.Members = {{0, 0, 8, 8, -1, std::vector<uint32_t>(64, 0xFFFFFFFF)}};
+		first.ArtworkWidth = second.ArtworkWidth = 24; first.ArtworkHeight = second.ArtworkHeight = 8;
+		first.Artwork.assign(192, 0xFFFFFF00); second.Artwork.assign(192, 0xFF00FFFF);
+		MetaSpriteCompositor compositor; compositor.SetGroups({first, second});
+		assert(compositor.Apply(original.data(), 24, 12, frame)[18] == 0xFF00FFFF); // DMG: lower X wins despite higher OAM ID.
+		for(auto& row : frame.Rows) { row.ExpansionOrder = row.Sprite; }
+		assert(compositor.Apply(original.data(), 24, 12, frame)[18] == 0xFFFFFF00); // GBC: lower OAM ID wins.
+		for(auto& row : frame.Rows) { row.X = 8; row.ExpansionOrder = (row.X + 8) * 64 + row.Sprite; }
+		assert(compositor.Apply(original.data(), 24, 12, frame)[18] == 0xFFFFFF00); // DMG equal-X tie uses OAM order.
+		for(auto& row : frame.Rows) { row.X = row.Sprite ? 4 : 8; }
+		frame.Pixels[18].ExpandedSpriteOccluder = 0;
+		for(auto& row : frame.Rows) { row.ExpansionOrder = (row.X + 8) * 64 + row.Sprite; }
+		assert(compositor.Apply(original.data(), 24, 12, frame)[18] == original[18]);
+		frame.Pixels[18].ExpandedSpriteOccluder = -1; frame.Pixels[18].ExpandedSpriteClasses = 1;
+		for(auto& row : frame.Rows) { row.ExpansionOrder = row.Sprite; if(row.Sprite == 0) { row.Attributes = 0x80; } }
+		assert(compositor.Apply(original.data(), 24, 12, frame)[18] == 0xFF00FFFF); // Behind-BG class cannot draw over opaque BG.
+		std::cout << "PASS: Game Boy expanded canvas uses DMG X/OAM ties, GBC OAM order and destination background/OBJ priority." << std::endl;
+	}
+	{
+		MetaBackgroundReplacement layer; layer.Id = 1; layer.Layer = 0;
+		layer.Scale = 2; layer.Width = layer.Height = 8;
+		for(uint32_t i = 0; i < 64; i++) { layer.Artwork.push_back(0xFF000000 | i); }
+		MetaBackgroundSample sample {1, 2, 0, true};
+		sample.PixelScaleX = sample.PixelScaleY = 2; sample.PixelOffsetX = sample.PixelOffsetY = 1;
+		uint32_t color = 0;
+		assert(layer.Sample(sample, 5, 5, 0, 0, 1, color) && color == layer.Artwork[5 * 8 + 3]);
+		assert(layer.Sample(sample, 5, 5, 1, 1, 2, color) && color == layer.Artwork[5 * 8 + 3]);
+		layer.FollowScroll = false;
+		assert(layer.Sample(sample, 5, 5, 0, 0, 1, color) && color == layer.Artwork[5 * 8 + 5]);
+		sample.PixelOffsetX = 2; assert(!layer.Sample(sample, 5, 5, 0, 0, 1, color));
+	}
+	{
+		MetaSpriteFrame logical(2, 1), physical(4, 2);
+		logical.SnesColorEffects = true;
+		logical.DecodedRows.push_back({0, 0, 0, 0, 1, 1, {0xFFFF0000}});
+		logical.SnesSubOutput.resize(2);
+		for(auto& pixel : logical.Pixels) {
+			pixel.SpriteColor = pixel.SnesFallbackMainColor = 0x7C00;
+			pixel.Brightness = 15; pixel.SnesFallbackCaptured = true;
+		}
+		logical.Pixels[0].VisibleSprite = 0; logical.Pixels[0].SpriteColor = 31;
+		logical.Pixels[0].SnesObjectsMain = true; logical.Pixels[1].SnesObjectsSub = true;
+		logical.Pixels[0].SnesObjectPriorities[2] = 9;
+		logical.Pixels[0].SnesCoverage.push_back({0, 1, 3, 0, false, true, false});
+		for(auto& phase : logical.SnesSubOutput) {
+			phase.Captured = true; phase.Brightness = 15;
+			phase.SpriteColor = phase.SnesFallbackMainColor = 0x7C00; phase.SnesFallbackCaptured = true;
+		}
+		assert(MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		assert(physical.SpriteCoordinateScale == 2 && physical.DecodedRows[0].Width == 1);
+		assert(physical.Pixels[0].SnesCoverage[0].Main && !physical.Pixels[0].SnesCoverage[0].Sub);
+		assert(physical.Pixels[1].VisibleSprite == 0 && physical.Pixels[4].SnesCoverage[0].Main);
+		assert(!physical.Pixels[0].SnesObjectsMain && physical.Pixels[1].SnesObjectsMain);
+		assert(physical.Pixels[2].SnesObjectsMain && !physical.Pixels[3].SnesObjectsMain);
+		assert(!physical.Pixels[1].SnesObjectsSub && physical.Pixels[1].SnesObjectPriorities[2] == 9);
+		logical.SnesSubOutput[0].Captured = false;
+		assert(MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		assert(physical.Pixels[0].VisibleSprite == 0 && physical.Pixels[1].VisibleSprite == 0);
+		logical.SnesSubOutput[0].Captured = true;
+		logical.SnesBackgrounds.resize(2);
+		logical.SnesBackgrounds[0].Captured = true;
+		auto& bg = logical.SnesBackgrounds[0].Layers[0];
+		bg.Sample = {1, 2, 0, true}; bg.SubSample = {0, 2, 0, true};
+		bg.Main = bg.Sub = bg.SeparateSub = true; bg.Color = 31; bg.SubColor = 0x7C00;
+		bg.Opaque = bg.SubOpaque = true;
+		assert(MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		const auto& evenBg = physical.SnesBackgrounds[0].Layers[0];
+		const auto& oddBg = physical.SnesBackgrounds[1].Layers[0];
+		assert(evenBg.Sample.X == 0 && oddBg.Sample.X == 1 && evenBg.Color == 0x7C00 && oddBg.Color == 31);
+		assert(evenBg.Main && oddBg.Main && !evenBg.Sub && !oddBg.Sub && evenBg.Sample.PixelScaleX == 1);
+		assert(physical.SnesBackgrounds[4].Layers[0].Sample.PixelOffsetY == 1);
+		bg.Math = true; assert(!MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		logical.SnesBackgrounds.clear();
+		logical.SnesSubOutput[0].SnesMathEnabled = true;
+		assert(!MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		logical.SnesSubOutput[0].SnesMathEnabled = false;
+		logical.Pixels[0].SnesFallbackMainFlags = 0x80;
+		assert(!MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		logical.Pixels[0].SnesFallbackMainFlags = 0;
+		logical.Pixels[0].SnesCoverage.clear(); // Isolate main-only OBJ for artwork mapping.
+		assert(MetaSnesCapture::ExpandWithoutMath(logical, physical));
+		std::vector<uint32_t> native {0xFF0000FF, 0xFFFF0000, 0xFF0000FF, 0xFF0000FF,
+			0xFF0000FF, 0xFFFF0000, 0xFF0000FF, 0xFF0000FF};
+		MetaSpriteReplacement group;
+		group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		group.ArtworkScale = 1; group.ArtworkWidth = group.ArtworkHeight = 1; group.Artwork = {0xFF00FF00};
+		group.ArtworkOriginX = -1;
+		MetaSpriteCompositor compositor; compositor.SetGroups({group});
+		auto output = compositor.Apply(native.data(), 4, 2, physical);
+		assert(compositor.GetOutputScale() == 1 && output[1] == 0xFF0000FF && output[5] == 0xFF0000FF);
+		group.ArtworkOriginX = 0; group.ArtworkScale = 3;
+		group.ArtworkWidth = group.ArtworkHeight = 3; group.Artwork.clear();
+		for(int i = 0; i < 9; i++) { group.Artwork.push_back(0xFF000000 | ((i + 1) * 20 << 8)); }
+		compositor.SetGroups({group}); output = compositor.Apply(native.data(), 4, 2, physical);
+		assert(compositor.GetOutputScale() == 2);
+		for(int y = 0; y < 4; y++) { for(int x = 0; x < 8; x++) {
+			assert(output[y * 8 + x] == (x == 2 || x == 3 ? group.Artwork[y * 3 / 4 * 3 + x * 3 / 4] : 0xFF0000FF));
+		} }
+		compositor.SetGroups({}); assert(compositor.Apply(native.data(), 4, 2, physical) == native.data());
+		assert(compositor.GetOutputScale() == 1);
+		std::cout << "PASS: SNES hires phase coverage, logical group coordinates, shifted 1x artwork, odd artwork scale, and unsupported-math fallback." << std::endl;
+	}
 	assert(MetaSpriteCompositor::CompositeAlpha(0x12010203, 0x34040506, 255) == 0xFF010203);
 	assert(MetaSpriteCompositor::CompositeAlpha(0x12010203, 0x34040506, 0) == 0xFF040506);
 	ViewerRefreshSchedule refreshSchedule;
@@ -156,25 +714,32 @@ int main(int argc, char** argv)
 	auto retainedFrame = firstFrame;
 	auto secondFrame = framePool.Acquire(3, 2);
 	auto thirdFrame = framePool.Acquire(3, 2);
-	firstFrame->FrameNumber = 99; firstFrame->GbaColorEffects = firstFrame->SnesColorEffects = true;
+	firstFrame->FrameNumber = 99; firstFrame->GbaColorEffects = firstFrame->SnesColorEffects = true; firstFrame->SpriteCoordinateScale = 2;
 	firstFrame->Pixels[0].VisibleSprite = 7; firstFrame->Pixels[0].BackgroundSample = {4, 5, 2, true};
 	firstFrame->Pixels[0].GbaCoverage.push_back({7, 9});
+	firstFrame->Pixels[0].GbaNativeObjects.push_back({11, 0x03FF, 2, true});
 	firstFrame->Pixels[0].SnesCoverage.push_back({7, 1, 3, 4, true, false, true});
 	firstFrame->SnesBackgrounds.resize(6); firstFrame->Rows.resize(1); firstFrame->DecodedRows.resize(1); firstFrame->NesRows.resize(1);
+	firstFrame->SnesSubOutput.resize(6);
+	firstFrame->SnesSubOutput[0].Captured = true; firstFrame->SnesSubOutput[0].MathControlX = 2;
 	firstFrame->MemorySnapshot[0x123] = 9;
 	auto overflowFrame = framePool.Acquire(3, 2);
 	if(overflowFrame == firstFrame || overflowFrame == secondFrame || overflowFrame == thirdFrame) { return 1; }
 	firstFrame.reset(); overflowFrame.reset();
 	overflowFrame = framePool.Acquire(3, 2);
-	if(overflowFrame == retainedFrame || retainedFrame->Pixels[0].VisibleSprite != 7) { return 1; }
+	if(overflowFrame == retainedFrame || retainedFrame->Pixels[0].VisibleSprite != 7
+		|| retainedFrame->Pixels[0].GbaNativeObjects.begin() == retainedFrame->Pixels[0].GbaNativeObjects.end()
+		|| retainedFrame->Pixels[0].GbaNativeObjects[0].Color != 0x03FF || !retainedFrame->Pixels[0].GbaNativeObjects[0].SemiTransparent
+		|| !retainedFrame->SnesSubOutput[0].Captured || retainedFrame->SnesSubOutput[0].MathControlX != 2) { return 1; }
 	MetaSpriteFrame* reusableAddress = retainedFrame.get();
 	retainedFrame.reset();
 	auto reusedFrame = framePool.Acquire(3, 2);
-	if(reusedFrame.get() != reusableAddress || reusedFrame->FrameNumber != 0 || reusedFrame->GbaColorEffects || reusedFrame->SnesColorEffects
+	if(reusedFrame.get() != reusableAddress || reusedFrame->FrameNumber != 0 || reusedFrame->SpriteCoordinateScale != 1 || reusedFrame->GbaColorEffects || reusedFrame->SnesColorEffects
 		|| reusedFrame->Pixels[0].VisibleSprite != -1 || reusedFrame->Pixels[0].BackgroundSample.Valid
 		|| reusedFrame->Pixels[0].GbaCoverage.begin() != reusedFrame->Pixels[0].GbaCoverage.end()
+		|| reusedFrame->Pixels[0].GbaNativeObjects.begin() != reusedFrame->Pixels[0].GbaNativeObjects.end()
 		|| reusedFrame->Pixels[0].SnesCoverage.begin() != reusedFrame->Pixels[0].SnesCoverage.end()
-		|| !reusedFrame->SnesBackgrounds.empty() || !reusedFrame->Rows.empty() || !reusedFrame->DecodedRows.empty()
+		|| !reusedFrame->SnesBackgrounds.empty() || !reusedFrame->SnesSubOutput.empty() || !reusedFrame->Rows.empty() || !reusedFrame->DecodedRows.empty()
 		|| !reusedFrame->NesRows.empty() || !reusedFrame->MemorySnapshot.empty()) { return 1; }
 	if(reusedFrame->Pixels[0].GbaObjectPriority != 0xFF || reusedFrame->Pixels[0].SnesFallbackMainLayer != 0xFF
 		|| reusedFrame->Pixels[0].MainCoefficient != 16 || !reusedFrame->Pixels[0].SnesWindowMathAllowed) { return 1; }
@@ -899,6 +1464,21 @@ int main(int argc, char** argv)
 		try { MetaSpritePacket(alternatePacket.data(), alternatePacket.size()).Parse(); } catch(const std::runtime_error&) { invalid = true; }
 		assert(invalid);
 		std::cout << "PASS: MSP3 alternate transfer, selection/fallback, origins/scale, and truncation rejection.\n";
+		std::ifstream partialFile(std::string(argv[1]) + ".partial", std::ios::binary);
+		assert(partialFile.good());
+		std::vector<uint8_t> partialPacket((std::istreambuf_iterator<char>(partialFile)), std::istreambuf_iterator<char>());
+		auto partial = MetaSpritePacket(partialPacket.data(), partialPacket.size()).Parse();
+		assert(partial.size() == 1 && partial[0].ArtworkScale == 2 && partial[0].ArtworkWidth == 17 && partial[0].ArtworkHeight == 19);
+		assert(partial[0].Artwork.size() == 17 * 19 && partial[0].Artwork.back() == 0xFF00FF00);
+		assert(partial[0].AlternateArtwork.size() == 1 && partial[0].AlternateArtwork[0].ArtworkScale == 2);
+		assert(partial[0].AlternateArtwork[0].ArtworkWidth == 19 && partial[0].AlternateArtwork[0].ArtworkHeight == 21);
+		assert(partial[0].AlternateArtwork[0].Artwork.back() == 0xFFFFFFFF);
+		for(size_t length = 0; length < partialPacket.size(); length++) {
+			bool partialRejected = false;
+			try { MetaSpritePacket(partialPacket.data(), length).Parse(); } catch(const std::runtime_error&) { partialRejected = true; }
+			assert(partialRejected);
+		}
+		std::cout << "PASS: partial native PNG canvases transfer completely for default/alternate images; truncated packets remain rejected.\n";
 	}
 	std::cout << "PASS: native graphic reconstruction, content matching, visibility/priority masks, transparent suppression, alpha blend, incomplete capture fallback, disable fallback.\n";
 }

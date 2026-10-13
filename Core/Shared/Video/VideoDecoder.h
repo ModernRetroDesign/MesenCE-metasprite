@@ -26,6 +26,7 @@ private:
 
 	atomic<bool> _frameChanged;
 	atomic<bool> _stopFlag;
+	atomic<bool> _resetBlendHistory { false };
 	uint32_t _frameCount = 0;
 	bool _forceFilterUpdate = false;
 
@@ -61,6 +62,7 @@ public:
 	void TakeScreenshot(std::stringstream& stream);
 
 	void ForceFilterUpdate() { _forceFilterUpdate = true; }
+	void ResetFrameBlendHistory() { _resetBlendHistory.store(true); }
 
 	uint32_t GetFrameCount();
 	FrameInfo GetBaseFrameInfo(bool removeOverscan);

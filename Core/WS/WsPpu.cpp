@@ -137,6 +137,14 @@ void WsPpu::DrawSprites()
 	constexpr int tileSize = mode >= WsVideoMode::Color4bpp ? 32 : 16;
 	constexpr int tileBytesPerRow = mode >= WsVideoMode::Color4bpp ? 4 : 2;
 	constexpr int bank0Addr = mode >= WsVideoMode::Color4bpp ? 0x4000 : 0x2000;
+	if(_metaFrame) {
+		for(int x = 0; x < WsConstants::ScreenWidth; x++) {
+			auto& pixel = _metaFrame->Pixels[scanline * WsConstants::ScreenWidth + x];
+			// Bits distinguish foreground priority and each side of OBJ window.
+			pixel.ExpandedSpriteClasses = !_state.SpriteWindow.EnabledLatch ? 15
+				: _state.SpriteWindow.IsInsideWindow(x, scanline) ? 3 : 12;
+		}
+	}
 
 	int spriteCount = 0;
 	for(int i = 0; i < _state.SpriteCountLatch; i++) {
@@ -165,6 +173,7 @@ void WsPpu::DrawSprites()
 			uint16_t tileDataAddr = (bank0Addr + tileIndex * tileSize + tileRow * tileBytesPerRow);
 			if(_metaFrame) {
 				MetaSpriteDecodedRow captured {i, sprX >= 224 ? (int)sprX - 256 : sprX, y, (int)(scanline - y), 8, 8, {}};
+				captured.ExpansionClass = (highPriority ? 1 : 2) << (showOutsideWindow ? 2 : 0);
 				captured.Pixels.reserve(8);
 				for(int column = 0; column < 8; column++) {
 					uint8_t index = GetPixelColor<mode>(tileDataAddr, hMirror ? 7 - column : column);
@@ -198,7 +207,10 @@ void WsPpu::DrawSprites()
 				uint8_t color = GetPixelColor<mode>(tileDataAddr, tileColumn);
 				if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
 					_rowData[rowIndex][x] = { palette, color, highPriority ? (uint8_t)2 : (uint8_t)1 };
-					if(_metaFrame) { _metaSpriteIds[rowIndex][x] = i; }
+					if(_metaFrame) {
+						_metaSpriteIds[rowIndex][x] = i;
+						_metaFrame->Pixels[scanline * WsConstants::ScreenWidth + x].ExpandedSpriteOccluder = (int16_t)i;
+					}
 				}
 			}
 		}
@@ -272,7 +284,10 @@ void WsPpu::DrawBackground()
 			if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
 				if(_metaFrame) {
 					_metaBackground[rowIndex][i] = {palette, color, (uint8_t)(layerIndex + 1)};
-					if constexpr(layerIndex == 1) { _metaReplacementCoverage[rowIndex][i] = _metaHighPriorityCoverage[rowIndex][i]; }
+					if constexpr(layerIndex == 1) {
+						_metaReplacementCoverage[rowIndex][i] = _metaHighPriorityCoverage[rowIndex][i];
+						_metaFrame->Pixels[scanline * WsConstants::ScreenWidth + i].ExpandedSpriteClasses &= 5;
+					}
 					auto& sample = _metaBackgroundSamples[rowIndex][i];
 					sample.X = (x + i - cycle) & 255; sample.Y = y;
 					sample.Layer = layerIndex; sample.Valid = true;

@@ -26,6 +26,8 @@ private:
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 	MetaSpriteFramePool _metaFramePool;
+	MetaSpriteFramePool _metaOutputFramePool;
+	std::shared_ptr<MetaSpriteFrame> _metaInterlaceFields[2];
 	int16_t _metaSpriteIds[256] = {}, _metaSpriteIdsCopy[256] = {};
 	MetaSpriteCoverageList<MetaSpritePixel::SnesCoverageSample> _metaSpriteCoverage[256], _metaSpriteCoverageCopy[256];
 	uint16_t _metaSpriteOrder[256] = {}, _metaSpriteOrderCopy[256] = {}, _metaFetchOrder = 0;
@@ -58,6 +60,7 @@ private:
 	SpriteInfo _currentSprite = {};
 	SpriteInfo _metaFetchedSprite = {};
 	uint8_t _oamEvaluationIndex = 0;
+	uint8_t _metaFirstObjectEvaluation = 0, _metaFirstObjectCopy = 0, _metaFirstObject = 0;
 	uint8_t _oamTimeIndex = 0;
 	uint16_t _fetchSpriteStart = 0;
 	uint16_t _fetchSpriteEnd = 0;
@@ -202,7 +205,7 @@ private:
 	__forceinline void DrawSubPixel(uint8_t x, uint16_t color, uint8_t priority);
 
 	void ApplyColorMath();
-	void ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow, MetaSpritePixel* captureRow);
+	void ApplyColorMathToPixel(uint16_t& pixelA, uint16_t pixelB, int x, bool isInsideWindow, MetaSpritePixelState* capture);
 
 	template<bool forMainScreen>
 	void ApplyBrightness();

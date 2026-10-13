@@ -131,6 +131,7 @@ public:
 					pixel.SpriteColor = _currentBuffer[offset];
 					pixel.BackgroundColor = bg.Priority ? GetPixelRgbColor(_state.Mode, bg.Color, bg.Palette) : GetBgColor();
 					pixel.BackgroundSample = _metaBackgroundSamples[rowIndex][_state.Cycle];
+					pixel.BackgroundOverlayOccludesClasses = pixel.BackgroundSample.Layer == 1 ? 10 : 0;
 					pixel.SpriteColorIndex = data.Color; pixel.SpriteAttributes = data.Palette;
 				}
 			}

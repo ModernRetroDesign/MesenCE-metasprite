@@ -783,6 +783,7 @@ template<class T> void NesPpu<T>::LoadSprite(uint8_t spriteY, uint8_t tileIndex,
 			row.Sprite = (uint16_t)_metaFetchedSpriteIds[_spriteIndex];
 			row.X = spriteX; row.Y = (int16_t)spriteY + 1; row.Scanline = _scanline + 1;
 			row.Height = spriteSizeMask + 1; row.PatternAddress = tileAddr;
+			row.Attributes = info.BackgroundPriority ? 0x20 : 0;
 			// Fetched bytes have already been mirrored into left-to-right shifter order.
 			row.LowByte = info.LowByte; row.HighByte = info.HighByte;
 			for(int color = 0; color < 4; color++) {
@@ -894,8 +895,12 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 		captured->BackgroundColorIndex = backgroundColor;
 		captured->BackgroundColor = (_paletteRam[backgroundColor ? bgIndex : 0] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
 		captured->VisibleSprite = -1;
+		if(_prevRenderingEnabled && _mask.SpritesEnabled && _emulatorSpritesEnabled && _cycle > _minimumDrawSpriteCycle) {
+			captured->ExpandedSpriteClasses = backgroundColor ? 1 : 3;
+		}
 		if(_cycle > _minimumDrawBgCycle && _emulatorBgEnabled && _prevRenderingEnabled) {
 			captured->BackgroundSample = _metaBackgroundShift[(_metaBackgroundShiftHead + offset) & 15];
+			captured->BackgroundOverlayOccludesClasses = 2;
 		}
 	}
 	uint8_t spriteColor = 0;
@@ -957,6 +962,7 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 
 			captureReplacementCoverage();
 			if(spriteColor != 0) {
+				if(captured && spriteIndex >= 0 && spriteIndex < _spriteCount) { captured->ExpandedSpriteOccluder = _metaFetchedSpriteIds[spriteIndex]; }
 				if(_sprite0Visible && spriteIndex == 0 && spriteColor != 0 && spriteBgColor != 0 && _cycle != 256 && _mask.BackgroundEnabled && !_statusFlags.Sprite0Hit && _cycle > _minimumDrawSpriteStandardCycle) {
 					//"The hit condition is basically sprite zero is in range AND the first sprite output unit is outputting a non-zero pixel AND the background drawing unit is outputting a non-zero pixel."
 					//"Sprite zero hits do not register at x=255" (cycle 256)

@@ -11,7 +11,7 @@ namespace Mesen.Debugger.Utilities;
 internal static class MetaSpriteRuntimeLoader
 {
 	public static string GetPackPath(string romHash, CpuType cpuType) =>
-		Path.Combine(ConfigManager.HdPackFolder, "MetaSprites", romHash, cpuType.ToString(), "groups.json");
+		Path.Combine(ConfigManager.HdPackFolder, "MetaSprites", cpuType.ToString(), romHash, "groups.json");
 
 	public static bool Apply(MetaSpritePack pack, string path)
 	{
@@ -20,7 +20,9 @@ internal static class MetaSpriteRuntimeLoader
 			alternate => LoadPng(Path.Combine(Path.GetDirectoryName(path)!, alternate.Path), alternate.Scale));
 		byte[] backgrounds = MetaBackgroundRuntimePacket.Create(pack, layer => {
 			if(layer.ArtworkPath.Length == 0) { throw new InvalidDataException($"Background {layer.Id} has no PNG."); }
-			return LoadPng(Path.Combine(Path.GetDirectoryName(path)!, layer.ArtworkPath), layer.ArtworkScale);
+			var artwork = LoadPng(Path.Combine(Path.GetDirectoryName(path)!, layer.ArtworkPath), layer.ArtworkScale);
+			MetaSpritePlacement.ValidateCanvas(artwork.Width, artwork.Height, layer.ArtworkScale);
+			return artwork;
 		});
 		return DebugApi.SetMetaReplacements(pack.RomHash, packet, (uint)packet.Length, backgrounds, (uint)backgrounds.Length);
 	}
@@ -85,13 +87,13 @@ internal static class MetaSpriteRuntimeLoader
 	private static void ValidatePngCanvas(string path, int scale)
 	{
 		using SKCodec codec = SKCodec.Create(path) ?? throw new InvalidDataException("Could not read replacement PNG dimensions: " + Path.GetFileName(path));
-		MetaSpritePlacement.ValidateCanvas(codec.Info.Width, codec.Info.Height, scale);
+		MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width, codec.Info.Height, scale);
 	}
 
 	private static (int Width, int Height, uint[] Pixels) LoadPng(string path, int scale)
 	{
 		using SKCodec codec = SKCodec.Create(path) ?? throw new InvalidDataException("Could not decode replacement PNG.");
-		MetaSpritePlacement.ValidateCanvas(codec.Info.Width, codec.Info.Height, scale);
+		MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width, codec.Info.Height, scale);
 		// Decode straight alpha directly: a premultiplied UI bitmap round trip
 		// can change partial-alpha RGB values before gameplay composition.
 		var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul);

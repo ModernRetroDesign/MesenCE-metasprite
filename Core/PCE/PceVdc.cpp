@@ -586,6 +586,7 @@ void PceVdc::LoadSpriteTiles()
 			row.Sprite = sprite.Index; row.X = sprite.X - sprite.CapturedOffsetX; row.Y = sprite.CapturedY;
 			row.Width = sprite.CapturedWidth; row.Height = sprite.CapturedHeight;
 			row.Row = sprite.CapturedRow; row.OffsetX = sprite.CapturedOffsetX;
+			row.ExpansionClass = sprite.ForegroundPriority ? 1 : 2;
 			for(int x = 0; x < 16; x++) {
 				uint8_t color = GetSpritePixelColor(sprite.TileData, sprite.HorizontalMirroring ? x : 15 - x);
 				row.Pixels.push_back(color ? palette[_vce->GetPalette(256 + sprite.Palette * 16 + color) & 0x1FF] : 0);
@@ -932,6 +933,7 @@ void PceVdc::InternalDrawScanline()
 					uint16_t column = screenX >> 3;
 					if(capture) {
 						_metaRow[xStart].BackgroundSample = _metaBackgroundTiles[column];
+						_metaRow[xStart].BackgroundOverlayOccludesClasses = 2;
 						_metaRow[xStart].BackgroundSample.X += screenX & 7;
 					}
 					bgColor = GetTilePixelColor(_tiles[column].TileData[0], _tiles[column].TileData[1], 7 - (screenX & 0x07));
@@ -942,6 +944,7 @@ void PceVdc::InternalDrawScanline()
 			}
 
 			if(capture) { backgroundColor = (outColor & 0x1FF) | grayscaleBit; }
+			if(capture && sprEnabled) { _metaRow[xStart].ExpandedSpriteClasses = bgColor ? 1 : 3; }
 			if constexpr(hasSprites) {
 				if(_state.SpritesEnabled && _xPosHasSprite[_screenOffsetX + 32]) {
 					uint8_t sprColor;
@@ -959,6 +962,7 @@ void PceVdc::InternalDrawScanline()
 							sprColor = GetSpritePixelColor(_drawSprites[i].TileData, xOffset);
 
 							if(sprColor != 0) {
+								if(capture && _metaRow[xStart].ExpandedSpriteOccluder < 0) { _metaRow[xStart].ExpandedSpriteOccluder = _drawSprites[i].Index; }
 								if constexpr(hasSprite0) {
 									if(checkSprite0Hit) {
 										//Note: don't trigger sprite 0 hit for sprites that are drawn because of the "remove sprite limit" option

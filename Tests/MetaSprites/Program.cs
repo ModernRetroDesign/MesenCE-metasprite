@@ -72,9 +72,11 @@ group.ReplacementOriginX = 4;
 group.ReplacementOriginY = 6;
 Check(MetaSpritePlacement.GetTopLeft(group, 101, 51, 3) == (291, 135), "Larger replacement artwork must align its own origin at output scale.");
 MetaSpritePlacement.ValidateCanvas(48, 64, 2);
+MetaSpritePlacement.ValidateSpriteCanvas(49, 65, 2);
+MetaSpritePlacement.ValidateSpriteCanvas(1, 1, 10);
 bool badScale = false;
 try { MetaSpritePlacement.ValidateCanvas(49, 64, 2); } catch(InvalidDataException) { badScale = true; }
-Check(badScale, "Fractional native canvas dimensions must be rejected.");
+Check(badScale, "Background wrapping canvases must retain whole native dimensions.");
 Check(matches.Count == 2, "Must recognize two instances with reordered hardware indices.");
 Check(matches[0].X == 101 && matches[0].Y == 51 && matches[0].Members.SequenceEqual(new[] { 1, 0 }), "Origin or member mapping incorrect.");
 Check(MetaSpriteMatcher.FindMatches(group, new[] { candidates[0] }).Count == 0, "Partial groups must not match.");
@@ -228,6 +230,14 @@ byte[] alternatePacket = MetaSpriteRuntimePacket.Create(runtimePack,
 	_ => (16, 16, Enumerable.Repeat(0xFFFFFFFFu, 256).ToArray()));
 Check(BitConverter.ToUInt32(alternatePacket, 0) == MetaSpriteRuntimePacket.AlternateMagic, "Alternate PNGs require MSP3.");
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".alternates", alternatePacket); }
+int previousArtworkScale = runtimeGroup.ReplacementScale;
+runtimeGroup.ReplacementScale = 2;
+byte[] partialCanvasPacket = MetaSpriteRuntimePacket.Create(runtimePack,
+	_ => (17, 19, Enumerable.Repeat(0xFF00FF00u, 17 * 19).ToArray()),
+	_ => (19, 21, Enumerable.Repeat(0xFFFFFFFFu, 19 * 21).ToArray()));
+Check(BitConverter.ToUInt32(partialCanvasPacket, 0) == MetaSpriteRuntimePacket.AlternateMagic, "Partial native canvases must retain default/alternate packet compatibility.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".partial", partialCanvasPacket); }
+runtimeGroup.ReplacementScale = previousArtworkScale;
 runtimeGroup.AlternateArtwork.Clear();
 var bgTransfer = new MetaSpritePack();
 bgTransfer.BackgroundLayers.Add(new() { Id = 8, NativeLayer = 1, X = -3, Y = 5, Enabled = true, ArtworkWidth = 2, ArtworkHeight = 2, ArtworkScale = 2, WrapX = true });
@@ -264,9 +274,21 @@ runtimeGroup.Enabled = false;
 byte[] disabledPacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => throw new Exception("Disabled groups must not load PNG assets."));
 Check(disabledPacket.Length == 8 && BitConverter.ToInt32(disabledPacket, 4) == 0, "An all-disabled pack must clear native definitions without reading artwork.");
 Console.WriteLine("PASS: all-disabled pack clears runtime definitions without loading PNG assets.");
+if(args.Length >= 3 && args[1] == "--snes-hires") {
+	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}
+if(args.Length >= 3 && args[1] == "--snes-hires-canvas") {
+	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), includeInterlace: false);
+}
+if(args.Length >= 3 && args[1] == "--snes-hires-weave") {
+	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), includeObjInterlace: false);
+}
 if(args.Length >= 3 && args[1] == "--snes-ordering") {
 	GameplayFixture.RunSnesOrdering(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 	GameplayFixture.VerifyPackActivation(Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.holes-subscreen.sfc")), Path.GetFullPath(args[0]));
+}
+if(args.Length >= 3 && args[1] == "--snes-canvas") {
+	GameplayFixture.RunSnesCanvas(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }
 if(args.Length >= 3 && (args[1] == "--snes-frame-timing" || args[1] == "--snes-viewer-core-timing")) {
 	GameplayFixture.RunSnesFrameTiming(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), args[1] == "--snes-viewer-core-timing");
@@ -274,8 +296,17 @@ if(args.Length >= 3 && (args[1] == "--snes-frame-timing" || args[1] == "--snes-v
 if(args.Length >= 3 && args[1] == "--gameplay-nes") {
 	GameplayFixture.RunNesSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }
+if(args.Length >= 3 && args[1] == "--gameplay-ws") {
+	GameplayFixture.RunWsSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
+}
+if(args.Length >= 3 && args[1] == "--pce-priority") {
+	GameplayFixture.RunPcePrioritySuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.pce")));
+}
 if(args.Length >= 3 && args[1] == "--gba-affine") {
 	GameplayFixture.RunGbaAffine(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
+}
+if(args.Length >= 3 && args[1] == "--gba-capture-metadata") {
+	GameplayFixture.RunGbaCaptureMetadata(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
 }
 if(args.Length >= 3 && args[1] == "--gameplay") {
 	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));

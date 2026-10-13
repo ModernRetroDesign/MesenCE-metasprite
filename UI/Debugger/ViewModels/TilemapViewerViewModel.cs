@@ -16,6 +16,7 @@ using Mesen.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -28,12 +29,36 @@ namespace Mesen.Debugger.ViewModels
 
 		public TilemapViewerConfig Config { get; }
 		public MetaBackgroundEditorViewModel BackgroundEditor { get; }
-		public Bitmap CaptureBackgroundPngSnapshot() => ViewerBitmap.CropBitmap(new PixelRect(0, 0, ViewerBitmap.PixelSize.Width, ViewerBitmap.PixelSize.Height));
-		public async Task ExportBackgroundPng(Window window)
+		public Bitmap CaptureBackgroundPngSnapshot()
 		{
-			using Bitmap snapshot = CaptureBackgroundPngSnapshot();
-			string? filename = await FileDialogHelper.SaveFile(null, EmuApi.GetRomInfo().GetRomName() + " - tilemap.png", window, FileDialogHelper.PngExt);
-			if(filename != null) { snapshot.Save(filename, PngBitmapEncoderOptions.Default); }
+			lock(_updateLock) {
+				if(_data.PpuState == null || _data.PpuToolsState == null) { throw new InvalidOperationException("Refresh the tilemap viewer before exporting."); }
+				GetTilemapOptions options = GetOptions(SelectedTab);
+				options.Background = TilemapBackground.Transparent;
+				options.TileHighlightMode = default;
+				options.AttributeHighlightMode = default;
+				FrameInfo size = DebugApi.GetTilemapSize(CpuType, options, _data.PpuState);
+				if(size.Width == 0 || size.Height == 0) { throw new InvalidOperationException("The selected tilemap is unavailable. Refresh the viewer and try again."); }
+				using var bitmap = new DynamicBitmap(new PixelSize((int)size.Width, (int)size.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+				using(var framebuffer = bitmap.Lock()) {
+					DebugApi.GetTilemap(CpuType, options, _data.PpuState, _data.PpuToolsState, _data.Vram, _data.RgbPalette, framebuffer.FrameBuffer.Address);
+				}
+				return bitmap.CropBitmap(new PixelRect(0, 0, (int)size.Width, (int)size.Height));
+			}
+		}
+		public Task ExportBackgroundPng(Window window)
+		{
+			try {
+				string directory = Path.GetDirectoryName(MetaSpriteRuntimeLoader.GetPackPath(EmuApi.GetRomHash(HashType.Sha1), CpuType))!;
+				using Bitmap snapshot = CaptureBackgroundPngSnapshot();
+				Directory.CreateDirectory(directory);
+				string stem = $"tilemap-{CpuType}-layer-{SelectedTab.Layer:D2}";
+				string filename = Path.Combine(directory, stem + ".png");
+				for(int number = 2; File.Exists(filename); number++) { filename = Path.Combine(directory, $"{stem}-{number:D3}.png"); }
+				using(var stream = new FileStream(filename, FileMode.CreateNew, FileAccess.Write)) { snapshot.Save(stream, PngBitmapEncoderOptions.Default); }
+				BackgroundEditor.MetaStatus = $"Tilemap PNG exported: {filename}";
+			} catch(Exception ex) { BackgroundEditor.MetaStatus = "Could not export tilemap PNG: " + ex.Message; }
+			return Task.CompletedTask;
 		}
 		public (int? Layer, string Context) GetBackgroundImportLayer()
 		{
@@ -52,7 +77,7 @@ namespace Mesen.Debugger.ViewModels
 			}
 			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Gameplay currently requires Mode 4 and the default filter."
 				: CpuType == CpuType.Ws ? "Imported for the selected WonderSwan background. Gameplay requires the default filter, frame blending off, and LCD icons off."
-				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer}. Gameplay currently requires low-resolution noninterlaced output, the default filter and neutral color settings; artwork follows enabled layers, including transparent texels, with native priority and windows."
+				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer + 1} (native layer {layer}). Artwork follows this layer's scrolling, priority and windows. Gameplay requires the default filter and neutral color settings; supported hires/interlace paths require color math off. OBJ-interlace remains unsupported."
 				: CpuType == CpuType.Gba ? $"Imported as GBA BG{layer}. Gameplay requires the default filter with color adjustment and frame blending disabled."
 				: "Definitions can be authored here; gameplay background integration for this system is pending.");
 		}

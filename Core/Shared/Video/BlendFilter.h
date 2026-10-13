@@ -1,4 +1,6 @@
-#include "pch.h"
+#pragma once
+#include <algorithm>
+#include <cstdint>
 
 class BlendFilter
 {
@@ -7,6 +9,7 @@ private:
 	uint32_t _size = 0;
 	bool _enabled = false;
 	uint32_t _frameNumber = 0;
+	bool _historyValid = false;
 
 	static uint32_t BlendPixels(uint32_t a, uint32_t b)
 	{
@@ -29,16 +32,19 @@ public:
 	{
 		_enabled = enabled;
 	}
+	void ResetHistory() { _historyValid = false; }
 
 	void ApplyFilter(uint32_t* out, uint32_t size, uint32_t frameNumber)
 	{
 		if(!_enabled) {
 			_frameNumber = 0;
+			ResetHistory();
 			return;
 		}
 
-		bool needFill = _size != size || frameNumber != _frameNumber + 1;
+		bool needFill = !_historyValid || _size != size || frameNumber != _frameNumber + 1;
 		_frameNumber = frameNumber;
+		_historyValid = true;
 
 		if(_size != size) {
 			delete[] _prevFrame;

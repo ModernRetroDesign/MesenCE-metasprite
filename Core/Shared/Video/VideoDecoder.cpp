@@ -111,6 +111,7 @@ void VideoDecoder::UpdateVideoFilter()
 void VideoDecoder::DecodeFrame(bool forRewind)
 {
 	UpdateVideoFilter();
+	if(_resetBlendHistory.exchange(false)) { _videoFilter->ResetFrameBlendHistory(); }
 
 	bool isAudioPlayer = _emu->GetAudioPlayerHud() != nullptr;
 	if(isAudioPlayer) {
@@ -156,6 +157,8 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 			frameSize.Height *= metaOutputScale;
 		}
 	}
+
+	_videoFilter->FinishFrameBlend(outputBuffer, frameSize.Width * frameSize.Height);
 
 	if(_rotateFilter && !isAudioPlayer) {
 		outputBuffer = _rotateFilter->ApplyFilter(outputBuffer, frameSize.Width, frameSize.Height);

@@ -376,6 +376,9 @@ void GbaPpu::ProcessColorMath()
 			pixel.GbaObjectColor = color(capturedObject.Color);
 			pixel.GbaObjectSprite = capturedObject.Sprite;
 			pixel.GbaObjectPriority = capturedObject.Priority;
+			pixel.GbaObjectsEnabled = _state.ObjLayerEnabled && _state.ObjEnableTimer == 0
+				&& !_emu->GetSettings()->GetGbaConfig().DisableSprites
+				&& _state.WindowActiveLayers[wnd][GbaPpu::SpriteLayerIndex];
 			pixel.GbaObjectSemiTransparent = (capturedObject.Color & (GbaPpu::SpriteBlendFlag | GbaPpu::DirectColorFlag)) == GbaPpu::SpriteBlendFlag;
 			for(int layer = 0; layer < 4; layer++) {
 				pixel.GbaBackgroundLayers[layer] = {color(_layerOutput[layer][x].Color), _state.BgLayers[layer].Priority, _layerOutput[layer][x].Priority != 0xFF};
@@ -384,6 +387,21 @@ void GbaPpu::ProcessColorMath()
 					&& !_emu->GetSettings()->GetGbaConfig().HideBgLayers[layer] && _state.WindowActiveLayers[wnd][layer];
 			}
 			pixel.GbaCoverage.clear();
+			pixel.GbaNativeObjects.clear();
+			if(pixel.GbaObjectsEnabled) {
+				for(const auto& object : _metaOamNativeObjects[_metaOamRead][x]) {
+					const GbaPixelData* sample = &object;
+					if(object.Color & GbaPpu::SpriteMosaicFlag) {
+						int mosaicStart = x - x % (_state.ObjMosaicSizeX + 1);
+						const auto& samples = _metaOamNativeObjects[_metaOamRead][mosaicStart];
+						auto found = std::find_if(samples.begin(), samples.end(), [&](const auto& value) { return value.Sprite == object.Sprite; });
+						// A sprite beginning inside a block has no preceding sample to repeat.
+						if(found != samples.end()) { sample = &*found; }
+					}
+					if(!(sample->Color & 0x3FF)) { continue; }
+					pixel.GbaNativeObjects.push_back({object.Sprite, color(sample->Color), object.Priority, (sample->Color & GbaPpu::SpriteBlendFlag) != 0});
+				}
+			}
 			if(_state.WindowActiveLayers[wnd][GbaPpu::SpriteLayerIndex]) {
 				for(const auto& coverage : _metaOamCoverage[_metaOamRead][x]) {
 					if(coverage.Priority > main.Priority || (main.Layer == GbaPpu::SpriteLayerIndex && coverage.Priority == main.Priority && coverage.Sprite > main.Sprite)) { continue; }
@@ -913,6 +931,7 @@ void GbaPpu::InitSpriteEvaluation()
 	std::swap(_oamWriteOutput, _oamReadOutput);
 	std::swap(_metaOamRead, _metaOamWrite);
 	for(auto& coverage : _metaOamCoverage[_metaOamWrite]) { coverage.clear(); }
+	for(auto& objects : _metaOamNativeObjects[_metaOamWrite]) { objects.clear(); }
 	std::fill(_oamWriteOutput, _oamWriteOutput + 240, GbaPixelData {});
 	memset(_oamWindow, GbaPpu::BackdropLayerIndex, sizeof(_oamWindow));
 
@@ -1162,6 +1181,8 @@ void GbaPpu::CaptureSpritePixel(const GbaSpriteRendererData& sprite, uint32_t co
 		}
 	}
 	rows.push_back({sprite.Addr >> 1, x, y, row, width, height, {color}, offset});
+	rows.back().GbaPriority = sprite.Priority;
+	rows.back().GbaSemiTransparent = sprite.Mode == GbaPpuObjMode::Blending;
 	rows.back().Pixels.reserve(width - offset);
 }
 
@@ -1196,7 +1217,7 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 			coverage.Color = spr.Mode == GbaPpuObjMode::Blending ? GbaPpu::SpriteBlendFlag : 0;
 			_metaOamCoverage[_metaOamWrite][drawPos].push_back(coverage);
 		}
-		if(spr.Mode == GbaPpuObjMode::Window || isHigherPriority) {
+		if(spr.Mode == GbaPpuObjMode::Window || isHigherPriority || _metaFrame) {
 			uint8_t tileRow = spr.YPos / 8;
 			uint8_t tileColumn = spr.XPos / 8;
 			uint16_t index;
@@ -1223,7 +1244,17 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 				uint16_t native = _paletteRam[256 + spr.PaletteIndex * 16 + color] & 0x7FFF;
 				auto channel = [](int value) { return (value << 3) | (value >> 2); };
 				CaptureSpritePixel(spr, color ? 0xFF000000u | (channel(native & 31) << 16) | (channel((native >> 5) & 31) << 8) | channel((native >> 10) & 31) : 0);
+				if((color || spr.Mosaic) && spr.Mode != GbaPpuObjMode::Window && _state.ObjEnableTimer == 0 && _state.ObjLayerEnabled) {
+					GbaPixelData object;
+					SetPixelData(object, color ? 0x200 + spr.PaletteIndex * 32 + color * 2 : 0, spr.Priority, GbaPpu::SpriteLayerIndex);
+					object.Sprite = spr.Addr >> 1;
+					if(spr.Mode == GbaPpuObjMode::Blending) { object.Color |= GbaPpu::SpriteBlendFlag; }
+					if(spr.Mosaic) { object.Color |= GbaPpu::SpriteMosaicFlag; }
+					_metaOamNativeObjects[_metaOamWrite][drawPos].push_back(object);
+				}
 			}
+			// Extra capture reads must never change native OBJ arbitration or mosaic flags.
+			if(!isHigherPriority && spr.Mode != GbaPpuObjMode::Window) { continue; }
 
 			if(color != 0) {
 				if(spr.Mode == GbaPpuObjMode::Window) {
@@ -1242,7 +1273,7 @@ void GbaPpu::RenderSprite(GbaSpriteRendererData& spr)
 			} else if(isHigherPriority && _oamWriteOutput[drawPos].Priority != 0xFF) {
 				//If a sprite pixel already exists and another sprite with higher priority with a
 				//transparent pixel is displayed here, the priority is updated to match the transparent
-				//pixel's priority (Golden Sun requires this)
+				//pixel's priority (required by GBA OBJ priority behavior; no mapper).
 				_oamWriteOutput[drawPos].Priority = spr.Priority;
 			}
 

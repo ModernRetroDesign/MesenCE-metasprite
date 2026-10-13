@@ -411,7 +411,7 @@ public partial class SpriteViewerViewModel
 			if(SelectedMetaGroup is MetaSpriteGroup selected) { selected.MemoryConditions = MetaMemoryConditionText.Parse(MetaMemoryConditionsText); }
 			if(SelectedMetaAlternate is MetaAlternateArtwork alternate) {
 				alternate.MemoryConditions = MetaMemoryConditionText.Parse(MetaAlternateConditionsText); alternate.Validate();
-				if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
+				if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateSpriteCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
 			}
 			foreach(var layer in _metaPack.BackgroundLayers) { layer.Validate(); }
 			SaveSpritePack();
@@ -553,7 +553,7 @@ public partial class SpriteViewerViewModel
 				&& bitmap.PixelSize.Width / group.Width == bitmap.PixelSize.Height / group.Height) {
 				scale = bitmap.PixelSize.Width / group.Width;
 			}
-			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, scale);
+			MetaSpritePlacement.ValidateSpriteCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, scale);
 			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-replacement-{Guid.NewGuid():N}.png");
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {

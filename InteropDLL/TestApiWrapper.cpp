@@ -27,6 +27,8 @@
 #include "Core/Debugger/MemoryAccessCounter.h"
 #include "Core/Debugger/DebugBreakHelper.h"
 #include "Core/Shared/NotificationManager.h"
+#include "Core/Shared/SaveStateManager.h"
+#include <sstream>
 #include <mutex>
 #include <iostream>
 
@@ -87,6 +89,9 @@ public:
 	uint32_t Width = 0, Height = 0, FrameNumber = 0;
 	vector<uint32_t> Pixels;
 	shared_ptr<const MetaSpriteFrame> Capture;
+	bool RecordNextCapture = false;
+	vector<uint32_t> FirstCapturePixels;
+	uint8_t FirstCaptureOffsetY = 0;
 	bool MeasureTiming = false;
 	vector<double> FrameIntervals;
 	uint32_t TimingFrame = 0, SkippedTimingFrames = 0;
@@ -97,6 +102,10 @@ public:
 		Width = frame.Width; Height = frame.Height; FrameNumber = frame.FrameNumber;
 		Pixels.assign((uint32_t*)frame.FrameBuffer, (uint32_t*)frame.FrameBuffer + Width * Height);
 		Capture = frame.MetaSprites;
+		if(RecordNextCapture && Capture) {
+			FirstCapturePixels = Pixels; FirstCaptureOffsetY = Capture->SnesOutputOffsetY;
+			RecordNextCapture = false;
+		}
 		if(MeasureTiming) {
 			auto now = std::chrono::steady_clock::now();
 			if(TimingFrame && frame.FrameNumber > TimingFrame) {
@@ -111,6 +120,94 @@ public:
 	void Reset() override {}
 	void SetFullscreenMode(FullscreenSettings) override {}
 };
+
+static bool VerifyExpandedCanvas(Emulator* emu, MetaSpriteTestRenderer& renderer, MetaSpriteReplacement group,
+	int spriteX, int spriteY, int hardwareSprite, uint8_t expansionClass, int cropLeft = 0, int cropTop = 0, bool opaqueBackgroundPng = false)
+{
+	vector<uint32_t> baseline;
+	shared_ptr<const MetaSpriteFrame> capture;
+	uint32_t width, height, previousFrame;
+	{
+		std::lock_guard<std::mutex> lock(renderer.Mutex);
+		baseline = renderer.Pixels; capture = renderer.Capture;
+		width = renderer.Width; height = renderer.Height; previousFrame = renderer.FrameNumber;
+	}
+	if(!capture || group.ArtworkScale != 2 || width * height != baseline.size()) { return false; }
+	const int padding = 10, paddingPixels = padding * 2;
+	MetaSpriteReplacement enlarged = group;
+	// One extra PNG pixel exercises a partial native texel at scale two.
+	enlarged.ArtworkWidth += paddingPixels * 2 + 1; enlarged.ArtworkHeight += paddingPixels * 2 + 1;
+	enlarged.ArtworkOriginX += padding; enlarged.ArtworkOriginY += padding;
+	enlarged.Artwork.resize(enlarged.ArtworkWidth * enlarged.ArtworkHeight);
+	for(int y = 0; y < enlarged.ArtworkHeight; y++) { for(int x = 0; x < enlarged.ArtworkWidth; x++) {
+		enlarged.Artwork[y * enlarged.ArtworkWidth + x] = (x + y) % 3 == 0 ? 0 : (x + y) % 5 == 0 ? 0x80FFFFFF : 0xFFFFFF00;
+	} }
+	for(int y = 0; y < group.ArtworkHeight; y++) {
+		std::copy_n(group.Artwork.data() + y * group.ArtworkWidth, group.ArtworkWidth,
+			enlarged.Artwork.data() + (y + paddingPixels) * enlarged.ArtworkWidth + paddingPixels);
+	}
+	vector<uint32_t> expected = baseline;
+	int expandedPixels = 0, blockedPixels = 0;
+	vector<MetaSpriteGraphic> instances;
+	if(!capture->DecodedRows.empty() || !capture->Rows.empty()) {
+		const auto candidates = capture->Rows.empty() ? MetaSpriteCompositor::BuildDecodedCandidates(*capture) : MetaSpriteCompositor::BuildGameboyCandidates(*capture);
+		for(const auto& candidate : candidates) {
+			if(group.Members.size() == 1 && candidate.Width == group.Members[0].Width && candidate.Height == group.Members[0].Height && candidate.Pixels == group.Members[0].Pixels) { instances.push_back(candidate); }
+		}
+	}
+	if(instances.empty()) { instances.push_back({spriteX + cropLeft, spriteY + cropTop, 0, 0, hardwareSprite, {}}); }
+	std::sort(instances.begin(), instances.end(), [](const MetaSpriteGraphic& a, const MetaSpriteGraphic& b) { return a.GetExpansionOrder() > b.GetExpansionOrder(); });
+	// Obtain the destination with matched source sprites removed, including
+	// configured background replacements. Then independently blend full PNGs.
+	MetaSpriteReplacement cleared = group;
+	std::fill(cleared.Artwork.begin(), cleared.Artwork.end(), 0);
+	emu->GetVideoDecoder()->SetMetaSpriteGroups({cleared});
+	bool destinationCaptured = false;
+	for(int attempt = 0; attempt < 500; attempt++) {
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex);
+			if(renderer.FrameNumber > previousFrame + 2 && renderer.Width == width && renderer.Height == height) {
+				expected = renderer.Pixels; previousFrame = renderer.FrameNumber; destinationCaptured = true; break;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	if(!destinationCaptured) { emu->GetVideoDecoder()->SetMetaSpriteGroups({group}); return false; }
+	for(const auto& instance : instances) {
+	spriteX = instance.X - cropLeft; spriteY = instance.Y - cropTop; hardwareSprite = instance.GetExpansionOrder();
+	for(int y = 0; y < (int)height; y++) { for(int x = 0; x < (int)width; x++) {
+		int ax = x - spriteX * 2 + paddingPixels, ay = y - spriteY * 2 + paddingPixels;
+		if(ax < 0 || ay < 0 || ax >= enlarged.ArtworkWidth || ay >= enlarged.ArtworkHeight) { continue; }
+		const auto& pixel = capture->Pixels[(y / 2 + cropTop) * capture->Width + x / 2 + cropLeft];
+		bool replacedOccluder = std::any_of(instances.begin(), instances.end(), [&](const auto& other) { return other.GetExpansionOrder() == pixel.ExpandedSpriteOccluder; });
+		if(!(pixel.ExpandedSpriteClasses & expansionClass) || (pixel.ExpandedSpriteOccluder >= 0 && pixel.ExpandedSpriteOccluder < hardwareSprite && !replacedOccluder)) { blockedPixels++; continue; }
+		if(opaqueBackgroundPng && (pixel.BackgroundOverlayOccludesClasses & expansionClass) && pixel.BackgroundSample.Valid) { blockedPixels++; continue; }
+		uint32_t color = enlarged.Artwork[ay * enlarged.ArtworkWidth + ax], alpha = color >> 24;
+		uint32_t result = 0xFF000000, bg = expected[y * width + x];
+		for(int shift : {0, 8, 16}) { result |= ((((color >> shift) & 255) * alpha + ((bg >> shift) & 255) * (255 - alpha) + 127) / 255) << shift; }
+		expected[y * width + x] = result;
+		if(alpha) { expandedPixels++; }
+	} }
+	}
+	if(!expandedPixels && !blockedPixels) { return false; }
+	emu->GetVideoDecoder()->SetMetaSpriteGroups({enlarged});
+	bool passed = false;
+	for(int attempt = 0; attempt < 500; attempt++) {
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex);
+			if(renderer.FrameNumber > previousFrame + 2 && renderer.Width == width && renderer.Height == height && renderer.Pixels == expected) { passed = true; break; }
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+	bool restored = false;
+	for(int attempt = 0; attempt < 500; attempt++) {
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Width == width && renderer.Height == height && renderer.Pixels == baseline) { restored = true; break; } }
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	passed &= restored;
+	if(passed) { std::cout << "PASS: live full PNG canvas, origin alignment, margin alpha and screen/priority clipping; expanded=" << expandedPixels << ", blocked=" << blockedPixels << std::endl; }
+	else { std::cerr << "Expanded PNG canvas mismatch" << std::endl; }
+	return passed;
+}
 
 static bool MeasureLiveFrameTiming(Emulator* emu, MetaSpriteTestRenderer& renderer, const char* stage)
 {
@@ -418,6 +515,170 @@ extern "C"
 		_emu->Release(); _emu = std::move(previous);
 		return flags;
 	}
+	DllExport uint32_t __stdcall RunMetaSpriteSnesHiresCaptureTest(const char* filename)
+	{
+		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+		emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+		auto& cfg = emu->GetSettings()->GetSnesConfig();
+		cfg.DisableFrameSkipping = true; cfg.RamPowerOnState = RamState::AllZeros; cfg.ColorCorrection = SnesColorCorrectionMode::None;
+		MetaSpriteTestRenderer renderer; uint32_t flags = 0;
+		bool both = string(filename).find("both-screens") != string::npos;
+		bool window = string(filename).find("window") != string::npos;
+		bool backgroundFixture = string(filename).find("hires-background") != string::npos;
+		bool trueHires = string(filename).find("mode5") != string::npos || string(filename).find("mode6") != string::npos;
+		auto eligiblePhase = [&](int x) { return (x & 1) ? !window || x / 2 < 4 : both; };
+		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			if(auto snes = dynamic_cast<SnesConsole*>(emu->GetConsole().get())) {
+				snes->GetPpu()->SetMetaSpriteCapture(true);
+				auto waitFor = [&](std::function<bool()> condition) {
+					for(int attempt = 0; attempt < 500; attempt++) {
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(condition()) { return true; } }
+						std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					}
+					return false;
+				};
+				MetaSpriteGraphic source; vector<uint32_t> native;
+				if(waitFor([&]() {
+					if(renderer.Width != 512 || renderer.Height != 478 || !renderer.Capture
+						|| renderer.Capture->Width != 512 || renderer.Capture->Height != 478 || renderer.Capture->SpriteCoordinateScale != 2) { return false; }
+					for(const auto& candidate : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
+						if(candidate.HardwareSprite != 0 || candidate.X != 8 || candidate.Y != 15 || candidate.Width != 8 || candidate.Height != 8) { continue; }
+						for(int y = 0; y < 8; y++) { for(int x = 0; x < 8; x++) {
+							if(candidate.Pixels[y * 8 + x] != (x == 7 ? 0 : 0xFFFF0000u)) { return false; }
+						} }
+						for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) {
+							size_t pos = (30 + y) * 512 + 16 + x;
+							bool eligible = eligiblePhase(x);
+							if(renderer.Pixels[pos] != (eligible && x / 2 < 7 ? 0xFFFF0000u : 0xFF0000FFu)) { return false; }
+							const auto& pixel = renderer.Capture->Pixels[pos];
+							bool covered = pixel.VisibleSprite == 0 || std::any_of(pixel.SnesCoverage.begin(), pixel.SnesCoverage.end(), [](const auto& c) { return c.Sprite == 0 && c.Main; });
+							if(covered != eligible || pixel.SnesMathEnabled) { return false; }
+						} }
+						source = candidate; native = renderer.Pixels; return true;
+					}
+					return false;
+				})) {
+					flags = 1;
+					MetaSpriteReplacement group; group.Id = 1; group.ArtworkScale = 2; group.ArtworkWidth = group.ArtworkHeight = 16;
+					group.Artwork.assign(256, 0xFF00FF00); group.Artwork[0] = group.Artwork[14] = 0;
+					group.Artwork[1] = group.Artwork[15] = 0x8000FF00;
+					source.X = source.Y = 0; group.Members = {source}; group.MemoryConditions = {{0, 0, 0}};
+					emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					if(waitFor([&]() {
+						if(renderer.Width != 512 || renderer.Height != 478 || !renderer.Capture
+							|| renderer.Capture->MemorySnapshot.size() != 1 || !renderer.Capture->MemorySnapshot.count(0)) { return false; }
+						for(int y = 0; y < 478; y++) { for(int x = 0; x < 512; x++) {
+							uint32_t expected = native[y * 512 + x];
+							int ax = x - 16, ay = y - 30;
+							if(ax >= 0 && ax < 16 && ay >= 0 && ay < 16 && eligiblePhase(ax)) {
+								expected = ay == 0 && (ax == 0 || ax == 14) ? 0xFF0000FF
+									: ay == 0 && (ax == 1 || ax == 15) ? 0xFF00807F : 0xFF00FF00;
+								}
+							if(renderer.Pixels[y * 512 + x] != expected) { return false; }
+						} }
+						return true;
+					})) { flags |= 2; }
+					if(flags & 2) {
+						vector<uint32_t> originalArtworkFrame;
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); originalArtworkFrame = renderer.Pixels; }
+						MetaSpriteReplacement cleared = group; std::fill(cleared.Artwork.begin(), cleared.Artwork.end(), 0);
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({cleared});
+						vector<uint32_t> expandedExpected; shared_ptr<const MetaSpriteFrame> destinations;
+						bool clearedCaptured = waitFor([&]() {
+							if(renderer.Width != 512 || renderer.Height != 478 || !renderer.Capture
+								|| renderer.Pixels[34 * 512 + 17] != 0xFF0000FF) { return false; }
+							expandedExpected = renderer.Pixels; destinations = renderer.Capture; return true;
+						});
+						if(clearedCaptured) {
+							MetaSpriteReplacement enlarged = group;
+							enlarged.ArtworkWidth = enlarged.ArtworkHeight = 21; enlarged.ArtworkOriginX = enlarged.ArtworkOriginY = 1;
+							enlarged.Artwork.assign(441, 0xFF00FF00); enlarged.Artwork[0] = 0; enlarged.Artwork[1] = 0x8000FF00;
+							int marginPixels = 0;
+							for(int y = 0; y < 21; y++) { for(int x = 0; x < 21; x++) {
+								int dx = x + 14, dy = y + 28; size_t offset = (size_t)dy * 512 + dx;
+								const auto& pixel = destinations->Pixels[offset];
+								if(!pixel.SnesFallbackCaptured || !pixel.SnesObjectsMain
+									|| pixel.SnesObjectPriorities[source.SnesPriorityCode] <= (pixel.SnesFallbackMainFlags & 15)) { continue; }
+								uint32_t color = enlarged.Artwork[y * 21 + x];
+								expandedExpected[offset] = MetaSpriteCompositor::CompositeAlpha(color, expandedExpected[offset], color >> 24);
+								if((color >> 24) && (dx < 16 || dx >= 32 || dy < 30 || dy >= 46)) { marginPixels++; }
+							} }
+							emu->GetVideoDecoder()->SetMetaSpriteGroups({enlarged});
+							if(!marginPixels || !waitFor([&]() { return renderer.Width == 512 && renderer.Height == 478 && renderer.Pixels == expandedExpected; })) { flags &= ~2u; }
+							else { std::cout << "PASS: SNES hires full PNG canvas, origin, phase/window gating and partial native edges." << std::endl; }
+						} else { flags &= ~2u; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+						if(!waitFor([&]() { return renderer.Width == 512 && renderer.Height == 478 && renderer.Pixels == originalArtworkFrame; })) { flags &= ~2u; }
+					}
+					if(backgroundFixture && (flags & 2)) {
+						vector<uint32_t> spriteOnly;
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); spriteOnly = renderer.Pixels; }
+						MetaBackgroundReplacement background;
+						background.Id = 1; background.Layer = 0; background.Width = 8; background.Height = 4; background.Scale = 1;
+						background.X = 3; background.Y = -2; background.WrapX = background.WrapY = true; background.MemoryConditions = {{0, 0, 0}};
+						for(int y = 0; y < 4; y++) { for(int x = 0; x < 8; x++) { background.Artwork.push_back(0xFF000055 | ((x + 1) * 24 << 16) | ((y + 1) * 48 << 8)); } }
+						background.Artwork[0] = 0; background.Artwork[1] = 0x80FFFFFF;
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						bool validBackground = waitFor([&]() {
+							if(renderer.Width != 512 || renderer.Height != 478 || !renderer.Capture
+								|| renderer.Capture->SnesBackgrounds.size() != 512 * 478 || renderer.Capture->MemorySnapshot.size() != 1) { return false; }
+							for(int y = 0; y < 478; y++) { for(int x = 0; x < 512; x++) {
+								uint32_t expected = spriteOnly[y * 512 + x];
+								if(y >= 14 && y < 462 && !(x & 1)) {
+									int sampleX = trueHires ? (x + 506) & 511 : (x / 2 + 253) & 255;
+									int sampleY = (y / 2 - 6 + 250) & 255;
+									const auto& captured = renderer.Capture->SnesBackgrounds[y * 512 + x].Layers[0];
+									if(!captured.Main || !captured.Opaque || captured.Sample.X != sampleX || captured.Sample.Y != sampleY) { return false; }
+									uint32_t artwork = background.Artwork[((sampleY + 2) & 3) * 8 + ((sampleX - 3) & 7)];
+									expected = MetaSpriteCompositor::CompositeAlpha(artwork, 0xFF0000FF, artwork >> 24);
+								}
+								if(renderer.Pixels[y * 512 + x] != expected) { return false; }
+							} }
+							return true;
+						});
+						background.Scale = 2; background.Width = 16; background.Height = 8; background.Artwork.clear();
+						for(int y = 0; y < 8; y++) { for(int x = 0; x < 16; x++) { background.Artwork.push_back(0xFF000055 | ((x + 1) * 14 << 16) | ((y + 1) * 28 << 8)); } }
+						background.Artwork[0] = 0; background.Artwork[1] = 0x80FFFFFF;
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						bool validScaledBackground = waitFor([&]() {
+							if(renderer.Width != 1024 || renderer.Height != 956) { return false; }
+							for(int y = 0; y < 956; y++) { for(int x = 0; x < 1024; x++) {
+								int px = x / 2, py = y / 2;
+								uint32_t expected = spriteOnly[py * 512 + px];
+								if(py >= 14 && py < 462 && !(px & 1)) {
+									int sampleX = trueHires ? (px + 506) & 511 : (px / 2 + 253) & 255;
+									int sampleY = (py / 2 - 6 + 250) & 255;
+									int ax = ((sampleX - 3) & 7) * 2 + (trueHires ? x & 1 : (x & 3) / 2);
+									int ay = ((sampleY + 2) & 3) * 2 + (y & 3) / 2;
+									uint32_t artwork = background.Artwork[ay * 16 + ax];
+									expected = MetaSpriteCompositor::CompositeAlpha(artwork, 0xFF0000FF, artwork >> 24);
+								}
+								if(renderer.Pixels[y * 1024 + x] != expected) { return false; }
+							} }
+							return true;
+						});
+						background.MemoryConditions = {{0, 255, 255}};
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
+						if(!validBackground || !validScaledBackground || !waitFor([&]() { return renderer.Pixels == spriteOnly; })) { flags &= ~2u; }
+					}
+					group.MemoryConditions = {{0, 255, 255}}; emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+					bool conditionRestored = waitFor([&]() { return renderer.Pixels == native; });
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+					if(conditionRestored && waitFor([&]() { return renderer.Width == 512 && renderer.Height == 478 && renderer.Pixels == native; })) { flags |= 4; }
+				}
+				if(flags != 7) {
+					std::lock_guard<std::mutex> lock(renderer.Mutex);
+					std::cerr << "SNES hires phase verification failed: " << filename << "; output=" << renderer.Width << "x" << renderer.Height
+						<< "; capture=" << (renderer.Capture != nullptr) << "; flags=" << flags << std::endl;
+				}
+			}
+			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); return flags;
+	}
+
 	DllExport uint32_t __stdcall RunMetaSpriteSnesCaptureTest(const char* filename)
 	{
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
@@ -427,6 +688,12 @@ extern "C"
 		cfg.ColorCorrection = SnesColorCorrectionMode::None;
 		MetaSpriteGraphic source; uint32_t nativeWidth = 0, nativeHeight = 0, backdrop = 0; int spriteX = 0, spriteY = 0;
 		MetaSpriteTestRenderer renderer; uint32_t flags = 0;
+		bool currentField = string(filename).find("current-field") != string::npos;
+		if(currentField) { cfg.DeinterlaceMode = SnesDeinterlaceMode::CurrentField; }
+		bool bobBlendField = string(filename).find("bob-blend-field") != string::npos;
+		bool firstPictureArtwork = string(filename).find("first-picture") != string::npos;
+		bool bobField = bobBlendField || string(filename).find("bob-field") != string::npos;
+		if(bobField) { cfg.DeinterlaceMode = bobBlendField ? SnesDeinterlaceMode::BobBlend : SnesDeinterlaceMode::Bob; }
 		bool holes = string(filename).find("holes") != string::npos;
 		bool window = string(filename).find("window") != string::npos;
 		bool middleWindow = string(filename).find("middle") != string::npos;
@@ -462,18 +729,25 @@ extern "C"
 						if(renderer.Capture) {
 							for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
 								if(graphic.HardwareSprite != 0 || graphic.X != 8 || graphic.Y != 15 || graphic.Width != 8 || graphic.Height != 8) { continue; }
+								auto captureIndex = [&](size_t x, size_t y) {
+									size_t scale = renderer.Capture->SpriteCoordinateScale;
+									size_t index = y * scale * renderer.Capture->Width + x * scale;
+									if(bobField) { index += renderer.Capture->SnesOutputOffsetY * renderer.Capture->Width; }
+									return currentField && !renderer.Capture->Pixels[index].SnesFallbackCaptured ? index + renderer.Capture->Width : index;
+								};
 								bool validGraphic = true;
 								for(size_t i = 0; i < graphic.Pixels.size(); i++) {
 									validGraphic &= graphic.Pixels[i] == (transparent || (holes && i % 8 == 7) ? 0 : 0xFFFF0000u);
 									if(transparent || (holes && i % 8 == 7)) {
-										const auto& hole = renderer.Capture->Pixels[(15 + i / 8) * 256 + 8 + i % 8];
+										const auto& hole = renderer.Capture->Pixels[captureIndex(8 + i % 8, 15 + i / 8)];
 										bool eligible = std::any_of(hole.SnesCoverage.begin(), hole.SnesCoverage.end(), [&](const auto& c) { return c.Sprite == 0 && (sub ? c.Sub : c.Main); });
 										validGraphic &= hole.VisibleSprite == (overlap ? 1 : -1) && eligible == (!masked(7) && !rotate);
 										if(math) { validGraphic &= std::any_of(hole.SnesCoverage.begin(), hole.SnesCoverage.end(), [](const auto& c) { return c.Sprite == 0 && c.Main && c.Math; }); }
 									}
 								}
 								if(!validGraphic) { continue; }
-								const auto& pixel = renderer.Capture->Pixels[15 * 256 + 8];
+								const auto& pixel = renderer.Capture->Pixels[captureIndex(8, 15)];
+								if(pixel.SnesFirstObject != (rotate ? 1 : 0)) { continue; }
 								if(pixel.VisibleSprite == (sub || transparent ? -1 : 0) && pixel.SecondarySprite == (sub ? 0 : -1) && pixel.SpriteColor == (transparent ? 0x7C00 : 31) && pixel.Brightness == 15
 									&& pixel.SnesFallbackCaptured && pixel.SnesFallbackMainColor == (sub ? 31 : 0x7C00) && pixel.SnesFallbackSubColor == 0x7C00
 									&& pixel.SnesFallbackMainLayer == (sub ? backgroundLayer : 0xFF) && pixel.SnesFallbackSubLayer == (backgroundSub ? backgroundLayer : 0xFF)
@@ -514,6 +788,11 @@ extern "C"
 					std::lock_guard<std::mutex> lock(renderer.Mutex);
 					std::cerr << "SNES capture failed: " << filename;
 					if(renderer.Capture) {
+						const auto& center = renderer.Capture->Pixels[15 * renderer.Capture->SpriteCoordinateScale * renderer.Capture->Width + 8 * renderer.Capture->SpriteCoordinateScale];
+						std::cerr << " center visible=" << center.VisibleSprite << " secondary=" << center.SecondarySprite
+							<< " color=" << center.SpriteColor << " fallback=" << center.SnesFallbackMainColor << "," << center.SnesFallbackSubColor
+							<< " layers=" << (int)center.SnesFallbackMainLayer << "," << (int)center.SnesFallbackSubLayer
+							<< " samples=" << center.BackgroundSample.Valid << "," << center.SnesSubBackgroundSample.Valid;
 						for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) { std::cerr << " sprite=" << graphic.HardwareSprite << " pos=" << graphic.X << "," << graphic.Y << " first=" << std::hex << graphic.Pixels[0] << std::dec; }
 						const auto& hole = renderer.Capture->Pixels[15 * 256 + 15];
 						std::cerr << " hole winner=" << hole.VisibleSprite << " coverage=";
@@ -533,6 +812,79 @@ extern "C"
 						} return false;
 					};
 					group.MemoryConditions = {{0, 0, 0}}; emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					if(string(filename).find("interlace") != string::npos) {
+						MetaSpriteReplacement expanded = group;
+						expanded.ArtworkWidth = expanded.ArtworkHeight = 21;
+						expanded.ArtworkOriginX = expanded.ArtworkOriginY = 1;
+						if(firstPictureArtwork) { expanded.ArtworkOriginY = 8; }
+						expanded.Artwork.assign(441, 0xFF00FF00); expanded.Artwork[0] = 0; expanded.Artwork[1] = 0x8000FF00;
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({expanded});
+						uint8_t bobParities = 0;
+						bool rendered = waitFor([&]() {
+							if(renderer.Width != 512 || renderer.Height != 478 || !renderer.Capture
+								|| renderer.Capture->MemorySnapshot.size() != 1) { return false; }
+							for(int y = 0; y < 478; y++) { for(int x = 0; x < 512; x++) {
+								int top = firstPictureArtwork ? 14 : 28;
+								int ax = x - 14, ay = y + renderer.Capture->Pixels[y * 512 + x].SnesOutputSampleOffsetY - top - renderer.Capture->SnesOutputOffsetY;
+								uint32_t expected = y < 14 || y >= 462 ? 0xFF000000 : 0xFF0000FF;
+								if(ax >= 0 && ay >= 0 && ax < 21 && ay < 21) {
+									expected = expanded.Artwork[ay * 21 + ax];
+									if(!(expected >> 24)) { expected = 0xFF0000FF; }
+									else if((expected >> 24) == 128) { expected = 0xFF00807F; }
+								}
+								if(currentField && ((y & 1) != (renderer.Capture->Pixels[30 * 512 + 16].SnesFallbackCaptured ? 0 : 1))) { expected = 0xFF000000; }
+								if(bobBlendField) {
+									int otherOffset = 1 - renderer.Capture->SnesOutputOffsetY;
+									int otherY = y + (firstPictureArtwork && y == 14 ? otherOffset : 0) - top - otherOffset;
+									uint32_t previous = y < 14 || y >= 462 ? 0xFF000000 : 0xFF0000FF;
+									if(ax >= 0 && otherY >= 0 && ax < 21 && otherY < 21) {
+										uint32_t artworkPixel = expanded.Artwork[otherY * 21 + ax];
+										previous = !(artworkPixel >> 24) ? 0xFF0000FF : (artworkPixel >> 24) == 128 ? 0xFF00807F : artworkPixel;
+									}
+									expected = (((expected ^ previous) & 0xFFFEFEFEu) >> 1) + (expected & previous);
+								}
+								if(renderer.Pixels[y * 512 + x] != expected) { return false; }
+							} }
+							bobParities |= static_cast<uint8_t>(1u << renderer.Capture->SnesOutputOffsetY);
+							return !bobField || bobParities == 3;
+						});
+						if(rendered) { flags |= 2; }
+						else {
+							flags |= 128;
+							std::lock_guard<std::mutex> lock(renderer.Mutex);
+							std::cerr << "Woven output dimensions=" << renderer.Width << "," << renderer.Height
+								<< " margin=" << std::hex << renderer.Pixels[28 * renderer.Width + 16]
+								<< " body=" << renderer.Pixels[34 * renderer.Width + 20] << std::dec << std::endl;
+						}
+						uint8_t sampled = 0;
+						if(bobBlendField && !firstPictureArtwork && rendered) {
+							bool stateLoaded = false;
+							{
+								auto stateLock = emu->AcquireLock();
+								emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+								std::stringstream stateStream;
+								emu->GetSaveStateManager()->SaveState(stateStream);
+								stateStream.seekg(0);
+								stateLoaded = emu->GetSaveStateManager()->LoadState(stateStream);
+								emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+								std::lock_guard<std::mutex> lock(renderer.Mutex);
+								renderer.FirstCapturePixels.clear(); renderer.RecordNextCapture = true;
+							}
+							if(!stateLoaded || !waitFor([&]() {
+								if(renderer.FirstCapturePixels.size() != 512 * 478) { return false; }
+								return renderer.FirstCapturePixels[28 * 512 + 16] == (renderer.FirstCaptureOffsetY ? 0xFF0000FFu : 0xFF00FF00u);
+							})) { flags |= 128; }
+							else { std::cout << "PASS: BobBlend first composed frame after state restore has no stale temporal edge pixels." << std::endl; }
+						}
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Capture && renderer.Capture->MemorySnapshot.count(0)) { sampled = renderer.Capture->MemorySnapshot.at(0); } }
+						expanded.MemoryConditions = {{0, static_cast<uint8_t>(sampled ^ 0x80), 0xFF}};
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({expanded});
+						if(!waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[spriteY * nativeWidth + spriteX] == nativeSpriteColor; })) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+						if(waitFor([&]() { return renderer.Capture && renderer.Capture->MemorySnapshot.empty() && renderer.Width == nativeWidth && renderer.Pixels[spriteY * nativeWidth + spriteX] == nativeSpriteColor; })) { flags |= 4; }
+						emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+						emu->Release(); return flags;
+					}
 					if(waitFor([&]() {
 						if(renderer.Width != nativeWidth * 2 || renderer.Height != nativeHeight * 2) { return false; }
 						for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) {
@@ -547,6 +899,33 @@ extern "C"
 							if(renderer.Pixels[(spriteY * 2 + y) * renderer.Width + spriteX * 2 + x] != expected) { return false; }
 						} } return renderer.Pixels[0] == backdrop;
 					})) { flags |= 2; }
+					if(!math && !sub && !backgroundSub && !window && !overlap && !rotate && (flags & 2)) {
+						MetaSpriteReplacement cleared = group; std::fill(cleared.Artwork.begin(), cleared.Artwork.end(), 0);
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({cleared});
+						vector<uint32_t> canvasExpected;
+						if(!waitFor([&]() {
+							if(renderer.Width != nativeWidth * 2 || renderer.Height != nativeHeight * 2
+								|| renderer.Pixels[(spriteY * 2 + 4) * renderer.Width + spriteX * 2 + 4] != 0xFF0000FF) { return false; }
+							canvasExpected = renderer.Pixels; return true;
+						})) { flags |= 128; }
+						else {
+							MetaSpriteReplacement enlarged = group;
+							enlarged.ArtworkWidth = enlarged.ArtworkHeight = 21; enlarged.ArtworkOriginX = enlarged.ArtworkOriginY = 1;
+							enlarged.Artwork.assign(441, 0xFF00FF00); enlarged.Artwork[0] = 0; enlarged.Artwork[1] = 0x8000FF00;
+							for(int y = 0; y < 21; y++) { for(int x = 0; x < 21; x++) {
+								int dx = (spriteX - 1) * 2 + x, dy = (spriteY - 1) * 2 + y;
+								if(dx < 0 || dy < 0 || dx >= (int)nativeWidth * 2 || dy >= (int)nativeHeight * 2) { continue; }
+								size_t offset = (size_t)dy * nativeWidth * 2 + dx; uint32_t color = enlarged.Artwork[y * 21 + x], alpha = color >> 24;
+								uint32_t result = 0xFF000000;
+								for(int shift : {0, 8, 16}) { result |= ((((color >> shift) & 255) * alpha + ((canvasExpected[offset] >> shift) & 255) * (255 - alpha) + 127) / 255) << shift; }
+								canvasExpected[offset] = result;
+							} }
+							emu->GetVideoDecoder()->SetMetaSpriteGroups({enlarged});
+							if(!waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels == canvasExpected; })) { flags |= 128; }
+							else { std::cout << "PASS: SNES live full PNG canvas, shifted origin, alpha and partial native edges." << std::endl; }
+						}
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					}
 					if(string(filename).find("memory") != string::npos) {
 						if(!VerifyChangingSnesMemory(emu.get(), renderer, group, spriteX, spriteY, nativeWidth, nativeHeight)) { flags |= 128; }
 					} else if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; }
@@ -777,6 +1156,7 @@ extern "C"
 						}
 						return renderer.Pixels[0] == expectedBackground(cropLeft * 2, cropTop * 2);
 					})) { flags |= 2; }
+					if(!VerifyExpandedCanvas(emu.get(), renderer, group, 8 - cropLeft, 8 - cropTop, 0, source.ExpansionClass, cropLeft, cropTop)) { flags |= 128; }
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[(8 - cropTop) * nativeWidth + 8 - cropLeft] == (transparentFixture ? 0xFF0000FF : 0xFFFF0000); })) { flags |= 4; }
 				}
@@ -787,6 +1167,9 @@ extern "C"
 	}
 	DllExport uint32_t __stdcall RunMetaSpriteWsCaptureTest(const char* filename)
 	{
+		bool monochrome = string(filename).find("mono") != string::npos;
+		uint32_t nativeSprite = monochrome ? 0xFF000000 : 0xFFFF0000;
+		uint32_t nativeBackground = monochrome ? 0xFFFFFFFF : 0xFF0000FF;
 		bool holes = string(filename).find("holes") != string::npos;
 		bool occluded = string(filename).find("occluded") != string::npos;
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
@@ -808,7 +1191,7 @@ extern "C"
 							for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
 								if(graphic.HardwareSprite != 0 || graphic.X != 8 || graphic.Y != 8 || graphic.Width != 8 || graphic.Height != 8) { continue; }
 								bool validGraphic = true;
-								for(size_t i = 0; i < graphic.Pixels.size(); i++) { validGraphic &= graphic.Pixels[i] == (holes && i % 8 == 7 ? 0 : 0xFFFF0000u); }
+								for(size_t i = 0; i < graphic.Pixels.size(); i++) { validGraphic &= graphic.Pixels[i] == (holes && i % 8 == 7 ? 0 : nativeSprite); }
 								if(!validGraphic) { continue; }
 								const auto& pixel = renderer.Capture->Pixels[8 * 224 + 8];
 								if(string(filename).find("background") != string::npos) {
@@ -827,9 +1210,9 @@ extern "C"
 									}
 									if(!valid) { continue; }
 								}
-								if((occluded ? pixel.VisibleSprite == -1 : pixel.VisibleSprite == 0 && pixel.SpriteColor == 0xF00)
-									&& pixel.BackgroundColor == 15 && renderer.Pixels[8 * 224 + 8] == (occluded ? 0xFF0000FF : 0xFFFF0000)
-									&& renderer.Pixels[0] == 0xFF0000FF) { flags = 1; source = graphic; }
+								if((occluded ? pixel.VisibleSprite == -1 : pixel.VisibleSprite == 0 && pixel.SpriteColor == (monochrome ? 0 : 0xF00))
+									&& pixel.BackgroundColor == (monochrome ? 0xFFF : 15) && renderer.Pixels[8 * 224 + 8] == (occluded ? nativeBackground : nativeSprite)
+									&& renderer.Pixels[0] == nativeBackground) { flags = 1; source = graphic; }
 							}
 						}
 					}
@@ -847,7 +1230,7 @@ extern "C"
 					bool outsideWindow = windowFixture && string(filename).find("outside") != string::npos;
 					auto texture = [](int x, int y) { return 0xFF000000u | ((uint32_t)x * 13 << 16) | ((uint32_t)y * 11 << 8) | ((x ^ y) * 7); };
 					auto expectedBackground = [&](int x, int y) {
-						if(!backgroundFixture) { return 0xFF0000FFu; }
+						if(!backgroundFixture) { return nativeBackground; }
 						bool inside = x / 2 >= 40 && x / 2 <= 95 && y / 2 >= 24 && y / 2 <= 63;
 						if(windowFixture && inside != outsideWindow) { return 0xFFFF00FFu; }
 						if(!patterned) { return 0xFFFFFFFFu; }
@@ -855,17 +1238,20 @@ extern "C"
 						int ty = (((y / 2 + 250) & 255) % 8) * 2 + y % 2;
 						return texture(tx, ty);
 					};
+					std::vector<MetaBackgroundReplacement> authoredBackgrounds;
 					if(backgroundFixture) {
 						MetaBackgroundReplacement bg;
 						bg.Id = 1; bg.Width = bg.Height = 2; bg.Scale = 2; bg.WrapX = bg.WrapY = true; bg.Artwork.assign(4, 0xFFFFFFFF);
+						bg.MemoryConditions = {{0, 0, 0}, {1, 0, 0}};
 						if(patterned) {
 							bg.Width = bg.Height = 16; bg.Artwork.resize(256);
 							for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) { bg.Artwork[y * 16 + x] = texture(x, y); } }
 						}
 						if(windowFixture) {
 							MetaBackgroundReplacement window = bg; window.Id = 2; window.Layer = 1; window.Artwork.assign(4, 0xFFFF00FF);
-							emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg, window});
-						} else { emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg}); }
+							authoredBackgrounds = {bg, window};
+						} else { authoredBackgrounds = {bg}; }
+						emu->GetVideoDecoder()->SetMetaBackgroundLayers(authoredBackgrounds);
 						group.Artwork[1] = 0x8000FF00;
 					}
 					source.X = source.Y = 0; group.Members = {source};
@@ -901,9 +1287,37 @@ extern "C"
 						}
 						return renderer.Pixels[0] == expectedBackground(0, 0);
 					})) { flags |= 2; }
+					if(!VerifyExpandedCanvas(emu.get(), renderer, group, 8, 8, 0, source.ExpansionClass)) { flags |= 128; }
+					if(backgroundFixture) {
+						uint8_t first = 0, second = 0;
+						if(!waitFor([&]() {
+							if(!renderer.Capture || renderer.Capture->MemorySnapshot.size() != 2) { return false; }
+							const auto& bytes = renderer.Capture->MemorySnapshot;
+							if(!bytes.count(0) || !bytes.count(1)) { return false; }
+							first = bytes.at(0); second = bytes.at(1); return true;
+						})) { flags |= 128; }
+						for(int failingCondition : {0, 1, -1}) {
+							for(auto& bg : authoredBackgrounds) {
+								bg.MemoryConditions = {{0, (uint8_t)(first ^ (failingCondition == 0 ? 1 : 0)), 1},
+									{1, (uint8_t)(second ^ (failingCondition == 1 ? 0x80 : 0)), 0x80}};
+							}
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, authoredBackgrounds);
+							if(!waitFor([&]() {
+								if(renderer.Width != 448 || renderer.Height != 288 || !renderer.Capture || renderer.Capture->MemorySnapshot.size() != 2) { return false; }
+								for(auto point : {std::pair<int, int>{0, 0}, {80, 48}}) {
+									uint32_t expected = failingCondition < 0 ? expectedBackground(point.first, point.second) : nativeBackground;
+									if(renderer.Pixels[point.second * 448 + point.first] != expected) { return false; }
+								}
+								return true;
+							})) { flags |= 128; }
+						}
+						if(!(flags & 128)) { std::cout << "PASS: WonderSwan background AND/masked CPU conditions gate both layers; capture contains only addresses 0 and 1." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+						if(!waitFor([&]() { return renderer.Capture && renderer.Width == 448 && renderer.Capture->MemorySnapshot.size() == 1 && renderer.Capture->MemorySnapshot.count(0); })) { flags |= 128; }
+					}
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group, !occluded)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
-					if(waitFor([&]() { return renderer.Width == 224 && renderer.Height == 144 && renderer.Pixels[8 * 224 + 8] == (occluded ? 0xFF0000FF : 0xFFFF0000) && renderer.Pixels[0] == 0xFF0000FF; })) { flags |= 4; }
+					if(waitFor([&]() { return renderer.Width == 224 && renderer.Height == 144 && renderer.Pixels[8 * 224 + 8] == (occluded ? nativeBackground : nativeSprite) && renderer.Pixels[0] == nativeBackground; })) { flags |= 4; }
 				}
 			}
 			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
@@ -924,6 +1338,20 @@ extern "C"
 		uint32_t flags = 0;
 		bool mirrored = string(filename).find("mirror") != string::npos;
 		bool bpp8 = string(filename).find("bpp8") != string::npos;
+		bool asymmetricObject = string(filename).find("object-affine-enlarged-asymmetric") != string::npos;
+		bool transposedObject = string(filename).find("object-affine-transposed") != string::npos;
+		bool quarterTurnObject = string(filename).find("quarter-turn") != string::npos;
+		bool twoDimensionalObject = string(filename).find("quarter-turn-2d") != string::npos;
+		bool mosaicObject = string(filename).find("object-affine") != string::npos && string(filename).find("mosaic") != string::npos;
+		bool lowerReveal = string(filename).find("lower-reveal") != string::npos;
+		bool lowerSemi = lowerReveal && string(filename).find("semi") != string::npos;
+		bool lowerMosaic = string(filename).find("lower-reveal-mosaic") != string::npos;
+		bool clippedLowerMosaic = string(filename).find("mosaic-clipped") != string::npos;
+		bool lowerVerticalMosaic = string(filename).find("lower-reveal-vmosaic") != string::npos;
+		bool backgroundBetween = string(filename).find("bg-between") != string::npos;
+		bool backgroundTie = backgroundBetween && string(filename).find("priority1") != string::npos;
+		bool backgroundBetweenPng = string(filename).find("bg-between-png") != string::npos;
+		int objectSize = string(filename).find("double-size") != string::npos ? 16 : 8;
 		bool dark = string(filename).find("dark") != string::npos;
 		bool holes = string(filename).find("holes") != string::npos;
 		MetaSpriteGraphic source;
@@ -952,20 +1380,30 @@ extern "C"
 						std::lock_guard<std::mutex> lock(renderer.Mutex);
 						if(renderer.Capture && renderer.Width == 240 && renderer.Height == 160) {
 							for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
-								if(graphic.HardwareSprite != 0 || graphic.X != 8 || graphic.Y != 8 || graphic.Width != 8 || graphic.Height != 8) { continue; }
-								bool expectedGraphic = true;
-								for(int y = 0; y < 8; y++) {
-									for(int x = 0; x < 8; x++) {
-										uint32_t expected = (mirrored ? x < 4 : bpp8 && x >= 4) ? 0xFF0000FF : 0xFFFF0000;
-										uint32_t displayed = dark ? 0xFF7B0000 : expected;
+								if(graphic.HardwareSprite != 0 || graphic.X != 8 || graphic.Y != 8 || graphic.Width != objectSize || graphic.Height != objectSize) { continue; }
+								bool expectedGraphic = graphic.GbaPriority == 0 && !graphic.GbaSemiTransparent;
+								for(int y = 0; y < objectSize; y++) {
+									for(int x = 0; x < objectSize; x++) {
+										// Enlarged inverse sampling uses floor(2 + axis/2); source columns 5..7 are blue.
+										int blueBoundary = objectSize == 16 ? (quarterTurnObject ? 12 : asymmetricObject ? 10 : 8) : asymmetricObject ? 6 : 4;
+										uint32_t expected = (mirrored ? x < 4 : bpp8 && (transposedObject || quarterTurnObject ? y : x) >= blueBoundary) ? 0xFF0000FF : 0xFFFF0000;
+										// Quarter-turn source Y = floor(6 - x/2); rows 0..3 are also blue.
+										if(twoDimensionalObject && x >= (objectSize == 16 ? 9 : 5)) { expected = 0xFF0000FF; }
+										uint32_t displayed = dark ? (expected == 0xFF0000FF ? 0xFF00007B : 0xFF7B0000) : expected;
+										if(mosaicObject) { displayed = y >= 6 || (x & ~1) >= 5 ? 0xFF0000FF : 0xFFFF0000; }
+										if(renderer.Capture->Pixels[(y + 8) * 240 + x + 8].GbaObjectsEnabled == masked(x)) { expectedGraphic = false; }
 										if(masked(x)) { displayed = 0xFF0000FF; }
 										if(transparentSource || (holes && x == 7)) {
-											expected = 0; displayed = dark ? 0xFF00007B : 0xFF0000FF;
+											expected = 0; displayed = lowerReveal && !masked(x) ? (dark ? 0xFF7B7B00 : 0xFFFFFF00) : dark ? 0xFF00007B : 0xFF0000FF;
+											if(lowerSemi && !masked(x)) { displayed = 0xFF7B7B7B; }
+											if(lowerMosaic && !masked(x)) { displayed = 0xFFFF0000; } // Previous winning upper OBJ is not mosaic, so the native hole starts a new sample.
+											if(clippedLowerMosaic) { displayed = 0xFFFFFF00; }
+											if(backgroundBetween && !backgroundTie) { displayed = 0xFFFF00FF; }
 											const auto& hole = renderer.Capture->Pixels[(y + 8) * 240 + x + 8];
 											bool eligible = std::any_of(hole.GbaCoverage.begin(), hole.GbaCoverage.end(), [](const auto& coverage) { return coverage.Sprite == 0; });
-											if(hole.VisibleSprite != (overlap ? 1 : -1) || eligible == masked(x)) { expectedGraphic = false; }
+											if(hole.VisibleSprite != (overlap && !masked(x) && (!backgroundBetween || backgroundTie) ? 1 : -1) || eligible == masked(x)) { expectedGraphic = false; }
 										}
-										if(graphic.Pixels[y * 8 + x] != expected || renderer.Pixels[(y + 8) * 240 + x + 8] != displayed) { expectedGraphic = false; }
+										if(graphic.Pixels[y * objectSize + x] != expected || renderer.Pixels[(y + 8) * 240 + x + 8] != displayed) { expectedGraphic = false; }
 									}
 									}
 								if(!expectedGraphic) { continue; }
@@ -992,7 +1430,7 @@ extern "C"
 								}
 								const auto& pixel = renderer.Capture->Pixels[8 * 240 + 8];
 									if(pixel.VisibleSprite == (transparentSource ? -1 : 0) && pixel.SpriteColor == (transparentSource || mirrored ? 0x7C00 : 31) && pixel.SecondarySprite == -1
-									&& pixel.GbaFallbackCaptured && pixel.GbaFallbackColor == (dark ? 0x3C00 : 0x7C00) && pixel.GbaFallbackMainColor == 0x7C00) { flags |= 1; source = graphic; }
+									&& pixel.GbaFallbackCaptured && pixel.GbaFallbackColor == (backgroundBetween ? 0x7C1F : dark ? 0x3C00 : 0x7C00) && pixel.GbaFallbackMainColor == (backgroundBetween ? 0x7C1F : 0x7C00)) { flags |= 1; source = graphic; }
 							}
 						}
 					}
@@ -1010,6 +1448,8 @@ extern "C"
 					group.Id = 1; group.ArtworkScale = 2; group.ArtworkWidth = group.ArtworkHeight = 16;
 					group.Artwork.assign(256, 0xFF00FF00); group.Artwork[0] = 0; group.Artwork[1] = 0x8000FF00;
 					if(holes) { group.Artwork[14] = 0; group.Artwork[15] = 0x8000FF00; }
+					if(lowerVerticalMosaic) { for(int y = 1; y < 16; y++) { group.Artwork[y * 16 + 14] = 0; group.Artwork[y * 16 + 15] = 0x8000FF00; } }
+					if(clippedLowerMosaic) { group.Artwork[2] = 0; group.Artwork[3] = 0x8000FF00; }
 					source.X = source.Y = 0; group.Members = {source};
 					if(backgroundCapture) {
 						MetaBackgroundReplacement background;
@@ -1021,7 +1461,14 @@ extern "C"
 							} }
 						}
 						group.MemoryConditions = {{0, 0, 0}}; emu->GetVideoDecoder()->SetMetaReplacements({group}, {background});
-					} else { group.MemoryConditions = {{0, 0, 0}}; emu->GetVideoDecoder()->SetMetaSpriteGroups({group}); }
+					} else {
+						group.MemoryConditions = {{0, 0, 0}};
+						if(backgroundBetweenPng) {
+							MetaBackgroundReplacement bg; bg.Id = 1; bg.Layer = 0; bg.Width = bg.Height = 1;
+							bg.WrapX = bg.WrapY = true; bg.Artwork = {0xFFFFFFFF}; bg.MemoryConditions = {{0, 0, 0}};
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+						} else { emu->GetVideoDecoder()->SetMetaSpriteGroups({group}); }
+					}
 					auto waitFor = [&](std::function<bool()> condition) {
 						for(int attempt = 0; attempt < 500; attempt++) {
 							{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(condition()) { return true; } }
@@ -1033,10 +1480,20 @@ extern "C"
 						if(renderer.Width != 480 || renderer.Height != 320) { return false; }
 						for(int y = 0; y < 16; y++) {
 							for(int x = 0; x < 16; x++) {
-								bool transparent = y == 0 && (x == 0 || (holes && x == 14));
-								bool partial = y == 0 && (x == 1 || (holes && x == 15));
+								bool transparent = (y == 0 && x == 0) || (holes && x == 14 && (y == 0 || lowerVerticalMosaic));
+								bool partial = (y == 0 && x == 1) || (holes && x == 15 && (y == 0 || lowerVerticalMosaic));
+								transparent |= clippedLowerMosaic && y == 0 && x == 2;
+								partial |= clippedLowerMosaic && y == 0 && x == 3;
 								uint32_t expected = transparent ? 0xFF0000FF : partial ? 0xFF00807F : 0xFF00FF00;
+								if(lowerReveal) { expected = transparent ? 0xFFFFFF00 : partial ? 0xFF7FFF00 : 0xFF00FF00; }
 								if(dark) { expected = transparent ? 0xFF00007B : partial ? 0xFF00403D : 0xFF007F00; }
+								if(lowerReveal && dark) { expected = transparent ? 0xFF7B7B00 : partial ? 0xFF3D7D00 : 0xFF007F00; }
+								if(lowerSemi) { expected = transparent ? 0xFF7B7B7B : partial ? 0xFF3DBD3D : 0xFF00FF00; }
+								if(backgroundBetween && !backgroundTie) { expected = transparent ? (backgroundBetweenPng ? 0xFFFFFFFF : 0xFFFF00FF) : partial ? (backgroundBetweenPng ? 0xFF7FFF7F : 0xFF7F807F) : 0xFF00FF00; }
+								if(clippedLowerMosaic && y == 0) {
+									if(x == 0) { expected = 0xFF0000FF; } else if(x == 1) { expected = 0xFF00807F; }
+									else if(x == 14) { expected = 0xFFFF0000; } else if(x == 15) { expected = 0xFF7F8000; }
+								}
 								if(masked(x / 2)) { expected = 0xFF0000FF; }
 								if(backgroundCapture) { expected = transparent ? 0xFF7F7FFF : partial ? 0xFF3FBF7F : 0xFF00FF00; }
 								if(renderer.Pixels[(y + 16) * 480 + x + 16] != expected) { return false; }
@@ -1050,8 +1507,59 @@ extern "C"
 								if(renderer.Pixels[y * 480 + x] != expectedBackground) { return false; }
 							} }
 						}
-						return renderer.Pixels[0] == (backgroundCapture ? 0xFF7F7FFF : dark ? 0xFF00007B : 0xFF0000FF);
+						return renderer.Pixels[0] == (backgroundBetweenPng ? 0xFFFFFFFF : backgroundBetween ? 0xFFFF00FF : backgroundCapture ? 0xFF7F7FFF : dark ? 0xFF00007B : 0xFF0000FF);
 					})) { flags |= 2; }
+					if(!backgroundCapture && !window && !overlap && (flags & 2)) {
+						MetaSpriteReplacement enlarged = group;
+						enlarged.ArtworkWidth = enlarged.ArtworkHeight = 21;
+						enlarged.ArtworkOriginX = enlarged.ArtworkOriginY = 1;
+						enlarged.Artwork.assign(441, 0xFF00FF00); enlarged.Artwork[0] = 0; enlarged.Artwork[1] = 0x8000FF00;
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({enlarged});
+						if(!waitFor([&]() {
+							if(renderer.Width != 480 || renderer.Height != 320) { return false; }
+							for(int y = 0; y < 320; y++) { for(int x = 0; x < 480; x++) {
+								uint32_t expected = x >= 14 && x < 35 && y >= 14 && y < 35 ? 0xFF00FF00 : 0xFF0000FF;
+								if(y == 14 && x == 14) { expected = 0xFF0000FF; }
+								if(y == 14 && x == 15) { expected = 0xFF00807F; }
+								if(dark) { expected = expected == 0xFF00FF00 ? 0xFF007F00 : expected == 0xFF00807F ? 0xFF00403D : 0xFF00007B; }
+								if(renderer.Pixels[y * 480 + x] != expected) { return false; }
+							} }
+							return true;
+						})) { flags |= 128; }
+						else { std::cout << "PASS: GBA live full canvas, shifted origin, PNG alpha and partial native edge." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					}
+					if(string(filename).find("mixed-group") != string::npos && (flags & 2)) {
+						MetaSpriteReplacement mixed = group;
+						bool capturedSecond = false;
+						{
+							std::lock_guard<std::mutex> lock(renderer.Mutex);
+							if(renderer.Capture) { for(auto member : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
+								if(member.HardwareSprite == 1 && member.X == 15 && member.Y == 8 && member.GbaPriority == 3 && member.Width == 8 && member.Height == 8) {
+									member.X = 7; member.Y = 0; mixed.Members.push_back(member); capturedSecond = true; break;
+								}
+							} }
+						}
+						mixed.ArtworkWidth = 40; mixed.ArtworkHeight = 20;
+						mixed.ArtworkOriginX = mixed.ArtworkOriginY = 2;
+						mixed.Artwork.assign(800, 0xFF00FF00); mixed.Artwork[0] = 0; mixed.Artwork[1] = 0x8000FF00;
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({mixed});
+						if(!capturedSecond || !waitFor([&]() {
+							if(renderer.Width != 480 || renderer.Height != 320) { return false; }
+							for(int y = 0; y < 320; y++) { for(int x = 0; x < 480; x++) {
+								uint32_t expected = 0xFFFF00FF;
+								// Source rectangles overlap at native x=15; priority 0 wins there.
+								// Beyond it the priority-3 member and its full-canvas margin stay behind BG0.
+								if(y >= 12 && y < 32 && x >= 12 && x < 32) { expected = 0xFF00FF00; }
+								if(y == 12 && x == 12) { expected = 0xFFFF00FF; }
+								if(y == 12 && x == 13) { expected = 0xFF7F807F; }
+								if(renderer.Pixels[y * 480 + x] != expected) { return false; }
+							} }
+							return true;
+						})) { flags |= 128; }
+						else { std::cout << "PASS: GBA live mixed-priority members, overlap ordering, PNG alpha and oversized margins against BG0." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					}
 					if(bitmapBackground && string(filename).find("page1-live") != string::npos) {
 						for(bool opaque : {false, true}) {
 							if(!waitFor([&]() {
@@ -1061,9 +1569,24 @@ extern "C"
 							})) { flags |= 128; }
 						}
 					}
-					if(backgroundCapture) { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {}); }
+					if(backgroundBetweenPng) {
+						uint8_t sampled = 0;
+						if(!waitFor([&]() {
+							if(!renderer.Capture || renderer.Capture->MemorySnapshot.size() != 1) { return false; }
+							auto found = renderer.Capture->MemorySnapshot.find(0);
+							if(found == renderer.Capture->MemorySnapshot.end()) { return false; }
+							sampled = found->second; return true;
+						})) { flags |= 128; }
+						MetaBackgroundReplacement bg; bg.Id = 1; bg.Layer = 0; bg.Width = bg.Height = 1;
+						bg.WrapX = bg.WrapY = true; bg.Artwork = {0xFFFFFFFF}; bg.MemoryConditions = {{0, (uint8_t)(sampled ^ 0x80), 0xFF}};
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+						if(!waitFor([&]() { return renderer.Width == 480 && renderer.Pixels[0] == 0xFFFF00FF && renderer.Pixels[16 * 480 + 16] == 0xFFFF00FF; })) { flags |= 128; }
+						bg.MemoryConditions = {{0, sampled, 0xFF}}; emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+						if(!waitFor([&]() { return renderer.Width == 480 && renderer.Pixels[0] == 0xFFFFFFFF && renderer.Pixels[16 * 480 + 16] == 0xFFFFFFFF; })) { flags |= 128; }
+					}
+					if(backgroundCapture || backgroundBetweenPng) { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {}); }
 					else { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({}); }
-					if(waitFor([&]() { return renderer.Width == 240 && renderer.Height == 160 && renderer.Pixels[8 * 240 + 8] == (dark ? 0xFF7B0000 : transparentSource || mirrored ? 0xFF0000FF : 0xFFFF0000); })) { flags |= 4; }
+					if(waitFor([&]() { return renderer.Width == 240 && renderer.Height == 160 && renderer.Pixels[8 * 240 + 8] == (dark ? 0xFF7B0000 : transparentSource || mirrored ? 0xFF0000FF : 0xFFFF0000) && (!backgroundBetween || renderer.Pixels[0] == 0xFFFF00FF); })) { flags |= 4; }
 				}
 			}
 			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
@@ -1072,6 +1595,8 @@ extern "C"
 	}
 	DllExport uint32_t __stdcall RunMetaSpritePceGameplayTest(const char* filename)
 	{
+		bool behindOpaque = string(filename).find("opaque-bg-behind") != string::npos;
+		bool behindPng = string(filename).find("png-background-behind") != string::npos;
 		bool backgroundFixture = string(filename).find("background") != string::npos;
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
 		unique_ptr<Emulator> emu(new Emulator());
@@ -1121,7 +1646,7 @@ extern "C"
 							if(!correct) { continue; }
 						}
 						x = candidate.X - PceConstants::GetLeftOverscan(divider); y = candidate.Y;
-						if(x < 0 || y < 0 || x + spriteWidth > (int)width || y + 16 > (int)height || renderer.Pixels[y * width + x] != candidate.Pixels[0]) { continue; }
+						if(x < 0 || y < 0 || x + spriteWidth > (int)width || y + 16 > (int)height || renderer.Pixels[y * width + x] != (behindOpaque ? 0xFF0000FF : candidate.Pixels[0])) { continue; }
 						if(string(filename).find("background") != string::npos) {
 							const auto& sample = renderer.Capture->Pixels[candidate.Y * renderer.Capture->Width + candidate.X].BackgroundSample;
 							if(!sample.Valid || sample.Layer != 0 || sample.X != 8 || sample.Y != 8) { continue; }
@@ -1159,6 +1684,8 @@ extern "C"
 							for(int column = 0; column < spriteWidth * 2; column++) {
 								uint32_t expected = backgroundFixture && row == 0 && column == 0 ? 0xFFFFFFFF
 									: backgroundFixture && row == 0 && column == 1 ? 0xFF7FFF7F : 0xFF00FF00;
+								if(behindOpaque) { expected = 0xFF0000FF; }
+								if(behindPng) { expected = 0xFFFFFFFF; }
 								if(renderer.Pixels[(y * 2 + row) * renderer.Width + x * 2 + column] != expected) { return false; }
 							}
 						}
@@ -1166,9 +1693,10 @@ extern "C"
 					})) { flags |= 4; }
 					if(waitFor([&]() { return renderer.Width == width * 2 && renderer.Pixels[0] == background
 						&& (!backgroundFixture || renderer.Pixels[y * 2 * renderer.Width + (x + spriteWidth + 1) * 2] == 0xFFFFFFFF); })) { flags |= 8; }
-					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
+					if(!VerifyExpandedCanvas(emu.get(), renderer, group, x, y, 0, source.ExpansionClass, PceConstants::GetLeftOverscan(divider), 0, behindPng)) { flags |= 128; }
+					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group, !behindOpaque)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
-					if(waitFor([&]() { return renderer.Width == width && renderer.Height == height && renderer.Pixels[y * width + x] == source.Pixels[0]; })) { flags |= 16; }
+					if(waitFor([&]() { return renderer.Width == width && renderer.Height == height && renderer.Pixels[y * width + x] == (behindOpaque ? 0xFF0000FF : source.Pixels[0]); })) { flags |= 16; }
 				} else {
 					std::lock_guard<std::mutex> lock(renderer.Mutex);
 					std::cerr << "PCE capture: size=" << renderer.Width << "x" << renderer.Height << ", capture=" << (bool)renderer.Capture;
@@ -1352,6 +1880,7 @@ extern "C"
 						&& occludedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[priorityY * nativeWidth + priorityX].VisibleSprite == -1; })) { flags |= 32; }
 					if(maskFixture && waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels[spriteY * 2 * renderer.Width + 8] == maskedPixel
 						&& maskedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[spriteY * nativeWidth + 4].VisibleSprite == -1; })) { flags |= 64; }
+					if(!VerifyExpandedCanvas(emu.get(), renderer, group, spriteX, spriteY, 0, source.ExpansionClass, 0, 0, smsBackgroundFixture)) { flags |= 128; }
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[spriteY * nativeWidth + visibleX] != 0xFF00FF00; })) { flags |= 16; }

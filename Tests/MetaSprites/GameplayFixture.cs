@@ -40,6 +40,8 @@ internal static class GameplayFixture
 	private static extern uint RunMetaSpriteNesCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 	[DllImport("MesenCore.dll")]
 	private static extern uint RunMetaSpriteSnesCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll", CallingConvention = CallingConvention.StdCall)]
+	private static extern uint RunMetaSpriteSnesHiresCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 
 	public static void Run(string dllPath, string romPath)
 	{
@@ -98,6 +100,9 @@ internal static class GameplayFixture
 		RunPce(Path.ChangeExtension(romPath, "divider2.pce"), false, 2);
 		RunPce(Path.ChangeExtension(romPath, "mirror.pce"), false, 0, true);
 		RunPce(Path.ChangeExtension(romPath, "background.pce"), background: true);
+		RunPce(Path.ChangeExtension(romPath, "opaque-bg-front.pce"));
+		RunPce(Path.ChangeExtension(romPath, "opaque-bg-behind.pce"));
+		RunPce(Path.ChangeExtension(romPath, "png-background-behind.pce"), background: true);
 		RunPce(Path.ChangeExtension(romPath, "holes.pce"));
 		RunPce(Path.ChangeExtension(romPath, "holes-wide.pce"), true);
 		RunPce(Path.ChangeExtension(romPath, "holes-divider3.pce"), clockMode: 1);
@@ -117,6 +122,9 @@ internal static class GameplayFixture
 		RunGba(Path.ChangeExtension(romPath, "background-affine.gba"), background: 3);
 		RunGba(Path.ChangeExtension(romPath, "background-affine-scaled.gba"), background: 3);
 		RunGba(Path.ChangeExtension(romPath, "background-affine-rotated.gba"), background: 3);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-identity.gba"));
+		RunGba(Path.ChangeExtension(romPath, "object-affine-identity-holes-window.gba"), holes: true, window: 1);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged.gba"));
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap4.gba"), background: 4);
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap4-page1.gba"), background: 4);
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap4-page1-live.gba"), background: 4);
@@ -131,6 +139,14 @@ internal static class GameplayFixture
 		RunWs(Path.ChangeExtension(romPath, "planar.wsc"), 0xC0);
 		RunWs(Path.ChangeExtension(romPath, "holes-planar.wsc"), 0xC0);
 		RunWs(Path.ChangeExtension(romPath, "packed.wsc"), 0xE0);
+		RunWs(Path.ChangeExtension(romPath, "obj-window.wsc"), spriteWindow: true);
+		RunWs(Path.ChangeExtension(romPath, "obj-outside-window.wsc"), spriteWindow: true, spriteOutside: true);
+		RunWs(Path.ChangeExtension(romPath, "mono.ws"), 0);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-scroll.ws"), 0, background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-window.ws"), 0, background: true, window: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-outside-window-occluded.ws"), 0, background: true, window: true, outsideWindow: true, occluded: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-obj-window.ws"), 0, spriteWindow: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-obj-outside-window.ws"), 0, spriteWindow: true, spriteOutside: true);
 		RunNesFixtures(romPath);
 		RunSnes(Path.ChangeExtension(romPath, ".sfc"));
 		RunSnes(Path.ChangeExtension(romPath, "holes.sfc"), true);
@@ -181,6 +197,18 @@ internal static class GameplayFixture
 		RunNes(Path.ChangeExtension(romPath, "background-scroll-transparent.nes"), true, true);
 	}
 
+	public static void RunSnesCanvas(string dllPath, string romPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunSnes(Path.ChangeExtension(romPath, ".sfc"));
+		RunSnes(Path.ChangeExtension(romPath, "holes.sfc"), true);
+		RunSnes(Path.ChangeExtension(romPath, "holes-window.sfc"), true, 1);
+		RunSnes(Path.ChangeExtension(romPath, "holes-window-middle.sfc"), true, 2);
+		RunSnes(Path.ChangeExtension(romPath, "holes-math.sfc"), true, math: 1);
+		RunSnes(Path.ChangeExtension(romPath, "holes-subscreen.sfc"), true, sub: true);
+		RunSnes(Path.ChangeExtension(romPath, "holes-overlap-rotate.sfc"), true, overlap: true, rotate: true);
+		RunSnes(Path.ChangeExtension(romPath, "transparent.sfc"), transparent: true);
+	}
 	public static void RunSnesOrdering(string dllPath, string romPath)
 	{
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
@@ -208,6 +236,21 @@ internal static class GameplayFixture
 			RunSnes(Path.ChangeExtension(romPath, $"background-sub-bg{layer}-scroll.sfc"), backgroundSub: true, backgroundLayer: layer);
 		}
 		RunSnesAdditionalBackgrounds(romPath);
+	}
+
+	public static void RunSnesHiRes(string dllPath, string romPath, bool includeInterlace = true, bool includeObjInterlace = true)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		// Hires uses per-phase assertions; ordinary woven OBJ uses a physical
+		// whole-frame oracle. OBJ-interlace remains an explicit unsupported probe.
+		List<Exception> failures = new();
+		foreach(string fixture in new[] { "mode5-hires", "mode6-hires", "pseudo-hires", "mode5-hires-both-screens", "mode5-hires-both-screens-window", "pseudo-hires-window", "mode5-hires-background-scroll", "mode6-hires-background-scroll", "pseudo-hires-background-scroll", "interlace-holes", "interlace-current-field-holes", "interlace-bob-field-holes", "interlace-bob-blend-field-holes", "interlace-bob-field-first-picture-holes", "interlace-bob-blend-field-first-picture-holes", "obj-interlace-holes" }) {
+			if(!includeInterlace && fixture.Contains("interlace")) { continue; }
+			if(!includeObjInterlace && fixture.Contains("obj-interlace")) { continue; }
+			try { RunSnes(Path.ChangeExtension(romPath, fixture + ".sfc"), holes: true, window: fixture.Contains("window") ? 1 : 0, backgroundSub: fixture.Contains("hires-background")); }
+			catch(Exception ex) { failures.Add(ex); Console.WriteLine($"FAIL: {ex.Message}"); }
+		}
+		if(failures.Count != 0) { throw new AggregateException("SNES hires/interlace capture probes failed.", failures); }
 	}
 
 	public static void RunSnesFrameTiming(string dllPath, string romPath, bool viewerCore = false)
@@ -244,7 +287,7 @@ internal static class GameplayFixture
 		bool mode7 = romPath.Contains("mode7");
 		Store(0x2100, 0x80); Store(0x2101, mode7 ? (byte)2 : (byte)0); Store(0x2102, 0); Store(0x2103, 0);
 		int backgroundMode = 0;
-		for(int mode = 1; mode <= 4; mode++) { if(romPath.Contains($"mode{mode}")) { backgroundMode = mode; } }
+		for(int mode = 1; mode <= 6; mode++) { if(romPath.Contains($"mode{mode}")) { backgroundMode = mode; } }
 		if(mode7) { backgroundMode = 7; }
 		Store(0x2105, (byte)backgroundMode);
 		for(int sprite = 0; sprite < 128; sprite++) {
@@ -281,11 +324,13 @@ internal static class GameplayFixture
 				2 => 4,
 				3 => backgroundLayer == 0 ? 8 : 4,
 				4 => backgroundLayer == 0 ? 8 : 2,
+				5 => backgroundLayer == 0 ? 4 : 2,
+				6 => 4,
 				_ => 2
 			};
 			// Distinct colors exercise every plane pair, including the high
 			// planes of 8-bit backgrounds (color 85 instead of color 5).
-			for(int word = 0; word < bpp * 4; word++) { Store(0x2118, romPath.Contains("bgholes") && word % 8 == 0 ? (byte)254 : (byte)255); Store(0x2119, 0); }
+			for(int word = 0; word < bpp * (backgroundMode == 5 || backgroundMode == 6 ? 8 : 4); word++) { Store(0x2118, romPath.Contains("bgholes") && word % 8 == 0 ? (byte)254 : (byte)255); Store(0x2119, 0); }
 			Store((ushort)(0x2107 + backgroundLayer), 0x20);
 			Store((ushort)(0x210B + backgroundLayer / 2), (byte)(backgroundLayer % 2 == 0 ? 1 : 0x10));
 			Store(0x2121, (byte)(backgroundMode == 0 ? backgroundLayer * 32 + 1 : bpp == 8 ? 85 : bpp == 4 ? 5 : 1)); Store(0x2122, sub ? (byte)31 : (byte)0); Store(0x2122, sub ? (byte)0 : (byte)0x7C);
@@ -304,7 +349,7 @@ internal static class GameplayFixture
 			Store(0x2123, 2); Store(0x2126, 40); Store(0x2127, 95);
 			Store(sub ? (ushort)0x212E : (ushort)0x212F, 1);
 		}
-		Store(0x212C, sub ? (byte)(1 << backgroundLayer) : (byte)0x10); Store(0x212D, sub ? (byte)0x10 : backgroundSub ? (byte)(1 << backgroundLayer) : (byte)0);
+		Store(0x212C, sub ? (byte)(1 << backgroundLayer) : (byte)0x10); Store(0x212D, sub || romPath.Contains("both-screens") ? (byte)0x10 : backgroundSub ? (byte)(1 << backgroundLayer) : (byte)0);
 		if(romPath.Contains("bglow")) {
 			Store(0x210A, 0x30); Store(0x210C, backgroundLayer == 2 ? (byte)0x11 : (byte)0x10);
 			Store(0x2121, 97); Store(0x2122, 0); Store(0x2122, 0x7C);
@@ -312,7 +357,10 @@ internal static class GameplayFixture
 		}
 		Store(0x2130, sub ? (byte)2 : (byte)0); Store(0x2131, sub ? (byte)(0x40 | (1 << backgroundLayer)) : math != 0 ? (byte)0x50 : (byte)0);
 		Store(0x2132, 0x9F); // Blue fixed color for object half-add math.
-		Store(0x2133, mode7 && backgroundLayer == 1 ? (byte)0x40 : (byte)0);
+		byte screenMode = romPath.Contains("pseudo-hires") ? (byte)8 : mode7 && backgroundLayer == 1 ? (byte)0x40 : (byte)0;
+		if(romPath.Contains("interlace")) { screenMode |= 1; }
+		if(romPath.Contains("obj-interlace")) { screenMode |= 2; }
+		Store(0x2133, screenMode);
 		if(rotate) { Store(0x2102, 2); Store(0x2103, 0x80); } // Start evaluation at sprite 1.
 		Store(0x2100, 15);
 		if(romPath.Contains("memory")) {
@@ -332,9 +380,9 @@ internal static class GameplayFixture
 		rom[0x7FD5] = 0x20; rom[0x7FD7] = 5; rom[0x7FD9] = 1;
 		rom[0x7FDC] = 255; rom[0x7FDD] = 255; rom[0x7FFC] = 0; rom[0x7FFD] = 0x80;
 		File.WriteAllBytes(romPath, rom);
-		uint result = RunMetaSpriteSnesCaptureTest(romPath);
-		if(result != 7) { throw new Exception($"SNES live capture/replacement failed: flags {result}."); }
-		Console.WriteLine($"PASS: {Path.GetFileName(romPath)}, SNES live capture, HD replacement, transparent/partial-alpha backdrop, border placement, and disable restoration.");
+		uint result = romPath.Contains("hires") ? RunMetaSpriteSnesHiresCaptureTest(romPath) : RunMetaSpriteSnesCaptureTest(romPath);
+		if(result != 7) { throw new Exception($"SNES live capture/replacement failed for {Path.GetFileName(romPath)} (LoROM, BG mode {backgroundMode}): flags {result}."); }
+		Console.WriteLine($"PASS: {Path.GetFileName(romPath)}, SNES LoROM / BG mode {backgroundMode}, live capture, HD replacement, transparent/partial-alpha backdrop, border placement, and disable restoration.");
 	}
 
 	private static void RunNes(string romPath, bool background = false, bool scroll = false, bool mask = false)
@@ -364,7 +412,28 @@ internal static class GameplayFixture
 		Console.WriteLine($"PASS: {Path.GetFileName(romPath)}, live capture, HD replacement, transparent/partial-alpha backdrop, and disable restoration.");
 	}
 
-	private static void RunWs(string romPath, byte videoMode = 0x80, bool background = false, bool scroll = false, bool window = false, bool outsideWindow = false, bool occluded = false)
+	public static void RunWsSuite(string dllPath, string romPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunWs(Path.ChangeExtension(romPath, "mono.ws"), 0);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-scroll.ws"), 0, background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-window.ws"), 0, background: true, window: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-outside-window-occluded.ws"), 0, background: true, window: true, outsideWindow: true, occluded: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-obj-window.ws"), 0, spriteWindow: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-obj-outside-window.ws"), 0, spriteWindow: true, spriteOutside: true);
+		RunWs(Path.ChangeExtension(romPath, ".wsc"));
+		RunWs(Path.ChangeExtension(romPath, "background.wsc"), background: true);
+		RunWs(Path.ChangeExtension(romPath, "background-scroll.wsc"), background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "background-window.wsc"), background: true, window: true);
+		RunWs(Path.ChangeExtension(romPath, "background-outside-window.wsc"), background: true, window: true, outsideWindow: true);
+		RunWs(Path.ChangeExtension(romPath, "background-outside-window-occluded.wsc"), background: true, window: true, outsideWindow: true, occluded: true);
+		RunWs(Path.ChangeExtension(romPath, "planar.wsc"), 0xC0);
+		RunWs(Path.ChangeExtension(romPath, "holes-planar.wsc"), 0xC0);
+		RunWs(Path.ChangeExtension(romPath, "packed.wsc"), 0xE0);
+		RunWs(Path.ChangeExtension(romPath, "obj-window.wsc"), spriteWindow: true);
+		RunWs(Path.ChangeExtension(romPath, "obj-outside-window.wsc"), spriteWindow: true, spriteOutside: true);
+	}
+	private static void RunWs(string romPath, byte videoMode = 0x80, bool background = false, bool scroll = false, bool window = false, bool outsideWindow = false, bool occluded = false, bool spriteWindow = false, bool spriteOutside = false)
 	{
 		byte[] rom = new byte[65536];
 		List<byte> code = new() {0xFA, 0x31, 0xC0, 0x8E, 0xD8}; // CLI; AX=0; DS=0.
@@ -372,22 +441,26 @@ internal static class GameplayFixture
 		void Word(ushort address, ushort value) => code.AddRange(new byte[] {0xC7, 0x06, (byte)address, (byte)(address >> 8), (byte)value, (byte)(value >> 8)});
 		Port(0, 0); Port(0x60, videoMode); Port(0x14, 1); Port(0x16, 158);
 		Word(0xFE00, 0x000F); Word(0xFF02, 0x0F00);
+		if(videoMode == 0) { Port(0x1C, 0xF0); Port(0x20, 0); Port(0x30, 0x10); } // Shade 0 white, shade 1 black; BG0 white and OBJ palette 8 black.
 		if(background) { Word(0xFE02, 0x000F); }
 		for(ushort row = 0; row < 8; row++) {
-			if(videoMode == 0x80) { Word((ushort)(0x2000 + row * 2), 0x00FF); }
+			if(videoMode == 0 || videoMode == 0x80) { Word((ushort)(0x2000 + row * 2), 0x00FF); }
 			else {
 				Word((ushort)(0x4000 + row * 4), videoMode == 0xE0 ? (ushort)0x1111 : romPath.Contains("holes") ? (ushort)0x00FE : (ushort)0x00FF);
 				Word((ushort)(0x4002 + row * 4), videoMode == 0xE0 ? (ushort)0x1111 : (ushort)0);
 			}
 		}
 		Word(0x1000, outsideWindow && !occluded ? (ushort)0x2000 : (ushort)0); Word(0x1002, 0x0808);
+		if(spriteOutside) { Word(0x1000, 0x1000); }
+		if(spriteWindow) { Port(0x0C, spriteOutside ? (byte)20 : (byte)4); Port(0x0D, 4); Port(0x0E, spriteOutside ? (byte)30 : (byte)19); Port(0x0F, 19); }
 		if(scroll) { Port(0x10, 253); Port(0x11, 250); }
 		if(window) { Port(0x08, 40); Port(0x09, 24); Port(0x0A, 95); Port(0x0B, 63); Port(0x12, 7); Port(0x13, 9); }
 		Port(4, 8); Port(5, 0); Port(6, 1); Port(1, 0); Port(0, outsideWindow ? (byte)0x37 : window ? (byte)0x27 : background ? (byte)5 : (byte)4);
+		if(spriteWindow) { Port(0, 0x0C); }
 		code.AddRange(new byte[] {0xEB, 0xFE});
 		code.CopyTo(rom, 0);
 		new byte[] {0xEA, 0, 0, 0, 0xF0}.CopyTo(rom, 0xFFF0);
-		rom[0xFFF7] = 1;
+		rom[0xFFF7] = videoMode == 0 ? (byte)0 : (byte)1;
 		File.WriteAllBytes(romPath, rom);
 		uint result = RunMetaSpriteWsCaptureTest(romPath);
 		if(result != 7) { throw new Exception($"WonderSwan live capture/replacement failed: flags {result}."); }
@@ -397,6 +470,31 @@ internal static class GameplayFixture
 	public static void RunGbaAffine(string dllPath, string romPath)
 	{
 		NativeLibrary.SetDllImportResolver(typeof(GameplayFixture).Assembly, (name, assembly, searchPath) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-transposed-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-quarter-turn-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-quarter-turn-2d-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-quarter-turn-2d-bpp8-dark.gba"), bpp8: true, dark: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-double-size.gba"));
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-double-size-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-quarter-turn-2d-double-size-bpp8.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged-asymmetric-quarter-turn-2d-bpp8-mosaic.gba"), bpp8: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-window.gba"), holes: true, overlap: true, window: 1);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-dark.gba"), holes: true, overlap: true, dark: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-semi.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-priority1.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-priority3-semi.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-mosaic.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-vmosaic.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-mosaic-clipped.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-priority3-bg-between.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-priority1-bg-between.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-lower-reveal-priority3-bg-between-png.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap-priority3-bg-between-mixed-group.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-identity.gba"));
+		RunGba(Path.ChangeExtension(romPath, "object-affine-identity-holes-window.gba"), holes: true, window: 1);
+		RunGba(Path.ChangeExtension(romPath, "object-affine-enlarged.gba"));
 		RunGba(Path.ChangeExtension(romPath, "background-affine.gba"), background: 3);
 		RunGba(Path.ChangeExtension(romPath, "background-affine-scaled.gba"), background: 3);
 		RunGba(Path.ChangeExtension(romPath, "background-affine-rotated.gba"), background: 3);
@@ -405,6 +503,16 @@ internal static class GameplayFixture
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap4-page1-live.gba"), background: 4);
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap3.gba"), background: 4);
 		RunGba(Path.ChangeExtension(romPath, "background-bitmap5.gba"), background: 4);
+	}
+	public static void RunGbaCaptureMetadata(string dllPath, string romPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunGba(Path.ChangeExtension(romPath, ".gba"));
+		RunGba(Path.ChangeExtension(romPath, "holes-window.gba"), holes: true, window: 1);
+		RunGba(Path.ChangeExtension(romPath, "holes-window-middle.gba"), holes: true, window: 2);
+		RunGba(Path.ChangeExtension(romPath, "holes-overlap.gba"), holes: true, overlap: true);
+		RunGba(Path.ChangeExtension(romPath, "transparent.gba"), transparentSource: true);
+		RunGba(Path.ChangeExtension(romPath, "dark.gba"), dark: true);
 	}
 
 	private static void RunGba(string romPath, bool mirror = false, bool bpp8 = false, bool dark = false, bool holes = false, int window = 0, bool overlap = false, bool transparentSource = false, int background = 0)
@@ -422,17 +530,41 @@ internal static class GameplayFixture
 		Store(0x05000202, 0x001F);
 		Store(0x05000000, 0x7C00); // Known backdrop for object-removal fallback.
 		Store(0x05000204, 0x7C00);
+		if(romPath.Contains("lower-reveal")) { Store(0x05000204, 0x03FF); } // Lower OBJ yellow, backdrop blue: distinguish reveal from fallback.
 		uint objectTiles = background == 4 ? 0x06014000u : 0x06010000u;
 		for(uint row = 0; row < 8; row++) {
 			if(bpp8) {
-				Store(0x06010000 + row * 8, 0x01010101, true);
-				Store(0x06010004 + row * 8, 0x02020202, true);
+				bool blueRow = romPath.Contains("quarter-turn-2d") && row <= 3;
+				Store(0x06010000 + row * 8, blueRow ? 0x02020202u : 0x01010101u, true);
+				Store(0x06010004 + row * 8, blueRow ? 0x02020202u : romPath.Contains("asymmetric") ? 0x02020201u : 0x02020202u, true);
 			} else { Store(objectTiles + row * 4, transparentSource ? 0u : holes ? 0x01111111u : mirror ? 0x22221111u : 0x11111111u, true); }
 		}
 		Store(0x07000000, bpp8 ? 0x2008u : 8u); Store(0x07000002, mirror ? 0x1008u : 8u); Store(0x07000004, background == 4 ? 512u : 0u);
+		if(romPath.Contains("object-affine-")) {
+			bool transposed = romPath.Contains("transposed");
+			bool quarterTurn = romPath.Contains("quarter-turn");
+			uint diagonal = quarterTurn && romPath.Contains("double-size") ? 0x40u : romPath.Contains("enlarged") ? 0x80u : 0x100u;
+			Store(0x07000000, bpp8 ? 0x2108u : 0x0108u); // Affine OBJ, parameter set 0, normal bounding box.
+			if(romPath.Contains("double-size")) { Store(0x07000000, bpp8 ? 0x2308u : 0x0308u); } // 8x8 source in a 16x16 affine bounding box.
+			Store(0x07000006, transposed || quarterTurn ? 0u : diagonal); Store(0x0700000E, quarterTurn ? diagonal : transposed ? 0x100u : 0u);
+			Store(0x07000016, quarterTurn ? 0x10000u - diagonal : transposed ? 0x100u : 0u); Store(0x0700001E, transposed || quarterTurn ? 0u : diagonal); // Signed 8.8 inverse matrix.
+			if(romPath.Contains("mosaic")) {
+				Store(0x07000000, bpp8 ? 0x3108u : 0x1108u);
+				Store(0x0400004C, 0x0100); // OBJ horizontal mosaic repeats pairs; vertical size remains one.
+			}
+		}
 		if(overlap) {
-			for(uint row = 0; row < 8; row++) { Store(0x06010020 + row * 4, 0x22222222u, true); }
-			Store(0x07000008, 8); Store(0x0700000A, 15); Store(0x0700000C, 1);
+			for(uint row = 0; row < 8; row++) { Store(0x06010020 + row * 4, romPath.Contains("lower-reveal-mosaic") ? 0x12121212u : romPath.Contains("vmosaic") && row % 2 != 0 ? 0x11111111u : 0x22222222u, true); }
+			Store(0x07000008, 8); Store(0x0700000A, romPath.Contains("lower-reveal") ? 8u : 15u); Store(0x0700000C, 1);
+			if(romPath.Contains("lower-reveal") && romPath.Contains("semi")) {
+				Store(0x07000008, 0x0408); // Lower OBJ forces alpha blend with backdrop; upper OBJ stays ordinary.
+				Store(0x04000050, 0x2000); Store(0x04000052, 0x0808);
+			}
+			if(romPath.Contains("priority1")) { Store(0x0700000C, 0x0401); }
+			if(romPath.Contains("priority3")) { Store(0x0700000C, 0x0C01); }
+			if(romPath.Contains("lower-reveal-mosaic")) { Store(0x07000008, 0x1008); Store(0x0400004C, 0x0100); }
+			if(romPath.Contains("mosaic-clipped")) { Store(0x0700000A, 9); }
+			if(romPath.Contains("lower-reveal-vmosaic")) { Store(0x07000008, 0x1008); Store(0x0400004C, 0x1000); }
 		}
 		if(window != 0) {
 			Store(0x04000040, window == 1 ? 0x0C10u : 0x0A0Eu); // Mask right or middle columns.
@@ -472,6 +604,12 @@ internal static class GameplayFixture
 		}
 		uint bitmapDisplay = romPath.Contains("bitmap3") ? 0x1443u : romPath.Contains("bitmap5") ? 0x1445u : romPath.Contains("page1") ? 0x1454u : 0x1444u;
 		Store(0x04000000, background == 4 ? bitmapDisplay : background == 3 ? 0x1442u : window != 0 ? 0x3040u : background != 0 ? 0x1140u : 0x1040u);
+		if(romPath.Contains("bg-between")) {
+			Store(0x05000002, 0x7C1F); // Magenta BG0 at priority 1, between OBJ priorities 0 and 3.
+			for(uint row = 0; row < 8; row++) { Store(0x06000000 + row * 4, 0x11111111u, true); }
+			Store(0x04000008, 0x0101); // Screen block 1, tile 0 throughout the zero-initialized map.
+			Store(0x04000000, 0x1140);
+		}
 		if(romPath.Contains("page1-live")) {
 			Load(0, 0x04000004); Load(3, 16); Load(4, bitmapDisplay); Load(5, 0x04000000);
 			int loop = instructions.Count;
@@ -495,6 +633,13 @@ internal static class GameplayFixture
 		Console.WriteLine($"PASS: {Path.GetFileName(romPath)}, GBA live capture, HD replacement, transparent/partial-alpha backdrop, and disable restoration.");
 	}
 
+	public static void RunPcePrioritySuite(string dllPath, string romPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunPce(Path.ChangeExtension(romPath, "opaque-bg-front.pce"));
+		RunPce(Path.ChangeExtension(romPath, "opaque-bg-behind.pce"));
+		RunPce(Path.ChangeExtension(romPath, "png-background-behind.pce"), background: true);
+	}
 	private static void RunPce(string romPath, bool wide = false, byte clockMode = 0, bool mirror = false, bool background = false)
 	{
 		byte[] rom = new byte[8192];
@@ -513,10 +658,18 @@ internal static class GameplayFixture
 				: word % 64 < 16 ? romPath.Contains("holes") ? (ushort)0xFFFE : (ushort)0xFFFF : (ushort)0);
 		}
 		Register(0, 0x2000); code.AddRange(new byte[] { 0x03, 2 });
-		Word(72); Word(40); Word(0x80); Word(mirror ? (ushort)0x880 : wide ? (ushort)0x180 : (ushort)0x80);
+		Word(72); Word(40); Word(0x80); Word(romPath.Contains("bg-behind") || romPath.Contains("background-behind") ? (ushort)0 : mirror ? (ushort)0x880 : wide ? (ushort)0x180 : (ushort)0x80);
 		for(int word = 4; word < 256; word++) { Word(0); }
 		Store(0x0402, 1); Store(0x0403, 1); Store(0x0404, 0x38); Store(0x0405, 0);
 		if(mirror) { Store(0x0404, 7); Store(0x0405, 0); }
+		if(romPath.Contains("opaque-bg")) {
+			Register(0, 0); code.AddRange(new byte[] {0x03, 2});
+			for(int tile = 0; tile < 1024; tile++) { Word(1); }
+			Register(0, 16); code.AddRange(new byte[] {0x03, 2});
+			for(int row = 0; row < 16; row++) { Word(row < 8 ? (ushort)0x00FF : (ushort)0); }
+			Store(0x0402, 1); Store(0x0403, 0); Store(0x0404, 7); Store(0x0405, 0);
+			background = true;
+		}
 		Register(0x0F, 0x10); Register(0x13, 0x2000); Register(5, background ? (ushort)0xC0 : (ushort)0x40);
 		code.AddRange(new byte[] { 0x80, 0xFE });
 		code.CopyTo(rom, 0); rom[0x1FFE] = 0; rom[0x1FFF] = 0xE0;

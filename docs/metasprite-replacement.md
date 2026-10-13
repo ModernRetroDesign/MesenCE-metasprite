@@ -1,7 +1,215 @@
 # Metasprite replacement development
 
+## Future plan: independent PNG background priority layers
+
+### Planned background control: hide original layer
+
+User approved adding a per-replacement "Hide original layer" toggle to the agenda.
+Implementation is pending. When enabled and the replacement is active (including
+matching all configured CPU memory conditions), suppress the assigned native
+layer's tile artwork. Transparent PNG areas reveal lower backgrounds, sprites or
+the backdrop according to native composition rules, rather than the suppressed
+tiles. Keep the layer's scrolling, priority, clipping and hardware-effect rules
+for the replacement artwork. When disabled, retain the current PNG-over-native
+overlay behavior. Restore native artwork automatically when the replacement is
+disabled or its conditions stop matching. Define deterministic behavior when
+multiple active replacements share a native layer, and verify alpha, lower-layer
+reveal, priority and activation/deactivation across each supported system.
+
+User requested that this extension be recorded for future development. Implementation
+is deferred; it is not a completion requirement for the current background workflow.
+
+Extend PNG backgrounds with independent composition positions inspired by HDnes
+`BackgroundsByPriority`. The current HDnes code provides four groups of ten slots
+(40 total), including `BehindBgPriority` in addition to the three originally discussed:
+
+- 0–9: below sprites marked behind the native background.
+- 10–19: above those sprites, below the native background.
+- 20–29: above the native background, below foreground sprites.
+- 30–39: above foreground sprites.
+
+Keep native tilemap layer selection, composition position and order within the
+position as separate settings. Reuse PNG placement, scrolling, wrapping, alpha
+and explicitly configured CPU memory conditions. Preserve existing native-layer
+replacement behavior as the default. Replacement PNG alpha must govern artwork
+visibility independently of original sprite transparency.
+
+Target NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. NES maps most directly to
+the four HDnes positions. Other systems need adapters for their background/sprite
+priority rules. GBA and SNES need positions relative to selected native layers or
+hardware priorities, rather than forcing all sprites into two categories. Respect
+windows, clipping and hardware effects; SNES additionally needs defined main/subscreen
+and color-math participation. Capture hidden native layers where necessary to insert
+artwork correctly. A final foreground overlay is the simplest common position.
+
+Validate overlapping PNG order, opaque/partial/transparent artwork, native and
+replacement sprites at each insertion position, scrolling, clipping, memory gating
+and disable restoration across supported modes. Rendering cost depends on active
+overlapping artwork, not merely the available slot count; performance investigation
+remains deferred under the user's existing instruction.
+
+## Full PNG canvas implementation (in progress)
+
+Background PNG priority now uses adapter-supplied sprite-class metadata in the
+shared direct-color compositor. Artwork on an occluding background layer remains
+above behind-background replacement canvases, including their oversized margins;
+PNG alpha blends that layer over the replacement. NES, GB/GBC, PCE, SMS and WS
+supply their respective priority rules. WonderSwan BG0 stays below sprites while
+BG1 covers its low-priority sprite classes. GBA/SNES retain their separate staged
+layer/effect compositors. Native alpha regression, live PCE priority cases and
+cross-system Debug gameplay checks pass; broader live partial-background-alpha
+transitions remain to verify.
+
+The user selected full-canvas replacement as the addition method. A default or
+conditional alternate PNG that is larger than the exported metasprite must use
+its complete canvas automatically. Its scale and PNG origin align it with the
+recognized group's origin; the original member bounds must not crop the artwork.
+This requires no separate addition definitions, attached-PNG editor or opt-in
+switch. Existing PNG import, load and alternate navigation remain the workflow.
+
+The shared compositor now removes matched source pixels before drawing complete
+replacement canvases in hardware order. This fixes crossing replacements where
+an original transparent texel previously allowed the lower replacement to win
+inside native bounds, despite an opaque front PNG. Native regression cases cover
+opaque, transparent and partial-alpha front PNGs in either pack order. GBA and
+supported SNES paths also implement full-canvas composition; their remaining
+hardware-mode and effect gaps are tracked in the completion audit.
+NES, GB/GBC, single-VDC PCE, SMS and WonderSwan adapters capture destination eligibility, including opaque foreground
+backgrounds, sprite ordering and screen/left-column clipping. Margins blend PNG
+alpha over the composed destination; transparent margins do not erase it. The
+frontmost hardware member supplies the group's expansion priority, and overlapping
+expanded instances compose back-to-front. Default and conditional alternate
+artwork share this path. No new pack schema version or additional editor controls are required.
+
+GBA uses member rectangles to assign priority, OAM order and semitransparency
+within a replacement canvas. Each pixel inherits the nearest member rectangle;
+overlapping rectangles and equal distances resolve by OBJ priority, then OAM
+order. Thus oversized margins have a deterministic priority without using the
+original sprite alpha as a mask. Transparent PNG pixels reveal the remaining
+native OBJ/background layers. Mixed-priority groups have native regression
+coverage and a live two-member fixture covering overlap ordering, PNG alpha,
+shifted origin and oversized margins against a background between their priorities.
+
+GB/GBC now captures expanded destination background eligibility and native OBJ
+occluders. A frame-local draw order preserves DMG hardware-X ordering with OAM
+ties, and GBC OAM ordering. This value is independent of persistent graphic
+recognition. Native checks explicitly exercise these order differences and
+behind-background gating. Live whole-frame oversized-canvas checks pass for the
+seven existing GB/GBC fixtures in Debug and Release, including banked palettes,
+source holes, scrolling and window backgrounds. The existing live fixtures use
+transparent native backgrounds; opaque-background and overlapping native OBJ
+priority are covered by synthetic compositor checks rather than new ROM cases.
+
+Native compositor checks pass for oversized artwork at 1x/2x/3x, shifted origins,
+transparent/partial-alpha margins, destination masks/occlusion and oversized
+alternates. Debug and Release live gameplay suites pass for all seven systems. Their NES
+mapper 0 (NROM) and SMS Mode 4 fixtures now include whole-frame oversized-canvas
+checks, including repeated SMS instances, zoom, scroll, native foreground priority,
+left-edge masking and NES overscan. These are runtime checks rather than a new
+visible-desktop import test.
+
+Single-VDC PCE now uses the shared full-canvas path and passes the existing live
+fixtures in Debug and Release; explicit opaque-background front/behind cases and
+SuperGrafx dual-VDC capture remain unfinished. SNES full-canvas integration now
+uses main/subscreen layer composition before color math. Mixed-priority groups and
+unreplaced lower hardware sprites revealed through PNG holes still need explicit coverage.
+
+SNES full-canvas preparation now records independent destination OBJ permissions
+for main and subscreens after window masking, the current BG-mode mapping of all
+four OBJ priorities, and OBJ color-math permission. Decoded fetched fragments
+record priority code, palette and fetch order; reconstruction retains these
+without adding them to graphic matching. No-math hires expansion maps the source
+subscreen's permission to its output phase and disables the unused secondary
+screen. Native tests verify metadata transfer and phase mapping. These fields
+now feed expanded composition. Matched source pixels are removed, complete PNGs
+are sampled in output coordinates, and each screen resolves PNG-alpha outcomes
+in destination OAM order against its destination background priority. Unreplaced
+captured OBJ winners retain their color and priority. Color math and brightness
+then apply to each main/subscreen outcome. Native checks cover window masking,
+background priority, fixed-color math, alpha, source removal and crossings in
+both pack orders. Three Debug/Release live lowres whole-frame cases verify 21x21 PNGs at scale
+2 with shifted origins and partial edges; the focused `--snes-canvas` suite also
+covers native-bound math, windows, subscreen effects and rotated overlap.
+The evaluation's first OAM sprite is latched through the fetch/draw pipeline and
+captured per destination pixel. Each canvas chooses its frontmost matched member
+relative to that latch, independent of the number of fetched tiles elsewhere in
+the frame. Native regression cases deliberately reverse fetch counts and change
+the destination latch; the live rotated-OAM case checks the captured latch.
+Expanded hires/interlace math, mixed-priority groups, live changes to rotation
+across scanlines and revealing uncaptured lower native OBJ pixels still need coverage.
+
+Nine no-math hires cases now verify the full PNG canvas in Debug and Release:
+BG modes 5/6, pseudo-hires, both screens, OBJ windows and scrolled BG replacement.
+The whole-frame oracle starts from the captured destination with the source OBJ
+removed, blends a shifted 21x21 PNG at scale 2 only in eligible phases, and
+requires visible pixels outside the original bounds. It waits for complete frame
+restoration before checking background PNGs. `--snes-hires-canvas` runs these nine
+supported cases; `--snes-hires` retains the two additional interlace probes, which
+still fail because capture is unavailable. Passing the focused command does not
+establish interlace or hires color-math support.
+
+Interlace preparation now includes `MapFieldWithoutMath`, a native helper that
+maps one field to its even or odd output rows and clears replacement eligibility
+on the inactive field. Native checks cover both parities, repeated use of the
+same output buffer, retained BG capture, recognition rows and configured memory
+samples, and rejection of unsupported math. This helper is not attached to the
+runtime frame yet. Woven output needs both fields' independent recognition data;
+OBJ interlace also fetches alternating source rows and changes displayed sprite
+height, so its geometry must be handled before interlace activation.
+
+GBA full-canvas preparation now captures per-sprite OBJ priority and hardware
+semi-transparency on decoded row fragments, and preserves those fields during
+candidate reconstruction. They remain independent of graphic content matching.
+Each destination pixel records whether OBJ is enabled by the display and active
+window, independent of original source alpha. Native tests cover reconstruction
+of all four priority values and both blend modes. The focused
+`--gba-capture-metadata` Debug/Release live suite verifies capture and window permission with
+ordinary, source-hole, overlap, transparent-source and brightness fixtures.
+GBA now queues complete matched canvases and composes their PNG-alpha outcomes
+with destination backgrounds before native color effects. Hardware priority and
+OAM order decide OBJ ordering; an OBJ blends with a background rather than another
+OBJ. Native-only fallback outcomes retain five-bit effect rounding. Native checks
+cover window masking, background priority, brightness, transparent source removal
+and crossing canvases in both pack orders. Two whole-frame live cases verify
+21x21 PNGs at scale 2 with shifted origins and partial native edges. Six capture
+and eight affine/bitmap background cases pass in Debug and Release. Expanded
+affine OBJ/mosaic, hardware blend and mixed-priority multi-member groups still
+need broader live coverage; native sprites revealed below PNG holes remain a gap.
+
+WonderSwan full-canvas capture records four destination classes for front/behind
+foreground sprites and inside/outside the OBJ window. Opaque foreground pixels
+reject behind-foreground artwork; native sprite order supplies occlusion.
+Eleven Debug/Release live cases verify full-frame PNG composition and restoration
+in color modes 0x80 (2bpp), 0xC0 (planar 4bpp) and 0xE0 (packed 4bpp), including
+background scroll/window composition, fully occluded artwork and both OBJ window
+sides. The monochrome renderer uses the same capture integration but still needs
+a dedicated live fixture. Run the focused cases with `--gameplay-ws` and the core
+DLL path in the managed MetaSprites test runner.
+Sprite PNG dimensions no longer have to be divisible by the selected scale.
+Default and alternate artwork retain every PNG pixel, including partial native
+texels at the right/bottom edges. Alternate creation keeps the selected scale
+rather than resetting it to one. The shared loader, save preflight and native
+packet parser accept these canvases within the existing 1..8192 dimension and
+1..10 scale limits. Background wrap canvases retain their whole-texel validation.
+
+All eight hidden Sprite Viewer configurations pass import, fractional preview
+bounds and persistence for 17x19 default/alternate PNGs at scale two. Routed scale
+editing and alternate navigation also preserve fractional canvases. Native tests
+check the final corner pixel at scales two/three, complete default/alternate
+packet payloads and rejection of truncated packets. PNG decoding preserves all
+256 alpha values and still rejects corrupt images and out-of-range scales.
+Debug and Release live NES/GB/GBC/SMS whole-frame checks now include an extra
+right/bottom PNG pixel at scale two. Both full gameplay suites pass. Debug/Release
+UI builds pass with zero warnings/errors, and both native cores build successfully.
+
+Verification must cover oversized default and alternate PNGs, shifted origins,
+multiple scales, transparent and partial-alpha margins, overlapping instances,
+screen edges, windows and background/sprite occlusion for all seven systems.
+These checks are required before claiming full-canvas gameplay support.
+
 ## Fixture aliases and hardware coverage
 
+Development notes use neutral fixture aliases instead of commercial game titles.
 Hardware descriptions refer to the tested configuration, rather than implying
 coverage of every mapper or video mode supported by a system.
 
@@ -9,7 +217,7 @@ coverage of every mapper or video mode supported by a system.
 | --- | --- | --- |
 | Cedar | NES mapper 1 (MMC1); supplied ROM | Side-scrolling boundaries, player poses, PNG composition |
 | Flint | NES mapper 0 (NROM); generated ROM | Sprite/background replacement, fine scroll, clipping, transparency |
-| Quartz | SNES LoROM; generated ROM, BG modes 0–4 and 7 | Sprite ordering, main/subscreen backgrounds, windows, color math, identity Mode 7 coordinates |
+| Quartz | SNES LoROM; generated ROM, BG modes 0–7 | Sprite ordering, main/subscreen backgrounds, windows, color math, Mode 7 coordinates; modes 5/6 and pseudo-hires currently cover non-interlaced OBJ without color math |
 | Reed | GB/GBC ROM-only cartridge; generated ROM | DMG/CGB palettes, CGB VRAM bank 1, window and scroll/wrap |
 | Slate | GBA; generated ROM, modes 0, 2, 3, 4 and 5 | 4/8-bit OBJ artwork, windows, overlap, text background scrolling, wrapped affine BG2, indexed/direct-color bitmap BG2 |
 | Ember | PCE; generated ROM | VDC sprites/backgrounds, wide sprites, dot-clock divider variants |
@@ -21,6 +229,18 @@ coverage of every mapper or video mode supported by a system.
 The active goal was updated to contain the metasprite workflow, background layers
 and explicitly configured CPU conditions. Slowdown investigation is now outside
 that objective; earlier performance notes below are historical.
+
+SNES now maps non-interlaced hires OBJ captures to the 512x478 output while
+keeping recognition and group origins in logical sprite coordinates. Separate
+main/subscreen phase coverage preserves screen eligibility and windows; only
+replacement PNG alpha controls the artwork. Six generated LoROM fixtures pass
+per-phase native checks for modes 5/6 and pseudo-hires, including both-screen OBJ
+and main-screen windows. Native tests also cover shifted 1x PNGs, odd artwork
+scales, and lowres mirroring in a hires output grid. Hires background capture now
+also retains separate main/subscreen samples and pixel density. Three additional
+LoROM fixtures pass whole-frame checks for mode 5/6 and pseudo-hires scrolling
+background PNGs at 1x and 2x alongside OBJ artwork in Debug and Release. Hires color math and
+interlace remain unfinished and retain native rendering.
 
 Tilemap Viewer now offers Replace selected PNG. It keeps the background ID,
 name, native layer, placement, scale, scrolling/wrap settings and CPU conditions,
@@ -82,22 +302,23 @@ pass with both low (index 1) and high (index 0x81) pixel priority bits on the
 main and subscreens, checking coordinate capture, PNG sampling/composition and
 restoration. The native tests now explicitly assert BG2 fallback priority 1 or 5
 for every visible pixel, rather than inferring priority from fixture output color.
-Same-screen BG2/OBJ priority transitions, out-of-map behavior and
-hires/interlace remain incomplete.
+Same-screen BG2/OBJ priority transitions, out-of-map behavior, hires color math
+and backgrounds, and interlace remain incomplete.
 
-Source audit identifies why SNES hires/interlace cannot currently use replacements:
+Before the hires work described above, the source audit identified these gaps:
 `SnesPpu` acquires a fixed 256x239 capture, excludes OBJ-interlace decoded rows
 and coverage, and skips detailed tiled BG capture in hires modes. Color-math
-state capture is disabled for double-width output. `MetaSpriteCompositor::Apply`
-returns the native buffer whenever the filtered output exceeds capture dimensions.
-The earlier gate is in `SnesPpu::SendFrame`: high-resolution/interlaced frames
-are sent without a metasprite capture attached. `RenderScreen` emits 512x478
+state capture was disabled for double-width output. `MetaSpriteCompositor::Apply`
+returned the native buffer whenever the filtered output exceeded capture dimensions.
+The earlier gate in `SnesPpu::SendFrame` sent high-resolution/interlaced frames
+without a metasprite capture attached. `ApplyHiResMode` emits 512x478
 output, places subscreen/main pixels in even/odd columns for hires, duplicates
 main pixels for low-resolution lines within a high-resolution frame, and maps
 rows using current-field parity and the selected deinterlace mode. Capture must
 follow those per-line mappings, including mixed-resolution frames and bob/weave
 handling; changing the SendFrame gate alone cannot enable correct replacements.
-These are implementation gaps, not merely missing tests. Extending support must
+The new output-phase adapter addresses the non-interlaced, no-math OBJ subset.
+The remaining gaps require implementation as well as tests. Extending support must
 carry both hires output phases and interlace field parity through capture, sprite
 recognition, background samples and color math; simply enlarging the capture or
 removing the OBJ-interlace guard would not preserve native rendering semantics.
@@ -196,7 +417,7 @@ The same window suite now refreshes a native snapshot, invokes the actual
 **Create meta group** button's routed click handler to save/enable the group PNG,
 sends a routed press to the actual origin preview canvas and checks both
 crosshair border bindings and persisted replacement coordinates after reload.
-With origin editing disabled, the same click leaves the anchor unchanged.
+Origin clicks are always enabled for both default and alternate PNG previews.
 
 Tilemap Viewer background saves likewise reject newer on-disk background
 definitions from another editor. A stale remove restores the layer, and a
@@ -2255,10 +2476,10 @@ The shared viewer supports Ctrl-click on the screen layout or sprite grid, or a
 rectangle selection mode. Create a group while paused on an animation pose.
 Groups receive persistent monotonically allocated IDs, an optional name, and an
 origin defaulting to bottom center. Set the origin numerically or click the group
-preview with origin editing enabled. Save group edits explicitly.
+preview; origin clicking is always enabled. Save group edits explicitly.
 
 Export captures transparent previews independently of the viewer background.
-Import accepts a canvas whose dimensions are divisible by its chosen scale (1–10),
+Import accepts a full canvas at its chosen scale (1–10), including partial native texels,
 up to 8192 pixels per dimension, and copies the replacement into the pack folder.
 Artwork can be larger than the captured group. Its independent origin aligns to
 the captured group's world origin. A uniform enlargement of an exported canvas
@@ -2273,7 +2494,7 @@ Selection records the displayed copy of wrapped sprites, so selecting across the
 left or top screen edge preserves nearby relative positions in the exported canvas.
 
 Definitions are saved under the configured HD pack folder:
-`MetaSprites/<ROM SHA1>/<CPU type>/groups.json`.
+`MetaSprites/<CPU type>/<ROM SHA1>/groups.json`.
 This separates games with the same filename and separates multiple processors in
 a console. Snapshots contain sprite pixels and relative coordinates, rather than
 OAM indices or VRAM addresses. The first matcher uses exact RGBA snapshots and

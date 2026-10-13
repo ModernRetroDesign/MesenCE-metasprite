@@ -499,8 +499,14 @@ void GbPpu::RunDrawCycle()
 				metaPixel->Window = _fetchWindow;
 				metaPixel->BackgroundSample = _metaBgFifo[_bgFifo.Position];
 				metaPixel->BackgroundSample.Valid &= !_insertGlitchBgPixel && !cfg.DisableBackground && (_state.CgbEnabled || _state.BgEnabled);
+				metaPixel->BackgroundOverlayOccludesClasses = _state.CgbEnabled && !_state.BgEnabled ? 0 : (entry.Attributes & 0x80) ? 3 : 2;
 				metaPixel->VisibleSprite = -1;
 				if(_state.SpritesEnabled && !cfg.DisableSprites) {
+					metaPixel->ExpandedSpriteClasses = entry.Color == 0 || (_state.CgbEnabled && !_state.BgEnabled) ? 3 : !(entry.Attributes & 0x80) ? 1 : 0;
+					if(sprite.Color != 0) {
+						int id = _spriteIndexes[sprite.Index] / 4;
+						metaPixel->ExpandedSpriteOccluder = (int16_t)(IsCgbEnabled() ? id : _spriteX[sprite.Index] * 64 + id);
+					}
 					for(auto row = _metaSpriteFrame->Rows.rbegin(); row != _metaSpriteFrame->Rows.rend(); ++row) {
 						if(row->Scanline != _state.Scanline) { break; }
 						if(_drawnPixels < row->X || _drawnPixels >= row->X + 8) { continue; }
@@ -785,6 +791,7 @@ void GbPpu::PushSpriteToPixelFifo()
 	if(_metaSpriteFrame && _state.SpritesEnabled) {
 		MetaSpriteRow row;
 		row.Sprite = _spriteIndexes[spriteIndex] / 4;
+		row.ExpansionOrder = IsCgbEnabled() ? row.Sprite : _spriteX[spriteIndex] * 64 + row.Sprite;
 		row.ScanlineSpriteIndex = spriteIndex;
 		row.X = _drawnPixels;
 		row.Y = (int16_t)_spriteY[spriteIndex] - 16;

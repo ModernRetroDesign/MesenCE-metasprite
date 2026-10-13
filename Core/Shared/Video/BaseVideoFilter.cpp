@@ -107,14 +107,27 @@ FrameInfo BaseVideoFilter::SendFrame(uint16_t* ppuOutputBuffer, uint32_t frameNu
 	FrameInfo frameInfo = GetFrameInfo();
 	_frameInfo = frameInfo;
 	UpdateBufferSize();
+	bool deferBlend = DeferFrameBlend();
+	if(!_blendFilter.IsEnabled() || _emu->GetRewindManager()->IsRewinding() || _emu->IsPaused()
+		|| deferBlend != _blendDeferred || frameInfo.Width != _blendWidth || frameInfo.Height != _blendHeight) {
+		_blendFilter.ResetHistory();
+	}
+	_blendDeferred = deferBlend; _blendWidth = frameInfo.Width; _blendHeight = frameInfo.Height;
 	ApplyFilter(ppuOutputBuffer);
 
-	if(_blendFilter.IsEnabled() && !_emu->GetRewindManager()->IsRewinding() && !_emu->IsPaused()) {
+	if(!DeferFrameBlend() && _blendFilter.IsEnabled() && !_emu->GetRewindManager()->IsRewinding() && !_emu->IsPaused()) {
 		_blendFilter.ApplyFilter(_outputBuffer, _bufferSize, _frame.FrameNumber);
 	}
 
 	_ppuOutputBuffer = nullptr;
 	return frameInfo;
+}
+
+void BaseVideoFilter::FinishFrameBlend(uint32_t* output, uint32_t size)
+{
+	if(DeferFrameBlend() && _blendFilter.IsEnabled() && !_emu->GetRewindManager()->IsRewinding() && !_emu->IsPaused()) {
+		_blendFilter.ApplyFilter(output, size, _frame.FrameNumber);
+	}
 }
 
 uint32_t* BaseVideoFilter::GetOutputBuffer()

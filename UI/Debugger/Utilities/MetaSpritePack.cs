@@ -43,12 +43,12 @@ public sealed class MetaSpritePack
 	public int AlignPoseArtworkOrigins(MetaSpriteGroup source)
 	{
 		if(source.PoseFamilyId == 0 || !Groups.Contains(source) || source.ReplacementPath.Length == 0) { return 0; }
-		MetaSpritePlacement.ValidateCanvas(source.ReplacementWidth, source.ReplacementHeight, source.ReplacementScale);
+		MetaSpritePlacement.ValidateSpriteCanvas(source.ReplacementWidth, source.ReplacementHeight, source.ReplacementScale);
 		int offsetX = source.ReplacementOriginX - source.ReplacementWidth / source.ReplacementScale / 2;
 		int offsetY = source.ReplacementOriginY - source.ReplacementHeight / source.ReplacementScale;
 		var poses = Groups.Where(g => g != source && g.PoseFamilyId == source.PoseFamilyId && g.ReplacementPath.Length > 0).ToList();
 		// Validate the entire family before changing any anchors.
-		foreach(var pose in poses) { MetaSpritePlacement.ValidateCanvas(pose.ReplacementWidth, pose.ReplacementHeight, pose.ReplacementScale); }
+		foreach(var pose in poses) { MetaSpritePlacement.ValidateSpriteCanvas(pose.ReplacementWidth, pose.ReplacementHeight, pose.ReplacementScale); }
 		foreach(var pose in poses) {
 			pose.ReplacementOriginX = pose.ReplacementWidth / pose.ReplacementScale / 2 + offsetX;
 			pose.ReplacementOriginY = pose.ReplacementHeight / pose.ReplacementScale + offsetY;
@@ -340,8 +340,15 @@ public static class MetaSpritePlacement
 
 	public static void ValidateCanvas(int width, int height, int artworkScale)
 	{
-		if(artworkScale < 1 || artworkScale > 10 || width < 1 || height < 1 || width > 8192 || height > 8192 || width % artworkScale != 0 || height % artworkScale != 0) {
+		ValidateSpriteCanvas(width, height, artworkScale);
+		if(width % artworkScale != 0 || height % artworkScale != 0) {
 			throw new InvalidDataException("Use a PNG canvas up to 8192 pixels with dimensions divisible by the chosen scale (1–10).");
+		}
+	}
+	public static void ValidateSpriteCanvas(int width, int height, int artworkScale)
+	{
+		if(artworkScale < 1 || artworkScale > 10 || width < 1 || height < 1 || width > 8192 || height > 8192) {
+			throw new InvalidDataException("Use a PNG canvas from 1 to 8192 pixels and a scale from 1 to 10.");
 		}
 	}
 }
@@ -421,7 +428,7 @@ public static class MetaSpriteRuntimePacket
 		writer.Write(groups.Count);
 		foreach(var group in groups) {
 			var artwork = loadArtwork(group);
-			MetaSpritePlacement.ValidateCanvas(artwork.Width, artwork.Height, group.ReplacementScale);
+			MetaSpritePlacement.ValidateSpriteCanvas(artwork.Width, artwork.Height, group.ReplacementScale);
 			if(artwork.Pixels.Length != checked(artwork.Width * artwork.Height)) { throw new InvalidDataException("Invalid replacement pixel buffer."); }
 			writer.Write(group.Id);
 			writer.Write(group.OriginX); writer.Write(group.OriginY);
@@ -449,7 +456,7 @@ public static class MetaSpriteRuntimePacket
 					alternate.Validate();
 					if(loadAlternate == null) { throw new InvalidDataException("Alternate PNG loader is required."); }
 					var image = loadAlternate(alternate);
-					MetaSpritePlacement.ValidateCanvas(image.Width, image.Height, alternate.Scale);
+					MetaSpritePlacement.ValidateSpriteCanvas(image.Width, image.Height, alternate.Scale);
 					if(image.Pixels.Length != checked(image.Width * image.Height)) { throw new InvalidDataException("Invalid alternate PNG pixels."); }
 					writer.Write(alternate.OriginX); writer.Write(alternate.OriginY); writer.Write(alternate.Scale);
 					writer.Write(image.Width); writer.Write(image.Height);

@@ -46,7 +46,7 @@ public partial class SpriteViewerViewModel
 		if(SelectedMetaAlternate is not MetaAlternateArtwork alternate) { return true; }
 		try {
 			MetaMemoryConditionText.Parse(MetaAlternateConditionsText); alternate.Validate();
-			if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
+			if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateSpriteCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
 			return true;
 		} catch(InvalidDataException ex) { MetaStatus = "Correct the alternate settings before changing PNG: " + ex.Message; return false; }
 	}
@@ -115,8 +115,7 @@ public partial class SpriteViewerViewModel
 			if(group.AlternateArtwork.Count >= 64) { MetaStatus = "A group can contain up to 64 alternate PNGs."; return; }
 			using Bitmap bitmap = new(path);
 			int scale = Math.Max(1, group.ReplacementScale);
-			if(bitmap.PixelSize.Width % scale != 0 || bitmap.PixelSize.Height % scale != 0) { scale = 1; }
-			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, scale);
+			MetaSpritePlacement.ValidateSpriteCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, scale);
 			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-alternate-{Guid.NewGuid():N}.png");
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
@@ -159,7 +158,7 @@ public partial class SpriteViewerViewModel
 			// Keep this alternate's name, conditions, scale and alignment when changing its artwork.
 			MetaMemoryConditionText.Parse(MetaAlternateConditionsText);
 			using Bitmap bitmap = new(path);
-			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, alternate.Scale);
+			MetaSpritePlacement.ValidateSpriteCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, alternate.Scale);
 			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-alternate-{Guid.NewGuid():N}.png");
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
