@@ -42,7 +42,7 @@ public:
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t magic = Read();
-		if(magic != 0x3150534D && magic != 0x3250534D && magic != 0x3350534D) { throw std::runtime_error("Invalid metasprite packet"); }
+		if(magic != 0x3150534D && magic != 0x3250534D && magic != 0x3350534D && magic != 0x3450534D) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t count = Read();
 		if(count > 1024) { throw std::runtime_error("Too many groups"); }
 		std::vector<MetaSpriteReplacement> groups;
@@ -69,11 +69,13 @@ public:
 				if(conditions > 64) { throw std::runtime_error("Too many memory conditions"); }
 				for(uint32_t c = 0; c < conditions; c++) {
 					uint32_t address = Read(), value = Read(), mask = Read();
+					uint32_t comparison = magic == 0x3450534D ? Read() : 0;
+					if(comparison > 5) { throw std::runtime_error("Invalid comparison operator"); }
 					if(value > 255 || mask > 255) { throw std::runtime_error("Invalid memory condition byte"); }
-					group.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+					group.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 				}
 			}
-			if(magic == 0x3350534D) {
+			if(magic == 0x3350534D || magic == 0x3450534D) {
 				uint32_t alternates = Read();
 				if(alternates > 64) { throw std::runtime_error("Too many alternate images"); }
 				for(uint32_t a = 0; a < alternates; a++) {
@@ -85,8 +87,10 @@ public:
 					int conditions = Dimension(64);
 					for(int c = 0; c < conditions; c++) {
 						uint32_t address = Read(), value = Read(), mask = Read();
+						uint32_t comparison = magic == 0x3450534D ? Read() : 0;
+						if(comparison > 5) { throw std::runtime_error("Invalid alternate comparison operator"); }
 						if(value > 255 || mask > 255) { throw std::runtime_error("Invalid alternate condition byte"); }
-						alternate.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+						alternate.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 					}
 					group.AlternateArtwork.push_back(std::move(alternate));
 				}

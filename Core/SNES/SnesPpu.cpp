@@ -208,6 +208,9 @@ void SnesPpu::GetTilemapData(uint8_t layerIndex, uint8_t columnIndex)
 		int height = (config.LargeTiles ? 512 : 256) * (config.DoubleHeight ? 2 : 1);
 		_metaTileSamples[layerIndex][columnIndex] = {
 			(((columnIndex * 8 + hScroll) & ~7) * (hiResMode ? 2 : 1)) & (width - 1), (realY + vScroll) & (height - 1), layerIndex, true};
+		_metaTileSamples[layerIndex][columnIndex].ScrollX = config.HScroll * (hiResMode ? 2 : 1);
+		_metaTileSamples[layerIndex][columnIndex].ScrollY = vScroll;
+		_metaTileSamples[layerIndex][columnIndex].ScrollWrapX = width; _metaTileSamples[layerIndex][columnIndex].ScrollWrapY = height;
 	}
 }
 
@@ -1440,6 +1443,7 @@ void SnesPpu::RenderTilemapMode7()
 		}
 
 		MetaBackgroundSample metaSample {xOffset, yOffset, layerIndex, true};
+		metaSample.ScrollX = hScroll; metaSample.ScrollY = vScroll;
 		uint16_t colorIndex;
 		uint8_t priority;
 		if constexpr(layerIndex == 1) {

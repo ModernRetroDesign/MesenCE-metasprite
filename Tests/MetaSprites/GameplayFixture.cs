@@ -43,14 +43,19 @@ internal static class GameplayFixture
 	[DllImport("MesenCore.dll", CallingConvention = CallingConvention.StdCall)]
 	private static extern uint RunMetaSpriteSnesHiresCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 
-	public static void Run(string dllPath, string romPath)
+	public static void Run(string dllPath, string romPath, bool gameboyOnly = false)
 	{
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
-		foreach(int variant in new[] { 0, 1, 2, 3, 4, 5, 6 }) {
-		bool color = variant > 0 && variant != 6, banked = variant == 2;
-		bool window = variant == 4, scrolled = variant >= 3 && variant <= 5, holes = variant >= 5;
+		foreach(int variant in new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }) {
+		bool color = variant > 0 && variant != 6 && variant != 8, banked = variant == 2;
+		bool window = variant == 4 || variant >= 7 && variant <= 10, scrolled = variant >= 3 && variant <= 5 || variant >= 7 && variant <= 10, holes = variant == 5 || variant == 6;
 		string gbPath = variant == 6 ? Path.ChangeExtension(romPath, "holes.gb") : variant == 5 ? Path.ChangeExtension(romPath, "holes-scroll.gbc") : window ? Path.ChangeExtension(romPath, "window-scroll.gbc") : scrolled ? Path.ChangeExtension(romPath, "scroll.gbc") : banked ? Path.ChangeExtension(romPath, "banked.gbc") : color ? Path.ChangeExtension(romPath, ".gbc") : romPath;
 		byte[] rom = new byte[32768];
+		if(variant == 7) { gbPath = Path.ChangeExtension(romPath, "window-underlay-scroll.gbc"); }
+		if(variant == 8) { gbPath = Path.ChangeExtension(romPath, "window-scroll.gb"); }
+		if(variant == 9) { gbPath = Path.ChangeExtension(romPath, "window-object-underlay-scroll.gbc"); }
+		if(variant == 10) { gbPath = Path.ChangeExtension(romPath, "window-object-behind-underlay-scroll.gbc"); }
+		if(variant == 11) { gbPath = Path.ChangeExtension(romPath, "native-overlap.gbc"); }
 		rom[0x143] = color ? (byte)0xC0 : (byte)0;
 		rom[0x100] = 0xC3; rom[0x101] = 0x50; rom[0x102] = 0x01;
 		// Original test program: turn off LCD, clear OAM, draw one opaque 8x8 object, then loop.
@@ -67,10 +72,24 @@ internal static class GameplayFixture
 		if(banked) { code.AddRange(new byte[] { 0xAF, 0xE0, 0x4F, 0x3E, 0x0B, 0xEA, 0x03, 0xFE }); }
 		// OAM: Y=24 (screen 8), X=16 (screen 8), pattern 1, palette 0.
 		code.AddRange(new byte[] { 0x3E, 24, 0xEA, 0x00, 0xFE, 0x3E, 16, 0xEA, 0x01, 0xFE, 0x3E, 1, 0xEA, 0x02, 0xFE });
+		if(variant == 9 || variant == 10) { code.AddRange(new byte[] { 0x3E, 46, 0xEA, 0, 0xFE, 0x3E, 58, 0xEA, 1, 0xFE }); }
+		if(variant == 10) { code.AddRange(new byte[] { 0x3E, 0x80, 0xEA, 3, 0xFE }); }
 		if(color) {
 			// GBC palette RAM: blue backdrop (RGB555 0x7C00), red OBJ color 1 (0x001F).
 			code.AddRange(new byte[] { 0x3E, 0x80, 0xE0, 0x68, 0xAF, 0xE0, 0x69, 0x3E, 0x7C, 0xE0, 0x69,
 				0x3E, banked ? (byte)0x9A : (byte)0x82, 0xE0, 0x6A, 0x3E, 0x1F, 0xE0, 0x6B, 0xAF, 0xE0, 0x6B });
+		}
+		if(variant == 11) {
+			// OAM 1 shares OAM 0's position/pattern; OBJ palette 1 makes it yellow.
+			code.AddRange(new byte[] { 0x3E, 24, 0xEA, 4, 0xFE, 0x3E, 16, 0xEA, 5, 0xFE,
+				0x3E, 1, 0xEA, 6, 0xFE, 0xEA, 7, 0xFE, 0x3E, 0x8A, 0xE0, 0x6A,
+				0x3E, 0xFF, 0xE0, 0x6B, 0x3E, 3, 0xE0, 0x6B });
+		}
+		if(variant == 7 || variant == 9 || variant == 10) {
+			// BG palette 1 is yellow; the separate window map keeps palette 0 blue.
+			code.AddRange(new byte[] { 0x3E, 0x88, 0xE0, 0x68, 0x3E, 0xFF, 0xE0, 0x69, 0x3E, 0x03, 0xE0, 0x69,
+				0x3E, 1, 0xE0, 0x4F, 0x21, 0, 0x98, 0x01, 0, 4,
+				0x3E, 1, 0x22, 0x0B, 0x78, 0xB1, 0x20, 0xF8, 0xAF, 0xE0, 0x4F });
 		}
 		if(scrolled) { code.AddRange(new byte[] { 0x3E, 253, 0xE0, 0x43, 0x3E, 250, 0xE0, 0x42 }); }
 		if(window) { code.AddRange(new byte[] { 0x3E, 47, 0xE0, 0x4B, 0x3E, 24, 0xE0, 0x4A }); }
@@ -82,8 +101,9 @@ internal static class GameplayFixture
 		File.WriteAllBytes(gbPath, rom);
 		uint result = RunMetaSpriteGameplayTest(gbPath);
 		if(result != 31) { throw new Exception($"Game Boy gameplay integration failed: flags 0x{result:X}, expected 0x1F."); }
-		Console.WriteLine($"PASS: generated {(window ? "GBC window / scrolled background" : scrolled ? "GBC fine scroll / wraparound" : banked ? "GBC VRAM bank 1 / OBJ palette 3" : color ? "GBC" : "Game Boy")} ROM, live capture, all HD replacement pixels, transparent/partial-alpha backdrop, and disabling during emulation.");
+		Console.WriteLine($"PASS: {Path.GetFileName(gbPath)} (ROM-only mapper, {(color ? "GBC" : "DMG")}), live capture, HD replacement, transparent/partial-alpha backdrop, and disabling during emulation.");
 		}
+		if(gameboyOnly) { return; }
 		RunSms(Path.ChangeExtension(romPath, ".sms"));
 		RunSms(Path.ChangeExtension(romPath, "holes.sms"));
 		RunSms(Path.ChangeExtension(romPath, "holes-zoom.sms"), true);
@@ -390,6 +410,7 @@ internal static class GameplayFixture
 		byte[] rom = new byte[16 + 16384 + 8192];
 		new byte[] {0x4E, 0x45, 0x53, 0x1A, 1, 1}.CopyTo(rom, 0);
 		List<byte> code = new() {0x78, 0xD8, 0xA2, 0xFF, 0x9A};
+		if(romPath.Contains("sprite0-raster")) { code.AddRange(new byte[] {0xA9, 13, 0x85, 0x60, 0xA9, 3, 0x85, 0x61, 0xA9, 0xF6, 0x85, 0x62, 0xA9, 0xFF, 0x85, 0x63}); }
 		void Store(ushort address, byte value) => code.AddRange(new byte[] {0xA9, value, 0x8D, (byte)address, (byte)(address >> 8)});
 		Store(0x2000, 0); Store(0x2001, 0);
 		code.AddRange(new byte[] {0x2C, 0x02, 0x20, 0x10, 0xFB, 0x2C, 0x02, 0x20, 0x10, 0xFB});
@@ -399,13 +420,22 @@ internal static class GameplayFixture
 		Store(0x2003, 0); Store(0x4014, 2);
 		Store(0x2006, 0x3F); Store(0x2006, 0); Store(0x2007, 0);
 		Store(0x2006, 0x3F); Store(0x2006, 0x11); Store(0x2007, 1);
+		if(romPath.Contains("sprite0-raster")) { Store(0x2006, 0x3F); Store(0x2006, 1); Store(0x2007, 0); }
 		Store(0x2006, 0x20); Store(0x2006, 0); Store(0x2005, scroll ? (byte)253 : (byte)0); Store(0x2005, scroll ? (byte)237 : (byte)0);
 		Store(0x2000, scroll ? (byte)3 : (byte)0); Store(0x2001, mask ? (byte)0x1C : background ? (byte)0x1E : (byte)0x14);
 		ushort loop = (ushort)(0x8000 + code.Count);
+		if(romPath.Contains("sprite0-raster")) {
+			// NROM: sprite 0 hit signals a horizontal split; PNG tracking must not alter the PPU event.
+			code.AddRange(new byte[] {0x2C, 0x02, 0x20, 0x10, 0xFB});
+			Store(0x2005, 0); Store(0x2005, 0);
+			code.AddRange(new byte[] {0x2C, 0x02, 0x20, 0x70, 0xFB, 0x2C, 0x02, 0x20, 0x50, 0xFB});
+			Store(0x2005, 24); Store(0x2005, 0);
+		}
 		code.AddRange(new byte[] {0x4C, (byte)loop, (byte)(loop >> 8)});
 		code.CopyTo(rom, 16);
 		for(int vector = 0x3FFA; vector < 0x4000; vector += 2) { rom[16 + vector] = 0; rom[16 + vector + 1] = 0x80; }
 		for(int row = 0; row < 8; row++) { rom[16 + 16384 + 16 + row] = romPath.Contains("transparent") ? (byte)0 : romPath.Contains("holes") ? (byte)0xFE : (byte)0xFF; }
+		if(romPath.Contains("sprite0-raster")) { for(int row = 0; row < 8; row++) { rom[16 + 16384 + row] = 255; } }
 		File.WriteAllBytes(romPath, rom);
 		uint result = RunMetaSpriteNesCaptureTest(romPath);
 		if(result != 7) { throw new Exception($"NES live capture/replacement failed: flags {result}."); }
@@ -417,6 +447,10 @@ internal static class GameplayFixture
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
 		RunWs(Path.ChangeExtension(romPath, "mono.ws"), 0);
 		RunWs(Path.ChangeExtension(romPath, "mono-background-scroll.ws"), 0, background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "mono-background-scroll-speed.ws"), 0, background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "background-scroll-speed.wsc"), background: true, scroll: true);
+		RunWs(Path.ChangeExtension(romPath, "background-window-underlay.wsc"), background: true, window: true);
+		RunWs(Path.ChangeExtension(romPath, "background-window-underlay-clear.wsc"), background: true, window: true);
 		RunWs(Path.ChangeExtension(romPath, "mono-background-window.ws"), 0, background: true, window: true);
 		RunWs(Path.ChangeExtension(romPath, "mono-background-outside-window-occluded.ws"), 0, background: true, window: true, outsideWindow: true, occluded: true);
 		RunWs(Path.ChangeExtension(romPath, "mono-obj-window.ws"), 0, spriteWindow: true);
@@ -433,6 +467,11 @@ internal static class GameplayFixture
 		RunWs(Path.ChangeExtension(romPath, "obj-window.wsc"), spriteWindow: true);
 		RunWs(Path.ChangeExtension(romPath, "obj-outside-window.wsc"), spriteWindow: true, spriteOutside: true);
 	}
+	public static void RunNesRasterSuite(string dllPath, string romPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		RunNes(Path.ChangeExtension(romPath, "sprite0-raster.nes"), background: true);
+	}
 	private static void RunWs(string romPath, byte videoMode = 0x80, bool background = false, bool scroll = false, bool window = false, bool outsideWindow = false, bool occluded = false, bool spriteWindow = false, bool spriteOutside = false)
 	{
 		byte[] rom = new byte[65536];
@@ -443,6 +482,12 @@ internal static class GameplayFixture
 		Word(0xFE00, 0x000F); Word(0xFF02, 0x0F00);
 		if(videoMode == 0) { Port(0x1C, 0xF0); Port(0x20, 0); Port(0x30, 0x10); } // Shade 0 white, shade 1 black; BG0 white and OBJ palette 8 black.
 		if(background) { Word(0xFE02, 0x000F); }
+		if(romPath.Contains("underlay")) {
+			Word(0xFE02, 0x0FF0); Word(0xFE22, 0x000F); Port(7, 0x10); // BG0 yellow; separate BG1 map/palette blue; backdrop blue.
+			bool clearForeground = romPath.Contains("underlay-clear");
+			for(ushort tile = 0; tile < 1024; tile++) { Word((ushort)(0x0800 + tile * 2), clearForeground ? (ushort)0x0801 : (ushort)0x0200); }
+			if(clearForeground) { for(ushort row = 0; row < 8; row++) { Word((ushort)(0x2010 + row * 2), 0); } }
+		}
 		for(ushort row = 0; row < 8; row++) {
 			if(videoMode == 0 || videoMode == 0x80) { Word((ushort)(0x2000 + row * 2), 0x00FF); }
 			else {
@@ -638,6 +683,7 @@ internal static class GameplayFixture
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
 		RunPce(Path.ChangeExtension(romPath, "opaque-bg-front.pce"));
 		RunPce(Path.ChangeExtension(romPath, "opaque-bg-behind.pce"));
+		RunPce(Path.ChangeExtension(romPath, "opaque-bg-behind-hide.pce"));
 		RunPce(Path.ChangeExtension(romPath, "png-background-behind.pce"), background: true);
 	}
 	private static void RunPce(string romPath, bool wide = false, byte clockMode = 0, bool mirror = false, bool background = false)

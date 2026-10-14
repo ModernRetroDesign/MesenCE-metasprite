@@ -41,7 +41,7 @@
 
 		<dv:RefreshTimingView DataContext="{Binding RefreshTiming}" DockPanel.Dock="Bottom" />
 
-		<ScrollViewer DockPanel.Dock="Right" IsVisible="{Binding Config.ShowSettingsPanel}">
+		<ScrollViewer DockPanel.Dock="Right" MaxWidth="320" HorizontalScrollBarVisibility="Disabled" IsVisible="{Binding Config.ShowSettingsPanel}">
 			<StackPanel Margin="3">
 				<Grid RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,Auto" IsVisible="{Binding IsTilemapInfoVisible}">
 					<TextBlock Text="{l:Translate lblDisplayMode}" />
@@ -55,7 +55,7 @@
 					<c:EnumComboBox SelectedItem="{Binding Config.Background}" Width="100" Grid.Column="1" Grid.Row="1" />
 				</Grid>
 				<c:GroupBox Header="Background PNG replacements" DataContext="{Binding BackgroundEditor}" x:DataType="dvm:MetaBackgroundEditorViewModel"><StackPanel>							<TextBlock Text="Background PNG layers" FontWeight="Bold" />
-							<TextBlock Text="Background layers: NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. Export uses the selected tilemap and current display settings." TextWrapping="Wrap" />
+							<TextBlock Text="Background layers: NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan.&#10;Export saves the full selected tilemap with transparency to the default pack folder." TextWrapping="Wrap" />
 							<Button Content="Export selected tilemap PNG" Click="OnExportMetaBackground" />
 							<Button Content="Import background PNG" Click="OnImportMetaBackground" />
 							<Button Content="Replace selected PNG" Click="OnReplaceMetaBackground" ToolTip.Tip="Keep the selected background's placement, scale and CPU conditions while loading new artwork." />
@@ -75,13 +75,59 @@
 							</StackPanel>
 							<TextBlock Text="PNG scale" />
 							<NumericUpDown Minimum="1" Maximum="10" Value="{Binding SelectedMetaBackground.ArtworkScale}" />
-							<CheckBox Content="Follow hardware scrolling" IsChecked="{Binding SelectedMetaBackground.FollowScroll}" />
+							<CheckBox Content="Follow selected scroll source" IsChecked="{Binding SelectedMetaBackground.FollowScroll}" />
+							<TextBlock Text="Scroll source" />
+							<ComboBox SelectedIndex="{Binding SelectedMetaBackground.ScrollSourceIndex}">
+								<ComboBoxItem Content="Hardware scrolling" /><ComboBoxItem Content="CPU memory camera" />
+							</ComboBox>
+							<StackPanel IsVisible="{Binding SelectedMetaBackground.UseCpuCamera}" IsEnabled="{Binding SelectedMetaBackground.FollowScroll}">
+								<TextBlock Text="{Binding SavedCameraInfo}" TextWrapping="Wrap" />
+								<Button Content="Save camera for this game" Click="OnSaveCpuCamera" IsVisible="{Binding SelectedMetaBackground.CameraEditable}" />
+								<Button Content="Link saved camera to this background" Click="OnLinkCpuCamera" IsEnabled="{Binding HasSavedCamera}" IsVisible="{Binding SelectedMetaBackground.CameraEditable}" />
+								<Button Content="Unlink camera (keep settings)" Click="OnUnlinkCpuCamera" IsVisible="{Binding SelectedMetaBackground.UseSavedCamera}" />
+								<StackPanel IsVisible="{Binding SelectedMetaBackground.CameraEditable}">
+								<TextBlock Text="X camera format" />
+								<ComboBox SelectedIndex="{Binding SelectedMetaBackground.CameraX.Format}">
+									<ComboBoxItem Content="Fixed" /><ComboBoxItem Content="8-bit unsigned" /><ComboBoxItem Content="16-bit, low byte first" /><ComboBoxItem Content="16-bit, high byte first" /><ComboBoxItem Content="Pixel offset + page" />
+								</ComboBox>
+								<TextBlock Text="X start / pixel offset address (hex)" TextWrapping="Wrap" />
+								<TextBox Text="{Binding SelectedMetaBackground.CameraX.AddressHex}" />
+								<StackPanel IsVisible="{Binding SelectedMetaBackground.CameraX.IsPaged}">
+									<TextBlock Text="X page address (hex)" /><TextBox Text="{Binding SelectedMetaBackground.CameraX.PageAddressHex}" />
+									<CheckBox Content="Signed page (FF = −1)" IsChecked="{Binding SelectedMetaBackground.CameraX.SignedPage}" />
+									<TextBlock Text="X page size (pixels)" /><NumericUpDown Minimum="1" Maximum="65536" Value="{Binding SelectedMetaBackground.CameraX.PageSize}" />
+								</StackPanel>
+								<TextBlock Text="Y camera format" />
+								<ComboBox SelectedIndex="{Binding SelectedMetaBackground.CameraY.Format}">
+									<ComboBoxItem Content="Fixed" /><ComboBoxItem Content="8-bit unsigned" /><ComboBoxItem Content="16-bit, low byte first" /><ComboBoxItem Content="16-bit, high byte first" /><ComboBoxItem Content="Pixel offset + page" />
+								</ComboBox>
+								<TextBlock Text="Y start / pixel offset address (hex)" TextWrapping="Wrap" />
+								<TextBox Text="{Binding SelectedMetaBackground.CameraY.AddressHex}" />
+								<StackPanel IsVisible="{Binding SelectedMetaBackground.CameraY.IsPaged}">
+									<TextBlock Text="Y page address (hex)" /><TextBox Text="{Binding SelectedMetaBackground.CameraY.PageAddressHex}" />
+									<CheckBox Content="Signed page (FF = −1)" IsChecked="{Binding SelectedMetaBackground.CameraY.SignedPage}" />
+									<TextBlock Text="Y page size (pixels)" /><NumericUpDown Minimum="1" Maximum="65536" Value="{Binding SelectedMetaBackground.CameraY.PageSize}" />
+								</StackPanel>
+								</StackPanel>
+								<TextBlock Text="{Binding CameraReadout}" TextWrapping="Wrap" />
+							</StackPanel>
+							<TextBlock Text="Scroll speed X / Y&#10;1 = native, 0 = fixed, negative = reverse" TextWrapping="Wrap" />
+							<StackPanel Orientation="Horizontal" IsEnabled="{Binding SelectedMetaBackground.FollowScroll}">
+								<NumericUpDown Width="105" Minimum="-16" Maximum="16" Increment="0.1" FormatString="0.###" Value="{Binding SelectedMetaBackground.ScrollSpeedX}" />
+								<NumericUpDown Width="105" Minimum="-16" Maximum="16" Increment="0.1" FormatString="0.###" Value="{Binding SelectedMetaBackground.ScrollSpeedY}" />
+							</StackPanel>
 							<CheckBox Content="Wrap horizontally" IsChecked="{Binding SelectedMetaBackground.WrapX}" />
+							<StackPanel IsVisible="{Binding IsNes}">
+								<CheckBox Content="Ignore raster scroll changes (NES)" IsChecked="{Binding SelectedMetaBackground.IgnoreRasterScroll}" IsEnabled="{Binding SelectedMetaBackground.UseHardwareScroll}" />
+								<TextBlock Text="Reference scanline below the HUD (0–239)" TextWrapping="Wrap" />
+								<NumericUpDown Minimum="0" Maximum="239" Value="{Binding SelectedMetaBackground.ScrollReferenceScanline}" IsEnabled="{Binding SelectedMetaBackground.IgnoreRasterScroll}" />
+							</StackPanel>
 							<CheckBox Content="Wrap vertically" IsChecked="{Binding SelectedMetaBackground.WrapY}" />
 							<CheckBox Content="Enable background in gameplay" IsChecked="{Binding SelectedMetaBackground.Enabled}" />
-							<TextBlock Text="CPU memory conditions (hex, all must match)" />
-							<TextBox Text="{Binding MemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 = 01 / FF" />
-							<TextBlock Text="One ADDRESS = VALUE / MASK per line. Mask defaults to FF. At least one condition is required for gameplay replacement; all must match." TextWrapping="Wrap" />
+							<CheckBox Content="Hide original layer while active" IsChecked="{Binding SelectedMetaBackground.HideOriginalLayer}" />
+							<TextBlock Text="CPU memory conditions&#10;Hex values; all conditions must match" TextWrapping="Wrap" />
+							<TextBox Text="{Binding MemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 == 01 / FF" />
+							<TextBlock Text="One ADDRESS OP VALUE / MASK per line.&#10;Operators: ==, !=, &gt;, &lt;, &gt;=, &lt;=.&#10;Mask defaults to FF and applies to both values before unsigned comparison.&#10;Gameplay replacement requires at least one condition. All conditions must match." TextWrapping="Wrap" />
 							<Button Content="Save and apply background edits" Click="OnSaveMetaBackgrounds" />
 							<Button Content="Reload saved backgrounds" Click="OnReloadMetaBackgrounds" ToolTip.Tip="Reload layers from disk, discarding unsaved background edits." />
 <TextBlock Text="{Binding MetaStatus}" TextWrapping="Wrap" /></StackPanel></c:GroupBox>

@@ -89,6 +89,7 @@ void WsPpu::ProcessEndOfScanline()
 		_state.Mode = _state.NextMode;
 		_state.Scanline = 0;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
+		if(_metaFrame && _emu->GetVideoDecoder()->HasMetaBackgroundLayers()) { _metaFrame->BackgroundUnderlays.resize(WsConstants::ScreenWidth * WsConstants::ScreenHeight); }
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Ws);
 		_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 		_showIcons = _emu->GetSettings()->GetWsConfig().LcdShowIcons;
@@ -112,6 +113,10 @@ void WsPpu::DrawScanline()
 	std::fill(_rowData[rowIndex], _rowData[rowIndex] + WsConstants::ScreenWidth, PixelData {});
 	if(_metaFrame) {
 		std::fill(_metaBackground[rowIndex], _metaBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+		std::fill(_metaLowerBackground[rowIndex], _metaLowerBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+		std::fill(_metaLowerBackgroundSamples[rowIndex], _metaLowerBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
+		std::fill(_metaForegroundBackground[rowIndex], _metaForegroundBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
+		std::fill(_metaForegroundBackgroundSamples[rowIndex], _metaForegroundBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
 		std::fill(_metaBackgroundSamples[rowIndex], _metaBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
 		std::fill(_metaSpriteIds[rowIndex], _metaSpriteIds[rowIndex] + WsConstants::ScreenWidth, -1);
 		std::fill(_metaReplacementCoverage[rowIndex], _metaReplacementCoverage[rowIndex] + WsConstants::ScreenWidth, MetaCoverage{});
@@ -143,6 +148,7 @@ void WsPpu::DrawSprites()
 			// Bits distinguish foreground priority and each side of OBJ window.
 			pixel.ExpandedSpriteClasses = !_state.SpriteWindow.EnabledLatch ? 15
 				: _state.SpriteWindow.IsInsideWindow(x, scanline) ? 3 : 12;
+			pixel.ExpandedSpriteClassesWithoutBackground = pixel.ExpandedSpriteClasses;
 		}
 	}
 
@@ -281,9 +287,25 @@ void WsPpu::DrawBackground()
 			}
 
 			//"In two bit per pixel modes: Palettes 0-3 and 8-11 are opaque. For these, index zero is treated as opaque."
+			if constexpr(layerIndex == 0) {
+				if(_metaFrame) {
+					auto& sample = _metaLowerBackgroundSamples[rowIndex][i];
+					sample = {(x + i - cycle) & 255, y, 0, true};
+					sample.ScrollX = layer.ScrollXLatch; sample.ScrollY = layer.ScrollYLatch; sample.ScrollWrapX = sample.ScrollWrapY = 256;
+				}
+			}
+			if constexpr(layerIndex == 1) {
+				if(_metaFrame) {
+					auto& sample = _metaForegroundBackgroundSamples[rowIndex][i];
+					sample = {(x + i - cycle) & 255, y, 1, true};
+					sample.ScrollX = layer.ScrollXLatch; sample.ScrollY = layer.ScrollYLatch; sample.ScrollWrapX = sample.ScrollWrapY = 256;
+				}
+			}
 			if(color != 0 || (!(palette & 0x04) && mode <= WsVideoMode::Color2bpp)) {
 				if(_metaFrame) {
 					_metaBackground[rowIndex][i] = {palette, color, (uint8_t)(layerIndex + 1)};
+					if constexpr(layerIndex == 0) { _metaLowerBackground[rowIndex][i] = _metaBackground[rowIndex][i]; }
+					if constexpr(layerIndex == 1) { _metaForegroundBackground[rowIndex][i] = _metaBackground[rowIndex][i]; }
 					if constexpr(layerIndex == 1) {
 						_metaReplacementCoverage[rowIndex][i] = _metaHighPriorityCoverage[rowIndex][i];
 						_metaFrame->Pixels[scanline * WsConstants::ScreenWidth + i].ExpandedSpriteClasses &= 5;
@@ -291,6 +313,8 @@ void WsPpu::DrawBackground()
 					auto& sample = _metaBackgroundSamples[rowIndex][i];
 					sample.X = (x + i - cycle) & 255; sample.Y = y;
 					sample.Layer = layerIndex; sample.Valid = true;
+					sample.ScrollX = layer.ScrollXLatch; sample.ScrollY = layer.ScrollYLatch;
+					sample.ScrollWrapX = sample.ScrollWrapY = 256;
 					if(_rowData[rowIndex][i].Priority >= layerIndex + 1) { continue; }
 					_metaSpriteIds[rowIndex][i] = -1;
 				}

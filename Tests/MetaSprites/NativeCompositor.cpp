@@ -105,6 +105,280 @@ static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 
 int main(int argc, char** argv)
 {
+	for(uint8_t op = 0; op < 6; op++) { for(uint8_t mask : std::initializer_list<uint8_t>{0, 15, 240, 255}) {
+		for(uint8_t a : std::initializer_list<uint8_t>{0, 1, 127, 128, 255}) { for(uint8_t b : std::initializer_list<uint8_t>{0, 1, 127, 128, 255}) {
+			uint8_t left = a & mask, right = b & mask;
+			bool expected = op == 0 ? left == right : op == 1 ? left != right : op == 2 ? left > right : op == 3 ? left < right : op == 4 ? left >= right : left <= right;
+			assert(MetaMemoryCondition::Matches({{7, b, mask, op}}, {{7, a}}) == expected);
+			assert(!MetaMemoryCondition::Matches({{7, b, mask, op}}, {}));
+		} }
+	} }
+	if(argc > 1 && argv[1][0] != '-') {
+		std::ifstream spriteFile(std::string(argv[1]) + ".comparisons", std::ios::binary);
+		std::vector<uint8_t> spritePacket((std::istreambuf_iterator<char>(spriteFile)), {});
+		std::ifstream bgFile(std::string(argv[1]) + ".background.comparisons", std::ios::binary);
+		std::vector<uint8_t> bgPacket((std::istreambuf_iterator<char>(bgFile)), {});
+		auto groups = MetaSpritePacket(spritePacket.data(), spritePacket.size()).Parse();
+		auto backgrounds = MetaBackgroundPacket(bgPacket.data(), bgPacket.size()).Parse();
+		assert(groups.size() == 1 && backgrounds.size() == 1);
+		for(uint8_t op = 0; op < 6; op++) { assert(groups[0].MemoryConditions[op].Comparison == op && backgrounds[0].MemoryConditions[op].Comparison == op); }
+		MetaMemorySnapshot snapshot = {{0u, uint8_t(42)}, {1u, uint8_t(43)}, {2u, uint8_t(43)}, {3u, uint8_t(41)}, {4u, uint8_t(42)}, {5u, uint8_t(42)}, {6u, uint8_t(1)}};
+		assert(MetaMemoryCondition::Matches(groups[0].MemoryConditions, snapshot));
+		assert(MetaMemoryCondition::Matches(backgrounds[0].MemoryConditions, snapshot));
+		assert(groups[0].SelectArtwork(snapshot).Artwork[0] == 0xFFFFFFFF);
+		snapshot[6] = 0; assert(groups[0].SelectArtwork(snapshot).Artwork[0] == 0xFF00FF00);
+		for(size_t size = 0; size < spritePacket.size(); size++) { bool rejected = false; try { MetaSpritePacket(spritePacket.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		for(size_t size = 0; size < bgPacket.size(); size++) { bool rejected = false; try { MetaBackgroundPacket(bgPacket.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		spritePacket[spritePacket.size() - 4] = 6; bgPacket[bgPacket.size() - 4] = 6;
+		bool rejectedSprite = false, rejectedBackground = false;
+		try { MetaSpritePacket(spritePacket.data(), spritePacket.size()).Parse(); } catch(const std::runtime_error&) { rejectedSprite = true; }
+		try { MetaBackgroundPacket(bgPacket.data(), bgPacket.size()).Parse(); } catch(const std::runtime_error&) { rejectedBackground = true; }
+		assert(rejectedSprite && rejectedBackground);
+		std::ifstream scrollFile(std::string(argv[1]) + ".background.scroll", std::ios::binary);
+		std::vector<uint8_t> scrollPacket((std::istreambuf_iterator<char>(scrollFile)), {});
+		auto scrolling = MetaBackgroundPacket(scrollPacket.data(), scrollPacket.size()).Parse();
+		assert(scrolling[0].ScrollSpeedX == 500 && scrolling[0].ScrollSpeedY == -1000 && scrolling[0].MemoryConditions[5].Comparison == 5);
+		for(size_t size = 0; size < scrollPacket.size(); size++) { bool rejected = false; try { MetaBackgroundPacket(scrollPacket.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		MetaBackgroundReplacement image; image.Id = 1; image.Width = image.Height = 256; image.WrapX = image.WrapY = true;
+		image.Artwork.resize(256 * 256); for(uint32_t p = 0; p < image.Artwork.size(); p++) { image.Artwork[p] = 0xFF000000 | p; }
+		MetaBackgroundSample sample {2, 255, 0, true}; sample.ScrollX = 253; sample.ScrollY = 250; sample.ScrollWrapX = sample.ScrollWrapY = 256;
+		image.ScrollSpeedX = 500; image.ScrollSpeedY = -1000; uint32_t color;
+		assert(image.Sample(sample, 5, 5, 0, 0, 1, color) && color == (0xFF000000 | (11 * 256 + 131)));
+		image.ScrollSpeedX = image.ScrollSpeedY = 0;
+		assert(image.Sample(sample, 5, 5, 0, 0, 1, color) && color == (0xFF000000 | (5 * 256 + 5)));
+		image.ScrollSpeedX = 2000; image.ScrollSpeedY = 1000;
+		assert(image.Sample(sample, 5, 5, 0, 0, 1, color) && color == (0xFF000000 | (255 * 256 + 255)));
+		image.FollowScroll = false; image.ScrollSpeedX = 2000;
+		assert(image.Sample(sample, 5, 5, 0, 0, 1, color) && color == (0xFF000000 | (5 * 256 + 5)));
+		std::ifstream rasterFile(std::string(argv[1]) + ".background.raster", std::ios::binary);
+		std::vector<uint8_t> rasterPacket((std::istreambuf_iterator<char>(rasterFile)), {});
+		auto rasterLayers = MetaBackgroundPacket(rasterPacket.data(), rasterPacket.size()).Parse();
+		assert(rasterLayers[0].IgnoreRasterScroll && rasterLayers[0].ScrollReferenceScanline == 47 && rasterLayers[0].ScrollSpeedX == 500);
+		for(size_t size = 0; size < rasterPacket.size(); size++) { bool rejected = false; try { MetaBackgroundPacket(rasterPacket.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		rasterPacket[52] = 240; bool rejectedRaster = false;
+		try { MetaBackgroundPacket(rasterPacket.data(), rasterPacket.size()).Parse(); } catch(const std::runtime_error&) { rejectedRaster = true; } assert(rejectedRaster);
+		std::ifstream hideFile(std::string(argv[1]) + ".background.hide", std::ios::binary);
+		std::vector<uint8_t> hidePacket((std::istreambuf_iterator<char>(hideFile)), {});
+		auto hidden = MetaBackgroundPacket(hidePacket.data(), hidePacket.size()).Parse();
+		assert(hidden[0].HideOriginalLayer && hidden[0].IgnoreRasterScroll && hidden[0].ScrollSpeedX == 500);
+		for(size_t size = 0; size < hidePacket.size(); size++) { bool rejected = false; try { MetaBackgroundPacket(hidePacket.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		hidePacket[56] = 2; bool rejectedHide = false; try { MetaBackgroundPacket(hidePacket.data(), hidePacket.size()).Parse(); } catch(const std::runtime_error&) { rejectedHide = true; } assert(rejectedHide);
+		std::cout << "PASS: six comparison operators, masked/missing bytes, MSP4/MBG3 transfer, alternate selection, truncation and invalid operator rejection." << std::endl;
+	}
+	for(int path = 0; path < 3; path++) {
+		MetaSpriteFrame frame(2, 2); frame.GbaColorEffects = path == 0; frame.SnesColorEffects = path != 0;
+		if(path == 1) { frame.SnesBackgrounds.resize(4); }
+		frame.MemorySnapshot = {{0x60u, uint8_t(3)}, {0x70u, uint8_t(2)}};
+		for(int y = 0; y < 2; y++) { for(int x = 0; x < 2; x++) {
+			auto& pixel = frame.Pixels[y * 2 + x]; pixel.Brightness = 15; pixel.GbaFallbackCaptured = pixel.SnesFallbackCaptured = true;
+			pixel.BackgroundSample = {x + 80, y + 90, 0, true}; pixel.GbaBackgroundSamples[0] = pixel.BackgroundSample;
+			pixel.GbaBackgroundLayers[0] = {31, 0, true}; pixel.SnesFallbackMainLayer = 0; pixel.SnesFallbackMainFlags = 2;
+			pixel.SnesFallbackMainColor = 31;
+			if(path == 1) {
+				auto& screen = frame.SnesBackgrounds[y * 2 + x]; screen.Captured = true; screen.MainPriority = 2;
+				screen.Layers[0].Sample = pixel.BackgroundSample; screen.Layers[0].Color = 31; screen.Layers[0].Priority = 2;
+				screen.Layers[0].Main = screen.Layers[0].Opaque = true;
+			}
+		} }
+		MetaBackgroundReplacement camera; camera.Id = 1; camera.Width = camera.Height = 8; camera.WrapX = camera.WrapY = true;
+		camera.UseCpuCamera = true; camera.CameraX = {1, 0x60, 0, 256}; camera.CameraY = {1, 0x70, 0, 256};
+		for(int y = 0; y < 8; y++) { for(int x = 0; x < 8; x++) { camera.Artwork.push_back(0xFF000000u | (x << 16) | (y << 8)); } }
+		MetaSpriteCompositor compositor; compositor.SetReplacements({}, {camera}); uint32_t original[4] = {};
+		const auto* output = compositor.Apply(original, 2, 2, frame);
+		for(int y = 0; y < 2; y++) { for(int x = 0; x < 2; x++) { assert(output[y * 2 + x] == (0xFF000000u | ((x + 3) << 16) | ((y + 2) << 8))); } }
+	}
+	std::cout << "PASS: GBA, SNES layer composition and SNES fallback use CPU camera coordinates instead of hardware scroll." << std::endl;
+	for(bool snes : {false, true}) {
+		MetaSpriteFrame frame(4, 1); frame.GbaColorEffects = !snes; frame.SnesColorEffects = snes;
+		if(snes) { frame.SnesBackgrounds.resize(4); }
+		for(int x = 0; x < 4; x++) {
+			auto& pixel = frame.Pixels[x]; pixel.GbaFallbackCaptured = true; pixel.SnesFallbackCaptured = true;
+			pixel.Brightness = 15;
+			pixel.GbaBackgroundSamples[0] = {x, 0, 0, true}; pixel.GbaBackgroundSamples[1] = {x, 0, 1, true};
+			pixel.GbaBackgroundLayers[0] = {31, 0, true}; pixel.GbaBackgroundLayers[1] = {0x7C00, 1, true};
+			if(snes) {
+				auto& screen = frame.SnesBackgrounds[x]; screen.Captured = true; screen.MainPriority = 2;
+				screen.Layers[0].Sample = {x, 0, 0, true}; screen.Layers[0].Color = 31; screen.Layers[0].Priority = 2; screen.Layers[0].Main = screen.Layers[0].Opaque = true;
+				screen.Layers[1].Sample = {x, 0, 1, true}; screen.Layers[1].Color = 0x7C00; screen.Layers[1].Priority = 1; screen.Layers[1].Main = screen.Layers[1].Opaque = true;
+			}
+		}
+		frame.MemorySnapshot = {{0u, uint8_t(1)}};
+		MetaBackgroundReplacement layer; layer.Id = 1; layer.Width = 4; layer.Height = 1; layer.HideOriginalLayer = true;
+		layer.Artwork = {0, 0x8000FF00, 0xFF00FF00, 0}; layer.MemoryConditions = {{0, 1, 255}};
+		MetaSpriteCompositor compositor; compositor.SetReplacements({}, {layer});
+		std::vector<uint32_t> original(4, 0xFFFF0000);
+		const auto* output = compositor.Apply(original.data(), 4, 1, frame);
+		assert(output[0] == 0xFF0000FF && output[1] == 0xFF00807F && output[2] == 0xFF00FF00 && output[3] == 0xFF0000FF);
+		frame.MemorySnapshot[0] = 0; output = compositor.Apply(original.data(), 4, 1, frame);
+		assert(output[0] == original[0] && output[1] == original[1]);
+	}
+	{
+		MetaSpriteFrame frame(4, 1); frame.MemorySnapshot = {{0u, uint8_t(1)}};
+		frame.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFFFF00}}}; frame.DecodedRows[0].ExpansionClass = 2;
+		for(int x = 0; x < 4; x++) {
+			auto& pixel = frame.Pixels[x]; pixel.BackgroundColor = 31; pixel.NativeBackdropColor = 0x7C00; pixel.NativeBackdropCaptured = true;
+			pixel.BackgroundSample = {x, 0, 0, true}; pixel.ExpandedSpriteClasses = 1; pixel.ExpandedSpriteClassesWithoutBackground = 3; pixel.BackgroundOverlayOccludesClasses = 2;
+		}
+		frame.Pixels[0].ExpandedSpriteOccluder = 0;
+		MetaBackgroundReplacement layer; layer.Id = 1; layer.Width = 4; layer.Height = 1; layer.HideOriginalLayer = true; layer.MemoryConditions = {{0, 1, 255}};
+		layer.Artwork = {0, 0x8000FF00, 0xFF00FF00, 0};
+		MetaSpriteCompositor compositor; compositor.SetReplacements({}, {layer});
+		std::vector<uint32_t> original(4, 0xFFFF0000);
+		const auto* output = compositor.Apply(original.data(), 4, 1, frame, 0, 0, [](uint16_t color) { return color == 31 ? 0xFFFF0000u : 0xFF0000FFu; });
+		assert(output[0] == 0xFFFFFF00 && output[1] == 0xFF00807F && output[2] == 0xFF00FF00 && output[3] == 0xFF0000FF);
+		frame.MemorySnapshot[0] = 0; output = compositor.Apply(original.data(), 4, 1, frame, 0, 0, [](uint16_t) { return 0xFFFF0000u; });
+		assert(output[0] == original[0]);
+	}
+	std::cout << "PASS: hide original background reveals lower BG/native OBJ/backdrop, preserves PNG alpha and restores native artwork on condition mismatch." << std::endl;
+	{
+		std::ifstream file(std::string(argv[1]) + ".background.camera", std::ios::binary);
+		std::vector<uint8_t> packet((std::istreambuf_iterator<char>(file)), {});
+		auto parsed = MetaBackgroundPacket(packet.data(), packet.size()).Parse();
+		assert(parsed[0].UseCpuCamera && parsed[0].CameraX.Format == 4 && parsed[0].CameraX.PageAddress == 0x70 && parsed[0].CameraX.PageSize == 240);
+		for(size_t size = 0; size < packet.size(); size++) { bool rejected = false; try { MetaBackgroundPacket(packet.data(), size).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected); }
+		packet[64] = 5; bool rejected = false; try { MetaBackgroundPacket(packet.data(), packet.size()).Parse(); } catch(const std::runtime_error&) { rejected = true; } assert(rejected);
+		MetaSpriteFrame frame(1, 1); frame.MemorySnapshot = {{0x60u, uint8_t(0)}, {0x70u, uint8_t(3)}};
+		frame.Pixels[0].BackgroundSample = {0, 0, 0, true}; frame.Pixels[0].BackgroundSample.NesRasterScroll = true; frame.Pixels[0].BackgroundSample.ScrollWrapX = 512;
+		MetaBackgroundReplacement camera; camera.Id = 1; camera.Width = 2048; camera.Height = 1; camera.UseCpuCamera = true; camera.IgnoreRasterScroll = true;
+		camera.CameraX = {4, 0x60, 0x70, 256};
+		for(int x = 0; x < 2048; x++) { camera.Artwork.push_back(0xFF000000u | x); }
+		std::vector<MetaBackgroundReplacement> cameraLayers{camera}; MetaBackgroundView view(cameraLayers); view.PrepareRasterReferences(frame); uint32_t color;
+		const auto& layer = *view.Layers[0];
+		assert(view.Sample(layer, frame.Pixels[0].BackgroundSample, 0, 0, 0, 0, 1, color) && color == (0xFF000000u | 768));
+		frame.MemorySnapshot[0x70] = 4; view.PrepareRasterReferences(frame);
+		assert(view.Sample(layer, frame.Pixels[0].BackgroundSample, 0, 0, 0, 0, 1, color) && color == (0xFF000000u | 1024));
+		frame.MemorySnapshot.erase(0x70); view.PrepareRasterReferences(frame);
+		assert(!view.Sample(layer, frame.Pixels[0].BackgroundSample, 0, 0, 0, 0, 1, color));
+		MetaSpriteCompositor compositor; compositor.SetReplacements({}, {camera});
+		compositor.CaptureMemorySnapshot(frame, [](uint32_t, uint8_t& value) { value = 0; return true; });
+		assert(frame.MemorySnapshot.size() == 2 && frame.MemorySnapshot.count(0x60) && frame.MemorySnapshot.count(0x70));
+		std::cout << "PASS: MBG7 CPU camera transport, strict truncation/format validation, NES wrap/raster independence and configured-byte capture." << std::endl;
+		std::ifstream signedFile(std::string(argv[1]) + ".background.camera.signed", std::ios::binary);
+		std::vector<uint8_t> signedPacket((std::istreambuf_iterator<char>(signedFile)), {});
+		auto signedLayers = MetaBackgroundPacket(signedPacket.data(), signedPacket.size()).Parse();
+		assert(signedLayers[0].CameraX.SignedPage && !signedLayers[0].CameraY.SignedPage);
+		for(size_t size = 0; size < signedPacket.size(); size++) { bool invalid = false; try { MetaBackgroundPacket(signedPacket.data(), size).Parse(); } catch(const std::runtime_error&) { invalid = true; } assert(invalid); }
+		signedPacket[80] = 2; bool invalid = false; try { MetaBackgroundPacket(signedPacket.data(), signedPacket.size()).Parse(); } catch(const std::runtime_error&) { invalid = true; } assert(invalid);
+		cameraLayers[0].CameraX.SignedPage = true;
+		for(auto pair : {std::pair<int, int>{246, -10}, {255, -1}, {0, 0}}) {
+			frame.MemorySnapshot[0x60] = (uint8_t)pair.first; frame.MemorySnapshot[0x70] = pair.second < 0 ? uint8_t(255) : uint8_t(0);
+			view.PrepareRasterReferences(frame);
+			assert(view.Sample(layer, frame.Pixels[0].BackgroundSample, 20, 0, 0, 0, 1, color) && color == (0xFF000000u | (uint32_t)(20 + pair.second)));
+		}
+		std::cout << "PASS: MBG8 signed pages retain FF:F6=-10, cross page zero and reject invalid/truncated flags." << std::endl;
+	}
+	{
+		MetaSpriteFrame frame(2, 1); frame.BackgroundUnderlays.resize(2); frame.MemorySnapshot = {{0u, uint8_t(1)}};
+		for(int x = 0; x < 2; x++) {
+			frame.Pixels[x].BackgroundSample = {x, 0, 1, true}; frame.Pixels[x].NativeBackdropCaptured = true;
+			frame.Pixels[x].BackgroundColor = 31; frame.BackgroundUnderlays[x].Sample = {x, 0, 0, true}; frame.BackgroundUnderlays[x].Color = 0x7C00;
+		}
+		MetaBackgroundReplacement upper; upper.Id = 1; upper.Layer = 1; upper.Width = 2; upper.Height = 1; upper.HideOriginalLayer = true;
+		upper.Artwork = {0, 0x8000FF00}; upper.MemoryConditions = {{0, 1, 255}};
+		MetaSpriteCompositor compositor; compositor.SetReplacements({}, {upper}); std::vector<uint32_t> original(2, 0xFFFF0000);
+		auto convert = [](uint16_t color) { return color == 0x7C00 ? 0xFF0000FFu : color == 31 ? 0xFFFF0000u : 0xFF000000u; };
+		const auto* output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert);
+		assert(output[0] == 0xFF0000FF && output[1] == 0xFF00807F);
+		output = compositor.Apply(original.data(), 1, 1, frame, 1, 0, convert); assert(output[0] == 0xFF00807F);
+		MetaBackgroundReplacement lower; lower.Id = 2; lower.Width = lower.Height = 1; lower.WrapX = true; lower.Artwork = {0xFFFFFFFF}; lower.MemoryConditions = upper.MemoryConditions;
+		compositor.SetReplacements({}, {upper, lower}); output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert);
+		assert(output[0] == 0xFFFFFFFF && output[1] == 0xFF7FFF7F);
+		lower.HideOriginalLayer = true; lower.Artwork[0] = 0; compositor.SetReplacements({}, {upper, lower}); output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert);
+		assert(output[0] == 0xFF000000 && output[1] == 0xFF008000);
+		frame.MemorySnapshot[0] = 0; output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert); assert(output[0] == original[0]);
+		std::cout << "PASS: hidden foreground reveals retained lower BG/PNG, handles both hidden layers, cropped output and condition restoration." << std::endl;
+		frame.MemorySnapshot[0] = 1; upper.Artwork.assign(2, 0);
+		frame.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}};
+		frame.DecodedRows[0].ExpansionClass = 1;
+		frame.Pixels[0].ExpandedSpriteClassesWithoutBackground = 3;
+		frame.BackgroundUnderlays[0].SpriteEligibilityCaptured = true;
+		frame.BackgroundUnderlays[0].SpriteEligibleClasses = 0;
+		MetaSpriteReplacement sprite; sprite.ArtworkWidth = sprite.ArtworkHeight = 1; sprite.Artwork = {0xFF00FF00};
+		sprite.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		compositor.SetReplacements({sprite}, {upper}); output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert);
+		assert(output[0] == 0xFF0000FF);
+		frame.BackgroundUnderlays[0].SpriteEligibleClasses = 3;
+		output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert); assert(output[0] == 0xFF00FF00);
+		std::cout << "PASS: hiding the GB window retains revealed BG priority for replacement sprites." << std::endl;
+		frame.DecodedRows[0].ExpansionClass = 2;
+		frame.BackgroundUnderlays[0].OverlayOccludesClasses = 2;
+		lower.HideOriginalLayer = false; lower.Artwork[0] = 0x80FFFFFF;
+		compositor.SetReplacements({sprite}, {upper, lower});
+		output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert); assert(output[0] == 0xFF80FF80);
+		lower.Artwork[0] = 0; compositor.SetReplacements({sprite}, {upper, lower});
+		output = compositor.Apply(original.data(), 2, 1, frame, 0, 0, convert); assert(output[0] == 0xFF00FF00);
+		std::cout << "PASS: revealed GB background PNG alpha composites above behind-BG replacement sprites." << std::endl;
+	}
+	{
+		MetaSpriteFrame frame(2, 1);
+		frame.DecodedRows = {{0, 0, 0, 0, 1, 1, {0xFFFF0000}}, {1, 0, 0, 0, 1, 1, {0xFF0000FF}}};
+		for(auto& row : frame.DecodedRows) { row.ExpansionClass = 1; }
+		for(auto& pixel : frame.Pixels) { pixel.ExpandedSpriteClasses = 3; }
+		frame.Pixels[0].VisibleSprite = 0; frame.Pixels[0].ExpandedSpriteOccluder = 0;
+		MetaSpriteReplacement group; group.ArtworkWidth = 2; group.ArtworkHeight = 1;
+		group.Artwork = {0, 0xFF00FF00}; group.Members = {{0, 0, 1, 1, -1, {0xFFFF0000}}};
+		MetaSpriteCompositor compositor; compositor.SetGroups({group});
+		uint32_t original[] = {0xFFFF0000, 0xFF000000};
+		auto convert = [](uint16_t) { return 0xFF000000u; };
+		const auto* output = compositor.Apply(original, 2, 1, frame, 0, 0, convert);
+		assert(output[0] == 0xFF0000FF && output[1] == 0xFF00FF00);
+		group.Artwork[0] = 0x8000FF00; compositor.SetGroups({group});
+		assert(compositor.Apply(original, 2, 1, frame, 0, 0, convert)[0] == 0xFF00807F);
+		frame.DecodedRows[1].Pixels[0] = 0;
+		assert(compositor.Apply(original, 2, 1, frame, 0, 0, convert)[0] == 0xFF008000);
+		std::cout << "PASS: transparent and partial-alpha replacement reveals unreplaced lower OBJ using its native alpha and hardware order." << std::endl;
+	}
+	{
+		MetaSpriteFrame frame(3, 1); frame.BackgroundUnderlays.resize(3);
+		for(int x = 0; x < 3; x++) {
+			auto& pair = frame.BackgroundUnderlays[x];
+			pair.Sample = {x, 0, 0, true}; pair.Color = 1;
+			pair.ForegroundSample = {x, 0, 1, true}; pair.ForegroundOpaque = false;
+			frame.Pixels[x].BackgroundSample = pair.ForegroundSample;
+			frame.Pixels[x].NativeBackdropCaptured = true;
+		}
+		frame.Pixels[1].VisibleSprite = frame.Pixels[2].VisibleSprite = 0;
+		frame.Pixels[1].SpriteColor = frame.Pixels[2].SpriteColor = 2;
+		frame.Pixels[1].NativeVisibleSpriteClass = 2; frame.Pixels[2].NativeVisibleSpriteClass = 1;
+		MetaBackgroundReplacement upper; upper.Id = 1; upper.Layer = 1; upper.Width = 3; upper.Height = 1;
+		upper.Artwork.assign(3, 0x8000FF00);
+		MetaBackgroundCompositor backgrounds;
+		auto convert = [](uint16_t color) { return color == 1 ? 0xFF0000FFu : color == 2 ? 0xFFFF0000u : 0xFF000000u; };
+		std::vector<uint32_t> output(3, 0xFF0000FF);
+		assert(backgrounds.Apply(frame, {upper}, 1, output, 0, 0, convert));
+		assert(output[0] == 0xFF00807F && output[1] == 0xFF7F8000 && output[2] == 0xFFFF0000);
+		upper.Artwork.assign(3, 0); output.assign(3, 0);
+		assert(backgrounds.Apply(frame, {upper}, 1, output, 0, 0, convert));
+		assert(output[0] == 0xFF0000FF && output[1] == 0xFFFF0000 && output[2] == 0xFFFF0000);
+		std::cout << "PASS: transparent WS foreground texels accept PNG alpha and retain front/behind native OBJ priority." << std::endl;
+	}
+	{
+		MetaSpriteFrame frame(4, 3);
+		for(int y = 0; y < 3; y++) { for(int x = 0; x < 4; x++) {
+			auto& sample = frame.Pixels[y * 4 + x].BackgroundSample;
+			sample = {x + y * 4, y + 1, 0, true}; sample.ScrollX = y * 4; sample.ScrollY = 1;
+			sample.ScrollWrapX = 16; sample.ScrollWrapY = 8; sample.NesRasterScroll = true;
+		} }
+		MetaBackgroundReplacement layer; layer.Id = 1; layer.Width = 16; layer.Height = 8; layer.ScrollReferenceScanline = 1;
+		layer.Artwork.resize(128); for(uint32_t p = 0; p < 128; p++) { layer.Artwork[p] = 0xFF000000 | p; }
+		std::vector<uint32_t> original(12, 0xFF000000);
+		MetaSpriteCompositor compositor;
+		for(bool ignore : {false, true}) {
+			layer.IgnoreRasterScroll = ignore; compositor.SetReplacements({}, {layer});
+			const auto* result = compositor.Apply(original.data(), 4, 3, frame, 0, 0, [](uint16_t) { return 0xFF000000; });
+			for(int y = 0; y < 3; y++) { for(int x = 0; x < 4; x++) { assert(result[y * 4 + x] == (0xFF000000u | (uint32_t)((y + 1) * 16 + x + (ignore ? 4 : y * 4)))); } }
+		}
+		layer.ScrollSpeedX = 500; compositor.SetReplacements({}, {layer});
+		const auto* result = compositor.Apply(original.data(), 2, 2, frame, 1, 1, [](uint16_t) { return 0xFF000000; });
+		assert(result[0] == (0xFF000000 | (2 * 16 + 3)));
+		layer.ScrollSpeedX = 1000; layer.ScrollReferenceScanline = 239;
+		compositor.SetReplacements({}, {layer}); result = compositor.Apply(original.data(), 4, 3, frame, 0, 0, [](uint16_t) { return 0xFF000000; });
+		assert(result[8] == (0xFF000000 | (3 * 16 + 8)));
+		layer.ScrollReferenceScanline = 1; frame.Pixels[0].BackgroundSample.Valid = false;
+		compositor.SetReplacements({}, {layer}); result = compositor.Apply(original.data(), 4, 3, frame, 0, 0, [](uint16_t) { return 0xFF000000; });
+		assert(result[0] == original[0]);
+		std::cout << "PASS: NES uniform reference scroll, native split tracking, multipliers, cropping, missing reference fallback and clipping." << std::endl;
+	}
 	{
 		BlendFilter blend; blend.SetEnabled(true);
 		uint32_t pixels[] = {0xFFFF0000, 0xFF0000FF};
@@ -712,6 +986,9 @@ int main(int argc, char** argv)
 	MetaSpriteFramePool framePool;
 	auto firstFrame = framePool.Acquire(3, 2);
 	auto retainedFrame = firstFrame;
+	firstFrame->Pixels[0].NativeBackdropCaptured = true; firstFrame->Pixels[0].NativeBackdropColor = 0x123;
+	firstFrame->Pixels[0].ExpandedSpriteClassesWithoutBackground = 3;
+	firstFrame->BackgroundUnderlays.resize(6); firstFrame->BackgroundUnderlays[0].Color = 0x456;
 	auto secondFrame = framePool.Acquire(3, 2);
 	auto thirdFrame = framePool.Acquire(3, 2);
 	firstFrame->FrameNumber = 99; firstFrame->GbaColorEffects = firstFrame->SnesColorEffects = true; firstFrame->SpriteCoordinateScale = 2;
@@ -728,6 +1005,9 @@ int main(int argc, char** argv)
 	firstFrame.reset(); overflowFrame.reset();
 	overflowFrame = framePool.Acquire(3, 2);
 	if(overflowFrame == retainedFrame || retainedFrame->Pixels[0].VisibleSprite != 7
+		|| !retainedFrame->Pixels[0].NativeBackdropCaptured || retainedFrame->Pixels[0].NativeBackdropColor != 0x123
+		|| retainedFrame->Pixels[0].ExpandedSpriteClassesWithoutBackground != 3
+		|| retainedFrame->BackgroundUnderlays.size() != 6 || retainedFrame->BackgroundUnderlays[0].Color != 0x456
 		|| retainedFrame->Pixels[0].GbaNativeObjects.begin() == retainedFrame->Pixels[0].GbaNativeObjects.end()
 		|| retainedFrame->Pixels[0].GbaNativeObjects[0].Color != 0x03FF || !retainedFrame->Pixels[0].GbaNativeObjects[0].SemiTransparent
 		|| !retainedFrame->SnesSubOutput[0].Captured || retainedFrame->SnesSubOutput[0].MathControlX != 2) { return 1; }
@@ -736,6 +1016,9 @@ int main(int argc, char** argv)
 	auto reusedFrame = framePool.Acquire(3, 2);
 	if(reusedFrame.get() != reusableAddress || reusedFrame->FrameNumber != 0 || reusedFrame->SpriteCoordinateScale != 1 || reusedFrame->GbaColorEffects || reusedFrame->SnesColorEffects
 		|| reusedFrame->Pixels[0].VisibleSprite != -1 || reusedFrame->Pixels[0].BackgroundSample.Valid
+		|| reusedFrame->Pixels[0].NativeBackdropCaptured || reusedFrame->Pixels[0].NativeBackdropColor != 0
+		|| reusedFrame->Pixels[0].ExpandedSpriteClassesWithoutBackground != 0
+		|| !reusedFrame->BackgroundUnderlays.empty()
 		|| reusedFrame->Pixels[0].GbaCoverage.begin() != reusedFrame->Pixels[0].GbaCoverage.end()
 		|| reusedFrame->Pixels[0].GbaNativeObjects.begin() != reusedFrame->Pixels[0].GbaNativeObjects.end()
 		|| reusedFrame->Pixels[0].SnesCoverage.begin() != reusedFrame->Pixels[0].SnesCoverage.end()

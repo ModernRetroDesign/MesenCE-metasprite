@@ -36,6 +36,10 @@ private:
 
 	PixelData _rowData[2][224];
 	PixelData _metaBackground[2][224] = {};
+	PixelData _metaLowerBackground[2][224] = {};
+	MetaBackgroundSample _metaLowerBackgroundSamples[2][224] = {};
+	PixelData _metaForegroundBackground[2][224] = {};
+	MetaBackgroundSample _metaForegroundBackgroundSamples[2][224] = {};
 	MetaBackgroundSample _metaBackgroundSamples[2][224] = {};
 	int16_t _metaSpriteIds[2][224] = {};
 	struct MetaCoverage
@@ -130,8 +134,24 @@ public:
 				pixel.ReplacementEligibleSpritesHigh = _metaReplacementCoverage[rowIndex][_state.Cycle].ReplacementEligibleSpritesHigh;
 					pixel.SpriteColor = _currentBuffer[offset];
 					pixel.BackgroundColor = bg.Priority ? GetPixelRgbColor(_state.Mode, bg.Color, bg.Palette) : GetBgColor();
+					pixel.NativeBackdropColor = GetBgColor(); pixel.NativeBackdropCaptured = true;
 					pixel.BackgroundSample = _metaBackgroundSamples[rowIndex][_state.Cycle];
 					pixel.BackgroundOverlayOccludesClasses = pixel.BackgroundSample.Layer == 1 ? 10 : 0;
+					pixel.NativeVisibleSpriteClass = pixel.VisibleSprite >= 0 ? (data.Priority >= 3 ? 1 : 2) : 0;
+					if(!_metaFrame->BackgroundUnderlays.empty()) {
+						auto& lower = _metaFrame->BackgroundUnderlays[(_state.Scanline - 1) * WsConstants::ScreenWidth + _state.Cycle];
+						const auto& lowerData = _metaLowerBackground[rowIndex][_state.Cycle];
+						lower.Sample = _metaLowerBackgroundSamples[rowIndex][_state.Cycle];
+						lower.Color = lowerData.Priority ? GetPixelRgbColor(_state.Mode, lowerData.Color, lowerData.Palette) : GetBgColor();
+						lower.ForegroundSample = _metaForegroundBackgroundSamples[rowIndex][_state.Cycle];
+						const auto& foregroundData = _metaForegroundBackground[rowIndex][_state.Cycle];
+						lower.ForegroundOpaque = foregroundData.Priority != 0;
+						lower.ForegroundColor = lower.ForegroundOpaque ? GetPixelRgbColor(_state.Mode, foregroundData.Color, foregroundData.Palette) : 0;
+						if(lower.ForegroundSample.Valid) {
+							pixel.BackgroundSample = lower.ForegroundSample;
+							pixel.BackgroundOverlayOccludesClasses = 10;
+						}
+					}
 					pixel.SpriteColorIndex = data.Color; pixel.SpriteAttributes = data.Palette;
 				}
 			}

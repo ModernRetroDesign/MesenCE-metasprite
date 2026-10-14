@@ -21,7 +21,7 @@ public:
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t magic = Read();
-		if(magic != 0x3147424D && magic != 0x3247424D) { throw std::runtime_error("Invalid background packet"); }
+		if(magic < 0x3147424D || magic > 0x3847424D || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t count = Read();
 		if(count > 128) { throw std::runtime_error("Too many background layers"); }
 		std::set<int> ids;
@@ -37,17 +37,37 @@ public:
 				|| width % scale || height % scale) { throw std::runtime_error("Invalid background artwork"); }
 			layer.FollowScroll = flags & 1; layer.WrapX = flags & 2; layer.WrapY = flags & 4;
 			layer.Scale = scale; layer.Width = width; layer.Height = height;
+			if(magic >= 0x3447424D) {
+				layer.ScrollSpeedX = static_cast<int32_t>(Read()); layer.ScrollSpeedY = static_cast<int32_t>(Read());
+				if(layer.ScrollSpeedX < -16000 || layer.ScrollSpeedX > 16000 || layer.ScrollSpeedY < -16000 || layer.ScrollSpeedY > 16000) { throw std::runtime_error("Invalid scroll multiplier"); }
+			}
 			size_t pixels = static_cast<size_t>(width) * height;
+			if(magic >= 0x3547424D) {
+				uint32_t ignoreRaster = Read(), reference = Read();
+				if(ignoreRaster > 1 || reference > 239) { throw std::runtime_error("Invalid NES raster scroll settings"); }
+				layer.IgnoreRasterScroll = ignoreRaster != 0; layer.ScrollReferenceScanline = reference;
+			}
+			if(magic >= 0x3647424D) { uint32_t hide = Read(); if(hide > 1) { throw std::runtime_error("Invalid hide-layer flag"); } layer.HideOriginalLayer = hide != 0; }
+			if(magic >= 0x3747424D) {
+				uint32_t camera = Read(); if(camera > 1) { throw std::runtime_error("Invalid CPU camera flag"); } layer.UseCpuCamera = camera != 0;
+				for(auto* axis : {&layer.CameraX, &layer.CameraY}) {
+					axis->Format = (int32_t)Read(); axis->Address = Read(); axis->PageAddress = Read(); axis->PageSize = (int32_t)Read();
+					if(magic >= 0x3847424D) { uint32_t signedPage = Read(); if(signedPage > 1) { throw std::runtime_error("Invalid signed-page flag"); } axis->SignedPage = signedPage != 0; }
+					if(!axis->IsValid()) { throw std::runtime_error("Invalid CPU camera axis"); }
+				}
+			}
 			if(pixels > (_length - _offset) / 4) { throw std::runtime_error("Invalid background pixels"); }
 			layer.Artwork.reserve(pixels);
 			for(size_t p = 0; p < pixels; p++) { layer.Artwork.push_back(Read()); }
-			if(magic == 0x3247424D) {
+			if(magic != 0x3147424D) {
 				uint32_t conditions = Read();
 				if(conditions > 64) { throw std::runtime_error("Too many background conditions"); }
 				for(uint32_t c = 0; c < conditions; c++) {
 					uint32_t address = Read(), value = Read(), mask = Read();
+					uint32_t comparison = magic >= 0x3347424D ? Read() : 0;
+					if(comparison > 5) { throw std::runtime_error("Invalid background comparison operator"); }
 					if(value > 255 || mask > 255) { throw std::runtime_error("Invalid background condition byte"); }
-					layer.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask)});
+					layer.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 				}
 			}
 			result.push_back(std::move(layer));

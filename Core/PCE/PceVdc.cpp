@@ -488,6 +488,10 @@ void PceVdc::LoadBatEntry(uint16_t scrollOffset, uint16_t columnMask, uint16_t r
 		_metaBackgroundTiles[_tileCount].Y = row;
 		_metaBackgroundTiles[_tileCount].Layer = _isVdc2 ? 1 : 0;
 		_metaBackgroundTiles[_tileCount].Valid = true;
+		_metaBackgroundTiles[_tileCount].ScrollX = _state.HvLatch.BgScrollX;
+		_metaBackgroundTiles[_tileCount].ScrollY = _state.HvReg.BgScrollY;
+		_metaBackgroundTiles[_tileCount].ScrollWrapX = _state.HvLatch.ColumnCount * 8;
+		_metaBackgroundTiles[_tileCount].ScrollWrapY = _state.HvLatch.RowCount * 8;
 	}
 	uint16_t batEntry = ReadVram((row >> 3) * _state.HvLatch.ColumnCount + tileColumn);
 	_tiles[_tileCount].Palette = batEntry >> 12;
@@ -945,6 +949,7 @@ void PceVdc::InternalDrawScanline()
 
 			if(capture) { backgroundColor = (outColor & 0x1FF) | grayscaleBit; }
 			if(capture && sprEnabled) { _metaRow[xStart].ExpandedSpriteClasses = bgColor ? 1 : 3; }
+			if(capture) { _metaRow[xStart].ExpandedSpriteClassesWithoutBackground = sprEnabled ? 3 : 0; }
 			if constexpr(hasSprites) {
 				if(_state.SpritesEnabled && _xPosHasSprite[_screenOffsetX + 32]) {
 					uint8_t sprColor;
@@ -1003,6 +1008,7 @@ void PceVdc::InternalDrawScanline()
 					auto& pixel = _metaRow[xStart];
 					pixel.VisibleSprite = visibleSprite;
 					pixel.BackgroundColor = backgroundColor;
+					pixel.NativeBackdropColor = (_vce->GetPalette(0) & 0x1FF) | grayscaleBit; pixel.NativeBackdropCaptured = true;
 					pixel.BackgroundColorIndex = bgColor;
 					pixel.SpriteColor = (outColor & 0x1FF) | grayscaleBit;
 					pixel.SpriteColorIndex = visibleSpriteColor;

@@ -570,7 +570,7 @@ internal static class Program
 					throw new Exception("Replacement import did not save/update preview while preserving artwork origin and source PNG.");
 				}
 				Console.WriteLine($"PASS: {system} replacement PNG import persists artwork/origin; failed saves preserve prior preview and clean up unsaved copies.");
-				viewer.MetaAlternateConditionsText = "$0 = $03 / $0F\n$1 = $07";
+				viewer.MetaAlternateConditionsText = "$0 <= $03 / $0F\n$1 >= $07";
 				viewer.AddMetaAlternatePng(alternateSource);
 				if(viewer.MetaAlternates.Count != 1 || viewer.SelectedMetaAlternate == null || !viewer.MetaStatus.StartsWith("Replacements applied.")) {
 					throw new Exception("Actual conditional alternate PNG import failed: " + viewer.MetaStatus);
@@ -580,6 +580,7 @@ internal static class Program
 				var authoredAlternate = saved.Groups[0].AlternateArtwork;
 				if(authoredAlternate.Count != 1 || authoredAlternate[0].OriginX != 4 || authoredAlternate[0].OriginY != 5
 					|| authoredAlternate[0].MemoryConditions.Count != 2 || authoredAlternate[0].MemoryConditions[0].Mask != 15
+					|| authoredAlternate[0].MemoryConditions[0].Comparison != MetaMemoryComparison.LessOrEqual || authoredAlternate[0].MemoryConditions[1].Comparison != MetaMemoryComparison.GreaterOrEqual
 					|| authoredAlternate[0].MemoryConditions[1].Address != 1) { throw new Exception("Actual alternate conditions/origin did not persist."); }
 				string beforeFailedAlternate = File.ReadAllText(packPath);
 				int alternateFiles = Directory.GetFiles(Path.GetDirectoryName(packPath)!, "meta-*-alternate-*.png").Length;
@@ -620,7 +621,18 @@ internal static class Program
 						throw new Exception("Background editor allowed gameplay activation without a configured CPU check.");
 					}
 					background.X = -7; background.Y = 11; background.FollowScroll = true; background.WrapX = true; background.Enabled = true;
-					background.MemoryConditions = new() { new() { Address = 0, Value = 0, Mask = 15 } };
+					background.ScrollSpeedX = 0.5; background.ScrollSpeedY = -1;
+					background.IgnoreRasterScroll = cpu == CpuType.Nes; background.ScrollReferenceScanline = 47;
+					background.HideOriginalLayer = true;
+					background.UseCpuCamera = true;
+					background.CameraX.Format = 4; background.CameraX.AddressHex = "0060"; background.CameraX.PageAddressHex = "0061"; background.CameraX.PageSize = 256;
+					background.CameraY.Format = 0;
+					background.CameraX.SignedPage = cpu == CpuType.Nes;
+					{
+						tilemap.BackgroundEditor.RefreshCameraReadout();
+						if(!tilemap.BackgroundEditor.CameraReadout.Contains("Camera X:")) { throw new Exception("CPU camera live readout did not decode selected addresses."); }
+					}
+					background.MemoryConditions = new() { new() { Address = 0, Value = 0, Mask = 15, Comparison = MetaMemoryComparison.GreaterOrEqual } };
 					tilemap.BackgroundEditor.MemoryConditionsText = "invalid background condition";
 					tilemap.BackgroundEditor.SelectedMetaBackground = null;
 					tilemap.BackgroundEditor.SelectedMetaBackground = background;
@@ -630,6 +642,20 @@ internal static class Program
 					tilemap.BackgroundEditor.MemoryConditionsText = MetaMemoryConditionText.Format(background.MemoryConditions);
 					tilemap.BackgroundEditor.SaveMetaGroups();
 					if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Actual background activation failed: " + tilemap.BackgroundEditor.MetaStatus); }
+					if(cpu == CpuType.Nes) {
+						tilemap.BackgroundEditor.SaveCpuCamera();
+						if(!tilemap.BackgroundEditor.HasSavedCamera) { throw new Exception("CPU camera profile was not saved."); }
+						string beforeFailedCameraSave = File.ReadAllText(packPath);
+						background.CameraX.AddressHex = "0062";
+						Directory.CreateDirectory(packPath + ".tmp");
+						try { tilemap.BackgroundEditor.SaveCpuCamera(); } finally { Directory.Delete(packPath + ".tmp"); }
+						if(File.ReadAllText(packPath) != beforeFailedCameraSave || !tilemap.BackgroundEditor.MetaStatus.StartsWith("Could not save CPU camera:")) { throw new Exception("Failed CPU camera save changed the pack."); }
+						tilemap.BackgroundEditor.LinkCpuCamera();
+						var linked = MetaSpritePack.Load(packPath, hash, cpu.ToString());
+						if(!background.UseSavedCamera || !linked.BackgroundLayers[0].UseSavedCamera || linked.SavedCamera?.X.Address != 0x60) { throw new Exception("Linking did not use the last successfully saved camera."); }
+						tilemap.BackgroundEditor.UnlinkCpuCamera();
+						if(background.UseSavedCamera || background.CameraX.Address != 0x60 || background.CameraX.PageAddress != 0x61 || !background.CameraX.SignedPage) { throw new Exception("Unlinking lost the saved camera settings."); }
+					}
 					string backgroundAssetPath = Path.Combine(Path.GetDirectoryName(packPath)!, background.ArtworkPath);
 					byte[] originalBackgroundAsset = File.ReadAllBytes(backgroundAssetPath);
 					string beforeChangedCanvas = File.ReadAllText(packPath);
@@ -659,6 +685,11 @@ internal static class Program
 					saved = MetaSpritePack.Load(packPath, hash, cpu.ToString());
 					if(saved.Groups.Count != 2 || saved.BackgroundLayers.Count != 1 || saved.BackgroundLayers[0].X != -7 || saved.BackgroundLayers[0].Y != 11
 						|| !saved.BackgroundLayers[0].Enabled || !saved.BackgroundLayers[0].FollowScroll || !saved.BackgroundLayers[0].WrapX
+						|| saved.BackgroundLayers[0].ScrollSpeedX != 0.5 || saved.BackgroundLayers[0].ScrollSpeedY != -1
+						|| saved.BackgroundLayers[0].IgnoreRasterScroll != (cpu == CpuType.Nes) || saved.BackgroundLayers[0].ScrollReferenceScanline != 47
+						|| !saved.BackgroundLayers[0].HideOriginalLayer
+						|| !saved.BackgroundLayers[0].UseCpuCamera || saved.BackgroundLayers[0].CameraX.Format != 4
+						|| saved.BackgroundLayers[0].CameraX.Address != 0x60 || saved.BackgroundLayers[0].CameraX.PageAddress != 0x61 || saved.BackgroundLayers[0].CameraX.PageSize != 256
 						|| saved.BackgroundLayers[0].MemoryConditions.Count != 1 || saved.BackgroundLayers[0].MemoryConditions[0].Mask != 15) {
 						throw new Exception("Tilemap layer placement/conditions or sprite groups were lost during shared-pack saving.");
 					}

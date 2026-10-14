@@ -366,6 +366,9 @@ void SmsVdp::LoadBgTilesSms()
 			_metaBgFetch.Y = y;
 			_metaBgFetch.Layer = 0;
 			_metaBgFetch.Valid = true;
+			_metaBgFetch.ScrollX = _state.Scanline < 16 && _state.HorizontalScrollLock ? 0 : -_state.HorizontalScrollLatch;
+			_metaBgFetch.ScrollY = cycle >= 192 && _state.VerticalScrollLock ? 0 : _state.VerticalScrollLatch;
+			_metaBgFetch.ScrollWrapX = 256; _metaBgFetch.ScrollWrapY = _state.VisibleScanlineCount == 192 ? 224 : 256;
 			uint16_t ntAddr = (_state.EffectiveNametableAddress + ((x / 8) + (y / 8) * 32) * 2) & _state.NametableAddressMask;
 			uint16_t ntData = ReadVram(ntAddr, SmsVdpMemAccess::BgLoadTable) | (ReadVram(ntAddr + 1, SmsVdpMemAccess::BgLoadTable) << 8);
 
@@ -585,6 +588,7 @@ void SmsVdp::DrawPixel()
 			auto& pixel = _metaFrame->Pixels[(_state.Scanline + GetViewportYOffset()) * 256 + GetVisiblePixelIndex()];
 		pixel.VisibleSprite = -1; pixel.ReplacementEligibleSprites = 0; pixel.BackgroundSample.Valid = false;
 			pixel.ExpandedSpriteClasses = 0;
+			pixel.ExpandedSpriteClassesWithoutBackground = 0;
 		}
 	}
 	_bgShifters[0] <<= 1;
@@ -1236,12 +1240,14 @@ uint16_t SmsVdp::GetPixelColor()
 	if(_metaFrame && _state.UseMode4) {
 		auto& pixel = _metaFrame->Pixels[(_state.Scanline + GetViewportYOffset()) * 256 + xPos];
 		pixel.BackgroundColor = _internalPaletteRam[((_bgPalette & 0x800000) ? 0x10 : 0) + color];
+		pixel.NativeBackdropColor = _internalPaletteRam[0x10 | _state.BackgroundColorIndex]; pixel.NativeBackdropCaptured = true;
 		pixel.BackgroundColorIndex = color;
 		pixel.BackgroundSample = _metaBgSamples[0];
 		pixel.BackgroundOverlayOccludesClasses = highPriority ? 1 : 0;
 		pixel.VisibleSprite = spriteDrawn && !(highPriority && color != 0) && !_disableSprites ? visibleSprite : -1;
 		pixel.ReplacementEligibleSprites = !(highPriority && color != 0) && !_disableSprites ? replacementCoverage : 0;
 		pixel.ExpandedSpriteClasses = !(highPriority && color != 0) && !_disableSprites ? 1 : 0;
+		pixel.ExpandedSpriteClassesWithoutBackground = !_disableSprites ? 1 : 0;
 		pixel.ExpandedSpriteOccluder = visibleSprite;
 		pixel.SpriteColorIndex = spritePixelColor;
 		pixel.SpriteColor = _internalPaletteRam[0x10 + spritePixelColor];

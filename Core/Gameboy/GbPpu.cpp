@@ -494,14 +494,39 @@ void GbPpu::RunDrawCycle()
 					: (_state.BgEnabled ? ((_state.BgPalette >> (entry.Color * 2)) & 0x03) : (_state.BgPalette & 0x03));
 				if(cfg.DisableBackground) { bgIndex = _state.BgPalette & 0x03; }
 				metaPixel->BackgroundColor = LcdReadBgPalette(bgIndex) & 0x7FFF;
+				metaPixel->NativeBackdropColor = LcdReadBgPalette(0) & 0x7FFF; metaPixel->NativeBackdropCaptured = true;
 				metaPixel->BackgroundColorIndex = entry.Color;
 				metaPixel->BackgroundAttributes = entry.Attributes;
 				metaPixel->Window = _fetchWindow;
 				metaPixel->BackgroundSample = _metaBgFifo[_bgFifo.Position];
 				metaPixel->BackgroundSample.Valid &= !_insertGlitchBgPixel && !cfg.DisableBackground && (_state.CgbEnabled || _state.BgEnabled);
+				metaPixel->BackgroundSample.ScrollX = _fetchWindow ? metaPixel->BackgroundSample.X - _drawnPixels : _state.ScrollX;
+				metaPixel->BackgroundSample.ScrollY = _fetchWindow ? metaPixel->BackgroundSample.Y - _state.Scanline : _state.ScrollY;
+				metaPixel->BackgroundSample.ScrollWrapX = metaPixel->BackgroundSample.ScrollWrapY = 256;
 				metaPixel->BackgroundOverlayOccludesClasses = _state.CgbEnabled && !_state.BgEnabled ? 0 : (entry.Attributes & 0x80) ? 3 : 2;
+				if(_fetchWindow && metaPixel->BackgroundSample.Valid && !_metaSpriteFrame->BackgroundUnderlays.empty()) {
+					// Retain the BG map beneath the window using the registers and VRAM
+					// visible at this output pixel, without disturbing the hardware fetcher.
+					int bgX = (_drawnPixels + _state.ScrollX) & 255, bgY = (_state.Scanline + _state.ScrollY) & 255;
+					uint16_t map = (_state.BgTilemapSelect ? 0x1C00 : 0x1800) + (bgY / 8) * 32 + bgX / 8;
+					uint8_t tile = LcdReadVram(map), attr = _state.CgbEnabled ? LcdReadVram(map | 0x2000) : 0;
+					int row = (attr & 0x40) ? 7 - (bgY & 7) : bgY & 7;
+					uint16_t address = (_state.BgTileSelect ? tile * 16 : 0x1000 + (int8_t)tile * 16) + row * 2;
+					if(attr & 8) { address |= 0x2000; }
+					int bit = (attr & 0x20) ? bgX & 7 : 7 - (bgX & 7);
+					uint8_t color = ((LcdReadVram(address) >> bit) & 1) | (((LcdReadVram(address + 1) >> bit) & 1) << 1);
+					uint8_t palette = _state.CgbEnabled ? color | ((attr & 7) << 2) : (_state.BgPalette >> (color * 2)) & 3;
+					auto& lower = _metaSpriteFrame->BackgroundUnderlays[_state.Scanline * GbConstants::ScreenWidth + _drawnPixels];
+					lower.Sample = {bgX, bgY, 0, true}; lower.Sample.ScrollX = _state.ScrollX; lower.Sample.ScrollY = _state.ScrollY;
+					lower.Sample.ScrollWrapX = lower.Sample.ScrollWrapY = 256;
+					lower.Color = LcdReadBgPalette(palette) & 0x7FFF;
+					lower.SpriteEligibilityCaptured = true;
+					lower.SpriteEligibleClasses = color == 0 || (_state.CgbEnabled && !_state.BgEnabled) ? 3 : !(attr & 0x80) ? 1 : 0;
+					lower.OverlayOccludesClasses = _state.CgbEnabled && !_state.BgEnabled ? 0 : (attr & 0x80) ? 3 : 2;
+				}
 				metaPixel->VisibleSprite = -1;
 				if(_state.SpritesEnabled && !cfg.DisableSprites) {
+					metaPixel->ExpandedSpriteClassesWithoutBackground = 3;
 					metaPixel->ExpandedSpriteClasses = entry.Color == 0 || (_state.CgbEnabled && !_state.BgEnabled) ? 3 : !(entry.Attributes & 0x80) ? 1 : 0;
 					if(sprite.Color != 0) {
 						int id = _spriteIndexes[sprite.Index] / 4;
@@ -536,6 +561,7 @@ void GbPpu::RunDrawCycle()
 				_lastPixelType = GbPixelType::Object;
 				if(metaPixel) {
 					metaPixel->VisibleSprite = _spriteIndexes[sprite.Index] / 4;
+					metaPixel->NativeVisibleSpriteClass = (sprite.Attributes & 0x80) ? 2 : 1;
 					metaPixel->SpriteColor = _currentBuffer[_state.Scanline * GbConstants::ScreenWidth + _drawnPixels];
 					metaPixel->SpriteColorIndex = sprite.Color;
 					metaPixel->SpriteAttributes = sprite.Attributes;
@@ -628,6 +654,9 @@ void GbPpu::ResetRenderer()
 	if(_state.Scanline == 0) {
 		_metaSpriteFrame = _metaCaptureRequested && !_gameboy->IsSgb() && !_gameboy->GetLinkedConsole()
 			? _metaFramePool.Acquire(GbConstants::ScreenWidth, GbConstants::ScreenHeight) : nullptr;
+		if(_metaSpriteFrame && _emu->GetVideoDecoder()->HasMetaBackgroundLayers()) {
+			_metaSpriteFrame->BackgroundUnderlays.resize(GbConstants::ScreenWidth * GbConstants::ScreenHeight);
+		}
 	}
 	//Reset fetcher & pixel FIFO
 	_oamFifo.Reset();

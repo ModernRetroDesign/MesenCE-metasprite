@@ -186,6 +186,23 @@ Check(editedConditions.Count == 3 && editedConditions[0].Address == 0xC000 && ed
 	&& editedConditions[1].Value == 160 && editedConditions[1].Mask == 255 && editedConditions[2].Address == uint.MaxValue,
 	"Condition editor must parse hex prefixes, optional masks, and 32-bit addresses.");
 var editedRoundtrip = MetaMemoryConditionText.Parse(MetaMemoryConditionText.Format(editedConditions));
+
+foreach(var comparison in Enum.GetValues<MetaMemoryComparison>()) {
+	foreach(int mask in new[] {0, 15, 240, 255}) { foreach(int leftByte in new[] {0, 1, 127, 128, 255}) { foreach(int rightByte in new[] {0, 1, 127, 128, 255}) {
+		int left = leftByte & mask, right = rightByte & mask;
+		bool expected = comparison switch {
+			MetaMemoryComparison.Equal => left == right, MetaMemoryComparison.NotEqual => left != right,
+			MetaMemoryComparison.Greater => left > right, MetaMemoryComparison.Less => left < right,
+			MetaMemoryComparison.GreaterOrEqual => left >= right, _ => left <= right
+		};
+		var parsed = MetaMemoryConditionText.Parse($"C000 {MetaMemoryConditionText.Operator(comparison)} {rightByte:X2} / {mask:X2}");
+		Check(MetaMemoryCondition.Matches(parsed, _ => (byte)leftByte) == expected, "Unsigned masked comparison boundary mismatch.");
+		Check(!MetaMemoryCondition.Matches(parsed, _ => null), "Missing bytes must fail every comparison.");
+		Check(MetaMemoryConditionText.Parse(MetaMemoryConditionText.Format(parsed))[0].Comparison == comparison, "Comparison editor round trip failed.");
+	} } }
+}
+Check(MetaMemoryConditionText.Format(editedConditions).Contains(" == "), "Legacy equality must display as ==.");
+Console.WriteLine("PASS: all six unsigned comparison operators, masks, boundary bytes, missing addresses, text round trips and legacy equality.");
 Check(editedRoundtrip.Count == 3 && editedRoundtrip[2].Mask == 0 && MetaMemoryConditionText.Parse(" \r\n").Count == 0, "Condition editor must preserve conditions and allow clearing.");
 foreach(string invalidCondition in new[] { "C000", "C000 = 100", "C000 = 01 / 100", "100000000 = 01", "C000 = GG", "C000 = 01 / FF extra",
 	string.Join('\n', Enumerable.Repeat("C000 = 01", 65)) }) {
@@ -216,6 +233,85 @@ using(var reader = new BinaryReader(new MemoryStream(conditionalPacket))) {
 }
 Check(MetaMemoryCondition.Matches(runtimeGroup.MemoryConditions, address => address == 0x1234 ? (byte)0xA7 : (byte)3), "Masked expected bits must match native semantics.");
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".conditions", conditionalPacket); }
+var comparisonGroup = new MetaSpriteGroup {Id = 77, Enabled = true, Width = 8, Height = 8, Members = runtimeGroup.Members};
+for(int op = 0; op < 6; op++) { comparisonGroup.MemoryConditions.Add(new() {Address = (uint)op, Value = 42, Comparison = (MetaMemoryComparison)op}); }
+comparisonGroup.AlternateArtwork.Add(new() {Path = "comparison.png", MemoryConditions = new() {new() {Address = 6, Value = 0, Comparison = MetaMemoryComparison.NotEqual}}});
+var comparisonPack = new MetaSpritePack {Groups = new() {comparisonGroup}, BackgroundLayers = new() {
+	new() {Id = 1, Enabled = true, ArtworkWidth = 2, ArtworkHeight = 2, MemoryConditions = comparisonGroup.MemoryConditions}
+}};
+byte[] comparisonPacket = MetaSpriteRuntimePacket.Create(comparisonPack, _ => (8, 8, Enumerable.Repeat(0xFF00FF00u, 64).ToArray()),
+	_ => (8, 8, Enumerable.Repeat(0xFFFFFFFFu, 64).ToArray()));
+byte[] comparisonBackgroundPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(comparisonPacket) == MetaSpriteRuntimePacket.ComparisonMagic && BitConverter.ToUInt32(comparisonBackgroundPacket) == MetaBackgroundRuntimePacket.ComparisonMagic, "Comparison packet versions must be explicit.");
+var comparisonRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(comparisonRestored.Groups[0].MemoryConditions[5].Comparison == MetaMemoryComparison.LessOrEqual && comparisonRestored.BackgroundLayers[0].MemoryConditions[1].Comparison == MetaMemoryComparison.NotEqual, "JSON must preserve operators.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".comparisons", comparisonPacket); File.WriteAllBytes(args[0] + ".background.comparisons", comparisonBackgroundPacket); }
+comparisonPack.BackgroundLayers[0].ScrollSpeedX = 0.5; comparisonPack.BackgroundLayers[0].ScrollSpeedY = -1;
+byte[] scrollPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(scrollPacket) == MetaBackgroundRuntimePacket.ScrollMagic, "Custom scroll rates require MBG4.");
+comparisonRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(comparisonRestored.BackgroundLayers[0].ScrollSpeedX == 0.5 && comparisonRestored.BackgroundLayers[0].ScrollSpeedY == -1, "JSON must preserve scroll multipliers.");
+var scrollLayer = new MetaBackgroundLayer {Id = 1, ArtworkWidth = 256, ArtworkHeight = 256, ScrollSpeedX = 0.5, ScrollSpeedY = -1, WrapX = true, WrapY = true};
+Check(scrollLayer.TryGetArtworkPixel(5, 5, 253, 250, out int scrollX, out int scrollY) && scrollX == 131 && scrollY == 11, "Custom scroll rates must preserve independent axes and negative wrapping.");
+scrollLayer.ScrollSpeedX = scrollLayer.ScrollSpeedY = 0;
+Check(scrollLayer.TryGetArtworkPixel(5, 5, 253, 250, out scrollX, out scrollY) && scrollX == 5 && scrollY == 5, "Zero rates must freeze both axes.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.scroll", scrollPacket); }
+comparisonPack.BackgroundLayers[0].IgnoreRasterScroll = true; comparisonPack.BackgroundLayers[0].ScrollReferenceScanline = 47;
+byte[] rasterPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(rasterPacket) == MetaBackgroundRuntimePacket.RasterMagic, "Uniform NES scroll requires MBG5.");
+comparisonRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(comparisonRestored.BackgroundLayers[0].IgnoreRasterScroll && comparisonRestored.BackgroundLayers[0].ScrollReferenceScanline == 47, "JSON must preserve NES raster scroll settings.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.raster", rasterPacket); }
+comparisonPack.BackgroundLayers[0].HideOriginalLayer = true;
+byte[] hidePacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(hidePacket) == MetaBackgroundRuntimePacket.HideLayerMagic, "Hide-original-layer requires MBG6.");
+comparisonRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(comparisonRestored.BackgroundLayers[0].HideOriginalLayer && comparisonRestored.BackgroundLayers[0].ScrollReferenceScanline == 47, "JSON must preserve hide-layer settings alongside raster tracking.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.hide", hidePacket); }
+var cameraAxis = new MetaCameraAxis { Address = 0x60, PageAddress = 0x70, PageSize = 240 };
+var cameraBytes = new System.Collections.Generic.Dictionary<uint, byte> { [0x60] = 0x34, [0x61] = 0x12, [0x70] = 3 };
+foreach(var (format, expected) in new[] { (0, 0), (1, 52), (2, 4660), (3, 13330), (4, 772) }) {
+	cameraAxis.Format = format; Check(cameraAxis.Decode(address => cameraBytes[address]) == expected, "CPU camera format decoding.");
+	Check(cameraAxis.Addresses().Count() == (format == 0 ? 0 : format == 1 ? 1 : 2), "Capture only configured camera bytes.");
+}
+comparisonPack.BackgroundLayers[0].UseCpuCamera = true;
+comparisonPack.BackgroundLayers[0].CameraX = cameraAxis;
+byte[] cameraPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(cameraPacket) == MetaBackgroundRuntimePacket.CameraMagic, "CPU camera requires MBG7.");
+comparisonRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(comparisonRestored.BackgroundLayers[0].UseCpuCamera && comparisonRestored.BackgroundLayers[0].CameraX.PageAddress == 0x70 && comparisonRestored.BackgroundLayers[0].CameraX.PageSize == 240, "CPU camera must persist.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.camera", cameraPacket); }
+Console.WriteLine("PASS: CPU camera byte/endian/page decoding, configured byte selection and JSON/MBG7 persistence.");
+var linkedCameraPack = new MetaSpritePack { SavedCamera = new() { X = cameraAxis.Copy(), Y = new() }, BackgroundLayers = new() {
+	new() { Id = 101, Enabled = true, UseCpuCamera = true, UseSavedCamera = true, ArtworkWidth = 2, ArtworkHeight = 2, MemoryConditions = new() {new() {Address = 0, Mask = 0}} },
+	new() { Id = 102, Enabled = true, UseCpuCamera = true, UseSavedCamera = true, ArtworkWidth = 2, ArtworkHeight = 2, MemoryConditions = new() {new() {Address = 0, Mask = 0}} }
+} };
+string linkedBefore = linkedCameraPack.GetBackgroundDefinitionsSnapshot();
+byte[] linkedCameraPacket = MetaBackgroundRuntimePacket.Create(linkedCameraPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(linkedCameraPacket, 68) == 0x60 && BitConverter.ToUInt32(linkedCameraPacket, 192) == 0x60, "Both linked backgrounds must resolve the saved camera.");
+linkedCameraPack.SavedCamera.X.Address = 0x62;
+linkedCameraPacket = MetaBackgroundRuntimePacket.Create(linkedCameraPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(linkedCameraPacket, 68) == 0x62 && BitConverter.ToUInt32(linkedCameraPacket, 192) == 0x62, "Updating the saved camera must update all linked backgrounds.");
+Check(linkedCameraPack.GetBackgroundDefinitionsSnapshot() != linkedBefore, "Saved camera updates must participate in background conflict detection.");
+var restoredLinks = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(linkedCameraPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(restoredLinks.SavedCamera!.X.Address == 0x62 && restoredLinks.BackgroundLayers.All(layer => layer.UseSavedCamera), "Camera profile and links must survive JSON reload.");
+restoredLinks.SavedCamera = null; bool missingProfileRejected = false;
+try { MetaBackgroundRuntimePacket.Create(restoredLinks, _ => (2, 2, new uint[4])); } catch(InvalidDataException) { missingProfileRejected = true; }
+Check(missingProfileRejected, "A dangling camera link must not silently use unrelated local addresses.");
+Console.WriteLine("PASS: saved camera links resolve/update all backgrounds, persist and reject missing profiles.");
+cameraBytes[0x60] = 0xF6; cameraBytes[0x70] = 0xFF; cameraAxis.PageSize = 256;
+Check(cameraAxis.Decode(address => cameraBytes[address]) == 65526, "Unchecked FF:F6 must retain unsigned interpretation.");
+cameraAxis.SignedPage = true;
+Check(cameraAxis.Decode(address => cameraBytes[address]) == -10, "Signed FF:F6 must decode as -10 pixels.");
+cameraBytes[0x60] = 255; Check(cameraAxis.Decode(address => cameraBytes[address]) == -1, "Signed FF:FF must decode as -1.");
+cameraBytes[0x60] = 0; cameraBytes[0x70] = 0; Check(cameraAxis.Decode(address => cameraBytes[address]) == 0, "Signed camera must cross page zero smoothly.");
+linkedCameraPack.SavedCamera!.X = cameraAxis.Copy();
+byte[] signedCameraPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(signedCameraPacket) == MetaBackgroundRuntimePacket.SignedCameraMagic, "Signed pages require MBG8.");
+var signedRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(linkedCameraPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(signedRestored.SavedCamera!.X.SignedPage && !signedRestored.SavedCamera.Y.SignedPage, "Saved camera signed axes must persist independently.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.camera.signed", signedCameraPacket); }
+Console.WriteLine("PASS: signed FF:F6/FF:FF/00:00 camera decoding and saved-profile/MBG8 persistence.");
 runtimeGroup.MemoryConditions.Clear();
 runtimeGroup.AlternateArtwork.Add(new() { Path = "draft.png" });
 runtimeGroup.AlternateArtwork[0].Validate();
@@ -299,6 +395,9 @@ if(args.Length >= 3 && args[1] == "--gameplay-nes") {
 if(args.Length >= 3 && args[1] == "--gameplay-ws") {
 	GameplayFixture.RunWsSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }
+if(args.Length >= 3 && args[1] == "--nes-raster") {
+	GameplayFixture.RunNesRasterSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.nes")));
+}
 if(args.Length >= 3 && args[1] == "--pce-priority") {
 	GameplayFixture.RunPcePrioritySuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.pce")));
 }
@@ -307,6 +406,9 @@ if(args.Length >= 3 && args[1] == "--gba-affine") {
 }
 if(args.Length >= 3 && args[1] == "--gba-capture-metadata") {
 	GameplayFixture.RunGbaCaptureMetadata(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
+}
+if(args.Length >= 3 && args[1] == "--gameplay-gb") {
+	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), gameboyOnly: true);
 }
 if(args.Length >= 3 && args[1] == "--gameplay") {
 	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));

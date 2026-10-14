@@ -579,6 +579,7 @@ namespace Mesen.Debugger.ViewModels
 			if(Disposed) {
 				return;
 			}
+			BackgroundEditor.RefreshCameraReadout();
 
 			lock(_updateLock) {
 				_coreData.CopyTo(_data);

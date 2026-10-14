@@ -25,6 +25,61 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
  [ObservableProperty] public partial Bitmap? MetaBackgroundPreview { get; set; }
  [ObservableProperty] public partial string MetaBackgroundPreviewInfo { get; set; } = "";
  [ObservableProperty] public partial string MetaStatus { get; set; } = "";
+ [ObservableProperty] public partial string CameraReadout { get; set; } = "";
+ [ObservableProperty] public partial bool HasSavedCamera { get; set; }
+ [ObservableProperty] public partial string SavedCameraInfo { get; set; } = "No saved CPU camera for this game.";
+ private void RefreshSavedCameraInfo() {
+  HasSavedCamera = _metaPack.SavedCamera != null;
+  string Describe(MetaCameraAxis axis) => axis.Format == 0 ? "fixed" : axis.IsPaged ? $"${axis.Address:X} + page ${axis.PageAddress:X}, {axis.PageSize} px/page{(axis.SignedPage ? ", signed" : "")}" : $"${axis.Address:X}, {axis.Format switch {1 => "8-bit", 2 => "16-bit LE", _ => "16-bit BE"}}";
+  SavedCameraInfo = HasSavedCamera ? $"Saved camera\nX: {Describe(_metaPack.SavedCamera!.X)}\nY: {Describe(_metaPack.SavedCamera.Y)}" : "No saved CPU camera for this game.";
+ }
+ private void SaveCameraChanges() {
+  if(SelectedMetaBackground is MetaBackgroundLayer layer) { layer.MemoryConditions = MetaMemoryConditionText.Parse(MemoryConditionsText); }
+  SavePack();
+ }
+ public void SaveCpuCamera() {
+  if(_metaLoadFailed || _metaPackPath.Length == 0 || SelectedMetaBackground is not MetaBackgroundLayer layer) { return; }
+  var previous = _metaPack.SavedCamera;
+  try {
+   _metaPack.SavedCamera = layer.UseSavedCamera && previous != null ? new() {X = previous.X.Copy(), Y = previous.Y.Copy()} : new() {X = layer.CameraX.Copy(), Y = layer.CameraY.Copy()};
+   SaveCameraChanges(); RefreshSavedCameraInfo(); ApplyMetaReplacements(); RefreshCameraReadout();
+   MetaStatus += " CPU camera saved for this game; linked backgrounds updated.";
+  } catch(Exception ex) { _metaPack.SavedCamera = previous; RefreshSavedCameraInfo(); MetaStatus = "Could not save CPU camera: " + ex.Message; }
+ }
+ public void LinkCpuCamera() {
+  if(_metaLoadFailed || _metaPackPath.Length == 0 || _metaPack.SavedCamera == null || SelectedMetaBackground is not MetaBackgroundLayer layer) { return; }
+  bool previousLink = layer.UseSavedCamera, previousSource = layer.UseCpuCamera, previousFollow = layer.FollowScroll;
+  try {
+   layer.UseSavedCamera = true; layer.UseCpuCamera = true; layer.FollowScroll = true;
+   SaveCameraChanges(); ApplyMetaReplacements(); RefreshCameraReadout();
+   MetaStatus += " Background linked to the saved CPU camera.";
+  } catch(Exception ex) { layer.UseSavedCamera = previousLink; layer.UseCpuCamera = previousSource; layer.FollowScroll = previousFollow; MetaStatus = "Could not link CPU camera: " + ex.Message; }
+ }
+ public void UnlinkCpuCamera() {
+  if(_metaLoadFailed || _metaPackPath.Length == 0 || _metaPack.SavedCamera == null || SelectedMetaBackground is not {UseSavedCamera: true} layer) { return; }
+  var previousX = layer.CameraX; var previousY = layer.CameraY;
+  try {
+   SelectedMetaBackground = null;
+   layer.CameraX = _metaPack.SavedCamera.X.Copy(); layer.CameraY = _metaPack.SavedCamera.Y.Copy(); layer.UseSavedCamera = false;
+   SelectedMetaBackground = layer;
+   SaveCameraChanges(); ApplyMetaReplacements(); RefreshCameraReadout();
+   MetaStatus += " Background unlinked; current camera settings retained.";
+  } catch(Exception ex) { SelectedMetaBackground = null; layer.CameraX = previousX; layer.CameraY = previousY; layer.UseSavedCamera = true; SelectedMetaBackground = layer; MetaStatus = "Could not unlink CPU camera: " + ex.Message; }
+ }
+ public void RefreshCameraReadout() {
+  if(SelectedMetaBackground is not {UseCpuCamera: true} layer) { CameraReadout = ""; return; }
+  try {
+   byte Read(uint address) {
+    if(address >= DebugApi.GetMemorySize(_cpuType.ToMemoryType())) { throw new InvalidDataException("Camera address is outside CPU memory."); }
+    return DebugApi.GetMemoryValue(_cpuType.ToMemoryType(), address);
+   }
+   var xAxis = layer.UseSavedCamera ? _metaPack.SavedCamera!.X : layer.CameraX;
+   var yAxis = layer.UseSavedCamera ? _metaPack.SavedCamera!.Y : layer.CameraY;
+   int x = xAxis.Decode(Read), y = yAxis.Decode(Read);
+   string Format(int value) => value < 0 ? $"{value} px" : $"{value} px (${value:X})";
+   CameraReadout = $"Camera X: {Format(x)}\nCamera Y: {Format(y)}";
+  } catch(Exception ex) { CameraReadout = ex.Message; }
+ }
  [ObservableProperty] public partial string MemoryConditionsText { get; set; } = "";
  private MetaSpritePack _metaPack = new();
  private string _metaPackPath = "";
@@ -32,10 +87,11 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
  private bool _metaLoadFailed;
  private readonly Dictionary<MetaBackgroundLayer, string> _invalidConditionDrafts = new();
  private CpuType _cpuType;
+ public bool IsNes => _cpuType == CpuType.Nes;
  public MetaBackgroundEditorViewModel(CpuType cpuType) { _cpuType = cpuType; }
  public void Load(CpuType? cpuType = null)
  {
-  if(cpuType.HasValue) { _cpuType = cpuType.Value; }
+  if(cpuType.HasValue) { _cpuType = cpuType.Value; OnPropertyChanged(nameof(IsNes)); }
   _invalidConditionDrafts.Clear();
   SelectedMetaBackground = null;
   MetaBackgrounds.Clear();
@@ -46,11 +102,13 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
    _metaPack = MetaSpritePack.Load(_metaPackPath, hash, _cpuType.ToString());
    _savedBackgroundDefinitions = _metaPack.GetBackgroundDefinitionsSnapshot();
    foreach(var layer in _metaPack.BackgroundLayers) { MetaBackgrounds.Add(layer); }
+   RefreshSavedCameraInfo();
    MetaStatus = "Import a background PNG to start.";
   } catch(Exception ex) { _metaLoadFailed = true; MetaStatus = "Could not load backgrounds: " + ex.Message; }
  }
  private void SavePack()
  {
+  _metaPack.ValidateSavedCamera();
   if(EmuApi.GetRomHash(HashType.Sha1) != _metaPack.RomHash) { throw new InvalidDataException("The ROM changed. Reopen the background editor."); }
   foreach(var layer in _metaPack.BackgroundLayers) {
    layer.Validate();
@@ -60,6 +118,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
   if(latest.GetBackgroundDefinitionsSnapshot() != _savedBackgroundDefinitions) { throw new InvalidDataException("Background layers were saved by another editor. Reload saved backgrounds before editing again."); }
   MetaSpriteRuntimeLoader.ValidateBackgroundArtworkCanvases(_metaPack, _metaPackPath);
   latest.BackgroundLayers = _metaPack.BackgroundLayers;
+  latest.SavedCamera = _metaPack.SavedCamera;
   latest.NextBackgroundId = Math.Max(latest.NextBackgroundId, _metaPack.NextBackgroundId);
   latest.Save(_metaPackPath);
   _savedBackgroundDefinitions = _metaPack.GetBackgroundDefinitionsSnapshot();
@@ -83,7 +142,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 			}
   } catch(Exception ex) { MetaStatus = "Saved; could not apply backgrounds: " + ex.Message; }
  }
- public void Dispose() { if(SelectedMetaBackground != null) { SelectedMetaBackground.PropertyChanged -= BackgroundPlacementChanged; } MetaBackgroundPreview?.Dispose(); MetaBackgroundPreview = null; }
+ public void Dispose() { SelectedMetaBackground = null; MetaBackgroundPreview?.Dispose(); MetaBackgroundPreview = null; }
 	public async Task ImportMetaBackground(Window window, int nativeLayer = 0, string context = "")
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
@@ -177,13 +236,18 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 
 	partial void OnSelectedMetaBackgroundChanging(MetaBackgroundLayer? value)
 	{
-		if(SelectedMetaBackground != null) { SelectedMetaBackground.PropertyChanged -= BackgroundPlacementChanged; }
+		if(SelectedMetaBackground != null) {
+			SelectedMetaBackground.PropertyChanged -= BackgroundPlacementChanged;
+			SelectedMetaBackground.CameraX.PropertyChanged -= BackgroundPlacementChanged;
+			SelectedMetaBackground.CameraY.PropertyChanged -= BackgroundPlacementChanged;
+		}
 	}
 	partial void OnSelectedMetaBackgroundChanged(MetaBackgroundLayer? value)
 	{
-		if(value != null) { value.PropertyChanged += BackgroundPlacementChanged; }
+		if(value != null) { value.PropertyChanged += BackgroundPlacementChanged; value.CameraX.PropertyChanged += BackgroundPlacementChanged; value.CameraY.PropertyChanged += BackgroundPlacementChanged; }
 		MemoryConditionsText = value == null ? "" : _invalidConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaMemoryConditionText.Format(value.MemoryConditions);
 		RefreshMetaBackgroundPreview();
+		RefreshCameraReadout();
 	}
 	partial void OnMemoryConditionsTextChanged(string value)
 	{
@@ -203,7 +267,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 			RefreshBackgroundPlacement();
 		} catch(Exception ex) { MetaBackgroundPreviewInfo = "Could not preview background: " + ex.Message; }
 	}
-	private void BackgroundPlacementChanged(object? sender, PropertyChangedEventArgs e) => RefreshBackgroundPlacement();
+	private void BackgroundPlacementChanged(object? sender, PropertyChangedEventArgs e) { RefreshBackgroundPlacement(); RefreshCameraReadout(); }
 	private void RefreshBackgroundPlacement()
 	{
 		if(SelectedMetaBackground is not MetaBackgroundLayer layer || MetaBackgroundPreview == null) { return; }

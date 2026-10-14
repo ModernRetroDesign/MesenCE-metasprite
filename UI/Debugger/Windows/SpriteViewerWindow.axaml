@@ -130,7 +130,7 @@
 								</Viewbox>
 								<TextBlock Text="Click preview to set origin" />
 								<TextBlock Text="Alternate CPU memory conditions (all must match)" />
-								<TextBox Text="{Binding MetaAlternateConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 = 01 / FF" />
+								<TextBox Text="{Binding MetaAlternateConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 == 01 / FF" />
 								<TextBlock Text="Blank conditions keep this alternate inactive. First matching alternate wins; otherwise the default PNG is used." TextWrapping="Wrap" />
 								<StackPanel Orientation="Horizontal" Spacing="4">
 									<Button Content="Earlier" Click="OnMoveMetaAlternateEarlier" ToolTip.Tip="Increase this alternate's matching priority." />
@@ -140,8 +140,8 @@
 							</Grid>
 							<TextBlock Text="Group CPU memory conditions (hex, all must match)" />
 							<TextBox Text="{Binding MetaMemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap"
-								PlaceholderText="C000 = 01 / FF" />
-							<TextBlock Text="One ADDRESS = VALUE / MASK per line. Mask defaults to FF. Blank means always enabled." TextWrapping="Wrap" />
+								PlaceholderText="C000 == 01 / FF" />
+							<TextBlock Text="One ADDRESS OP VALUE / MASK per line. Operators: ==, !=, &gt;, &lt;, &gt;=, &lt;=. Mask defaults to FF; both values are masked before unsigned comparison. Blank means always enabled." TextWrapping="Wrap" />
 							<Button Content="Save group edits" Click="OnSaveMetaGroups" />
 							<CheckBox Content="Enable group in gameplay" IsChecked="{Binding SelectedMetaGroup.Enabled}" />
 							<Button Content="Apply gameplay replacements" Click="OnApplyMetaReplacements" />

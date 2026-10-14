@@ -894,13 +894,20 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 		uint8_t bgIndex = ((offset + ((_cycle - 1) & 7) < 8) ? _previousTilePalette : _currentTilePalette) + backgroundColor;
 		captured->BackgroundColorIndex = backgroundColor;
 		captured->BackgroundColor = (_paletteRam[backgroundColor ? bgIndex : 0] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+		captured->NativeBackdropColor = (_paletteRam[0] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+		captured->NativeBackdropCaptured = true;
 		captured->VisibleSprite = -1;
 		if(_prevRenderingEnabled && _mask.SpritesEnabled && _emulatorSpritesEnabled && _cycle > _minimumDrawSpriteCycle) {
 			captured->ExpandedSpriteClasses = backgroundColor ? 1 : 3;
+			captured->ExpandedSpriteClassesWithoutBackground = 3;
 		}
 		if(_cycle > _minimumDrawBgCycle && _emulatorBgEnabled && _prevRenderingEnabled) {
 			captured->BackgroundSample = _metaBackgroundShift[(_metaBackgroundShiftHead + offset) & 15];
 			captured->BackgroundOverlayOccludesClasses = 2;
+			captured->BackgroundSample.ScrollX = (captured->BackgroundSample.X - (_cycle - 1) + 512) % 512;
+			captured->BackgroundSample.ScrollY = (captured->BackgroundSample.Y - _scanline + 480) % 480;
+			captured->BackgroundSample.ScrollWrapX = 512; captured->BackgroundSample.ScrollWrapY = 480;
+			captured->BackgroundSample.NesRasterScroll = true;
 		}
 	}
 	uint8_t spriteColor = 0;

@@ -79,6 +79,9 @@ namespace Mesen.Debugger.Windows
 		private void OnRemoveMetaBackground(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.RemoveMetaBackground();
 		private void OnSaveMetaBackgrounds(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.SaveMetaGroups();
 		private void OnReloadMetaBackgrounds(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.Load();
+		private void OnSaveCpuCamera(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.SaveCpuCamera();
+		private void OnLinkCpuCamera(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.LinkCpuCamera();
+		private void OnUnlinkCpuCamera(object? sender, RoutedEventArgs e) => _model.BackgroundEditor.UnlinkCpuCamera();
 
 		public void ProcessNotification(NotificationEventArgs e)
 		{

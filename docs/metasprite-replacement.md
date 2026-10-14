@@ -1,11 +1,216 @@
 # Metasprite replacement development
 
-## Future plan: independent PNG background priority layers
+## Decorative widescreen — planned, deferred
 
-### Planned background control: hide original layer
+The user requested recording this idea and deferring implementation. Extend
+selected replacement PNG backgrounds into a wider output canvas while keeping
+the original gameplay viewport and game logic intact. No off-screen native
+tiles or sprites are implied; off-screen metasprite capture remains a separate
+deferred proposal.
 
-User approved adding a per-replacement "Hide original layer" toggle to the agenda.
-Implementation is pending. When enabled and the replacement is active (including
+Proposed Video settings: enable Decorative widescreen; aspect ratio (16:9,
+21:9 or custom); optional custom left/right widths in native pixels; side
+brightness (100% full brightness, 50% dimmed, 0% black); optional edge fade;
+gameplay viewport position (centred, fixed left/right, or automatic at camera
+limits); and instant/smooth slide speed. The Tilemap Viewer would provide a
+per-background "Extend this PNG into widescreen margins" checkbox so scenery
+can extend while HUD/other layers stay inside the native viewport.
+
+CPU-camera coordinates should keep scenery aligned while the gameplay viewport
+slides. At a configured left camera boundary, move the viewport left; at a right
+boundary, move it right; otherwise centre it. Use game-specific camera limits or
+configured CPU-memory boundary flags: a stationary camera alone cannot distinguish
+a level boundary from a stationary player or paused game. Dimming/fade must follow
+the current viewport and affect only decorative margins. Implementation would
+require a wider compositor canvas, native viewport offsets, appropriate priority
+and clipping, and persistence of per-game settings. This proposal is deferred,
+not an active implementation or completion requirement.
+
+## Future goal: PNG background blend modes
+
+Add per-background Normal alpha, Add and Subtract modes across NES, GB/GBC,
+GBA, PCE, SMS, SNES and WonderSwan through the shared compositor. Use a blend-mode
+dropdown, with optional opacity/strength control, and respect PNG alpha.
+Blend against the image beneath the PNG at its assigned drawing priority;
+integrate with the planned independent PNG background priority layers.
+Define ordering relative to native SNES/GBA colour effects so that effects are
+not unintentionally applied twice. Preserve placement, camera scrolling,
+conditions, clipping and saved definitions. HDnes Alpha/Add/Subtract modes are
+the reference. The user requested recording this as future goal work; no blend
+mode implementation is included yet.
+
+## Possible PNG animation feature — deferred
+
+The user requested recording this possibility and deferring implementation.
+Background PNGs and metasprite artwork (including CPU-conditioned alternates)
+could each have a sequence of separate PNG frames. Proposed controls include
+add/remove/previous/next, duration in emulated frames, loop/ping-pong/play-once,
+shared scale/origin with optional per-frame origins, and synchronized timing
+with an optional restart-on-activation mode. Pausing would freeze animation;
+turbo would follow emulation speed. Existing recognition, conditions, camera
+scrolling, priority and clipping would continue to apply.
+
+HDnes frameRange is a repeating eligibility condition:
+`frame number % cycle length >= threshold`. It could inform timing, while the
+sequence UI would avoid requiring users to author a condition for every frame.
+Validate positive cycle lengths rather than reproducing zero-divisor behavior.
+
+Memory/loading considerations: decoded RGBA artwork costs approximately four
+bytes per pixel per frame, excluding previews, temporary buffers and GPU copies.
+Only the selected frame should be drawn. Prefer shared immutable image caching
+and no buffer copies on frame switches; show estimated decoded memory usage.
+Small metasprite sequences could preload; large background sequences may need
+bounded caching and prefetching to prevent stutters. Measure runtime cost before
+claiming an FPS budget, particularly for SNES composition. Sprite-sheet import
+is another possible later extension. This is optional future work, not an active
+implementation requirement or a reason to delay the current workflow.
+
+## CPU-camera background scrolling
+
+CPU-camera controls and runtime integration cover NES, GB/GBC, GBA, PCE, SMS,
+SNES and WonderSwan. All background composition paths use the shared camera-aware
+sampler, including GBA change detection/layer effects and SNES captured-layer and
+fallback paths. Native Debug/Release tests verify those staged paths use CPU
+coordinates instead of captured hardware scroll. Camera readout, save/reload and
+activation assertions pass in all eight hidden editor configurations; GBC's
+shutdown stalls in this run while the others complete. Existing background mode
+support limits still apply; these checks do not prove every game-specific effect.
+
+Pixel offset + page has an independent Signed page checkbox for each axis.
+It defaults off: page FF is 255. When enabled, pages 80–FF represent −128 to −1;
+with page size 256, FF:F6 is −10, FF:FF is −1 and 00:00 is 0. Other camera formats
+remain unsigned. The flag is saved with the background and shared camera profile,
+and copied when unlinking. MBG8 transports per-axis flags while older MBG7
+camera packets retain unsigned pages. Managed/native Debug/Release tests cover
+the signed transition, negative sampling and strict packet parsing. The live
+NROM raster fixture verifies FF:F6 negative sampling in Debug/Release, and hidden
+NES authoring verifies saved-camera unlink retains the signed flag with clean
+shutdown. Both UI builds pass and the Release executable is updated.
+
+The CPU-camera section also offers Save camera for this game, Link saved camera
+to this background, and Unlink camera (keep settings). One camera configuration
+is stored per ROM/system pack and survives removing backgrounds. Linking enables
+CPU-camera scrolling while preserving each background's speed, placement, scale
+and conditions. Linked backgrounds resolve the saved addresses/formats at runtime;
+saving a revised camera updates every linked background. Unlinking copies the
+current saved configuration into that background for independent editing.
+Profiles participate in background conflict checks, and failed saves leave the
+previous saved profile and file intact. Managed tests verify two linked layers,
+shared updates, JSON persistence and missing-profile rejection. The hidden NES
+editor suite verifies save/link/unlink, failed-save rollback and shared-pack
+preservation, and completes shutdown cleanly. Debug/Release UI builds pass.
+
+Each background can select Hardware scrolling or CPU memory camera. CPU mode
+uses independent X/Y axes: Fixed, 8-bit unsigned, 16-bit low-byte-first,
+16-bit high-byte-first, or Pixel offset + page. Addresses are CPU-bus addresses
+entered in hex. Contiguous 16-bit formats read the start address and the next
+byte. Paged format reads separate offset/page addresses and computes
+`page * page size + offset`; page size defaults to 256 native pixels. Fixed axes
+read no bytes. An 8-bit-only camera still wraps at 256; use its page counter or a
+full 16-bit coordinate for longer travel.
+
+CPU-camera coordinates drive PNG sampling independently of hardware nametable
+wrapping and NES raster splits. Existing speed multipliers, placement, PNG
+wrapping, native layer visibility/priority and CPU conditions still apply.
+Disabling Follow selected scroll source keeps fixed-screen placement. Missing
+camera bytes suppress the background for that frame, including native-layer
+hiding. Only configured camera/condition bytes are captured, with deduplication.
+The editor shows current decoded camera values and refreshes on edits/frames.
+Definitions persist in JSON; MBG7 transfers camera axes alongside existing
+settings, and native loading retains MBG1–MBG6 compatibility.
+
+Managed tests cover formats, page size, configured bytes and JSON/packet
+persistence. Native Debug/Release tests cover MBG7 parsing/truncation, invalid
+formats, missing bytes, selected-address capture and CPU positions 768/1024 past
+the NES 512-pixel coordinate wrap. The live NROM sprite-0-hit split fixture passes
+in Debug/Release with a 781-pixel CPU camera while native raster scrolling stays
+unchanged. The hidden NES editor assertions verify readout, save/reload and
+activation; the run stalled during emulator Stop and was terminated after all
+assertions passed. Both Debug and optimized Release UI builds succeed, and the
+Release executable is present. Broader system-specific CPU
+camera gameplay coverage remains pending.
+
+## NES background PNG raster-scroll override
+
+The Tilemap Viewer exposes "Ignore raster scroll changes (NES)" per background
+PNG and a reference scanline (0–239, default 32). When enabled with hardware
+scroll tracking, the PNG uses the selected scanline's captured scroll offset
+throughout that frame. Choose a scanline below a fixed HUD to follow gameplay
+scrolling. X/Y multipliers, placement, wrapping, CPU conditions, native priority
+and destination clipping still apply. Sprite 0 hit and the game's scroll writes
+continue normally; the setting only changes PNG sampling.
+
+Reference selection uses the uncropped NES frame, so overscan does not shift the
+configured scanline. If that scanline has no valid native background sample,
+sampling falls back to normal raster tracking for that frame. Disabled hardware
+scroll tracking keeps fixed-screen placement. The option is NES-only and defaults
+off for existing definitions. JSON persists both settings; MBG5 transfers them
+alongside rates and comparison conditions, retaining older packet support.
+
+Native tests verify split/uniform sampling, cropped output, speed multipliers,
+missing-reference fallback and clipping. A generated NROM sprite-0-hit fixture
+checks the game's real raster split, choosing HUD/gameplay references, half-rate
+tracking and native restoration in Debug and Release. Both native suites pass;
+the seven existing NES Debug gameplay cases also pass. Hidden NES authoring
+verifies save/reload and activation, including clean shutdown. The optimized
+Release UI build completes without warnings/errors and includes the option.
+Representative generated-ROM coverage does not establish every game's
+mid-frame register sequence or split configuration.
+
+## Background scroll multipliers
+
+Background PNGs now expose independent X/Y scroll multipliers in the Tilemap
+Viewer, enabled while Follow hardware scrolling is selected. Defaults are 1;
+0 holds an axis fixed, 0.5 gives half-rate parallax, 2 doubles the rate, and
+negative values reverse movement. Values range from -16 to 16 with three-decimal
+runtime precision. Placement, wrapping and CPU conditions continue to apply.
+Settings persist in JSON; custom rates transfer through MBG4, with older packets
+defaulting to 1. Native adapters capture scroll offsets separately from sampled
+coordinates so ordinary wrapped tilemaps keep a consistent offset across edges.
+Artwork sampling uses native-pixel steps. These controls scale hardware-driven
+scrolling; independent timed artwork movement is a separate future extension.
+
+Managed persistence/coordinate tests and native rate/wrap/packet checks pass.
+Live WonderSwan monochrome/color fixtures check X=0.5, Y=-1 across wrapped map
+edges with patterned PNGs and CPU gating. Hidden SNES authoring verifies saving
+and reloading both rates. Broader custom-rate affine/Mode 7, mosaic, raster-scroll
+and register-rollover behavior still needs dedicated gameplay verification.
+
+## CPU memory comparison operators
+
+Metasprite, alternate-PNG and background conditions support `==`, `!=`, `>`, `<`,
+`>=` and `<=`. Enter one hexadecimal condition per line, for example
+`$C000 >= $20 / $FF`. The optional mask defaults to FF and applies to both the
+captured unsigned byte and expected value before comparison. Every line must
+match; unavailable addresses fail all operators, including `!=`. Only configured
+addresses are sampled. Existing saved conditions default to equality and legacy
+`=` text remains accepted, but formatted equality now uses `==`.
+
+JSON stores the operator with each condition. Runtime transfers use MSP4/MBG3
+when operators other than equality are present, while equality-only packs retain
+their older packet versions. Unknown operators and truncated packets are rejected.
+Managed/native Debug/Release boundary, mask, persistence, alternate selection and
+packet tests pass. Live WonderSwan checks exercise all six comparisons; hidden GBA
+authoring assertions verify relational alternate/background conditions, but that
+editor run stalled at emulator shutdown after debugger release (session 11336 was
+interrupted). This is an unresolved lifecycle concern, not a completed editor run.
+
+## Slowdown issue: resolved
+
+The user confirmed closure of the slowdown issue on 2026-10-13 and requested
+that it be marked solved. Further slowdown investigation is no longer pending.
+Earlier deferred-investigation notes and benchmark limitations below are
+historical records; this status supersedes them. Resolution is user-confirmed,
+not a claim that those earlier synthetic checks established a universal fix.
+
+## Goal requirements: independent PNG background priority layers
+
+### Required background control: hide original layer
+
+User added a per-replacement "Hide original layer" toggle to the goal on 2026-10-13.
+The toggle, JSON persistence, MBG6 transfer and compositor suppression are now
+implemented; full cross-system lower-layer reveal remains under development.
+When enabled and the replacement is active (including
 matching all configured CPU memory conditions), suppress the assigned native
 layer's tile artwork. Transparent PNG areas reveal lower backgrounds, sprites or
 the backdrop according to native composition rules, rather than the suppressed
@@ -16,8 +221,25 @@ disabled or its conditions stop matching. Define deterministic behavior when
 multiple active replacements share a native layer, and verify alpha, lower-layer
 reveal, priority and activation/deactivation across each supported system.
 
-User requested that this extension be recorded for future development. Implementation
-is deferred; it is not a completion requirement for the current background workflow.
+Any active replacement requesting suppression hides that native layer, regardless
+of PNG placement or alpha. Other active PNGs assigned to that layer continue to
+compose over its remaining layers. GBA/SNES suppress native tile color before
+their staged layer composition. The shared direct-color path uses the captured
+backdrop and background-independent sprite classes, reconstructing unmatched
+decoded native sprites where a hidden background had blocked them. Debug/Release
+native fixtures verify lower BG/native OBJ/backdrop reveal, partial PNG alpha and
+condition mismatch restoration. A live Debug single-VDC PCE fixture verifies
+native and replacement sprite reveal, transparent/partial artwork, CPU gating and
+toggle-off overlay restoration. Hidden GBA authoring saves/reloads/activates the
+toggle and exits cleanly. WonderSwan lower BG and GB window-underlay capture,
+incomplete native sprite captures, SNES lower OBJ reveal and broader effects/modes
+still need work; this evidence does not establish complete support on all systems.
+
+User promoted independent priority layers and hiding original background layers
+from the future agenda into the goal on 2026-10-13. Both are required for completion
+of the expanded goal across all seven target systems. Preserve all existing
+metasprite, background export/placement/scrolling and CPU-condition requirements.
+Implementation and verification of these additions are pending.
 
 Extend PNG backgrounds with independent composition positions inspired by HDnes
 `BackgroundsByPriority`. The current HDnes code provides four groups of ten slots
@@ -45,8 +267,8 @@ artwork correctly. A final foreground overlay is the simplest common position.
 Validate overlapping PNG order, opaque/partial/transparent artwork, native and
 replacement sprites at each insertion position, scrolling, clipping, memory gating
 and disable restoration across supported modes. Rendering cost depends on active
-overlapping artwork, not merely the available slot count; performance investigation
-remains deferred under the user's existing instruction.
+overlapping artwork, not merely the available slot count. The previously reported
+slowdown issue is resolved per the user's confirmation.
 
 ## Full PNG canvas implementation (in progress)
 
@@ -460,7 +682,7 @@ mean unconditional gameplay replacement; older notes below describe prior behavi
 
 At the user's request, further slowdown investigation is deferred. Development
 has returned to the Sprite Viewer metasprite authoring workflow; background PNG
-layers remain a secondary goal and optional 3D artwork remains future work.
+layers remain a secondary goal.
 
 Base replacement PNG import now restores the previous artwork settings and
 retains the existing preview when saving fails. Only the newly created unsaved
@@ -1327,7 +1549,8 @@ Development priorities:
 3. CPU-memory conditions: select alternate metasprite PNGs when all configured
    byte/mask conditions match, and gate background replacements the same way.
    Capture and check only user-defined addresses; never save full memory dumps.
-4. Performance: investigate and fix slowdowns with PNG replacement active;
+4. Performance: resolved per user confirmation on 2026-10-13; investigation is
+   closed. Historical investigation scope: slowdowns with PNG replacement active;
    reproduce the reported 50–70% FPS drop in Debug, including one active PNG
    and opening Sprite Viewer. Also track the 16.67 ms frame-time budget. Measure recognition,
    hashing, native capture, composition, filtering, and presentation together;

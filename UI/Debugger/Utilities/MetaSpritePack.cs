@@ -18,12 +18,13 @@ public sealed class MetaSpritePack
 	public int NextBackgroundId { get; set; } = 1;
 	public List<MetaSpriteGroup> Groups { get; set; } = new();
 	public List<MetaBackgroundLayer> BackgroundLayers { get; set; } = new();
+	public MetaSavedCamera? SavedCamera { get; set; }
 
 	public string GetSpriteDefinitionsSnapshot() => JsonSerializer.Serialize(new MetaSpritePack {
 		Groups = Groups, NextGroupId = NextGroupId
 	}, MetaSpriteSerializerContext.Default.MetaSpritePack);
 	public string GetBackgroundDefinitionsSnapshot() => JsonSerializer.Serialize(new MetaSpritePack {
-		BackgroundLayers = BackgroundLayers, NextBackgroundId = NextBackgroundId
+		BackgroundLayers = BackgroundLayers, NextBackgroundId = NextBackgroundId, SavedCamera = SavedCamera
 	}, MetaSpriteSerializerContext.Default.MetaSpritePack);
 
 	public int AlignPoseOrigins(MetaSpriteGroup source)
@@ -88,6 +89,7 @@ public sealed class MetaSpritePack
 			throw new InvalidDataException("Invalid background layer definitions.");
 		}
 		foreach(var layer in pack.BackgroundLayers) { layer.Validate(); }
+		pack.ValidateSavedCamera();
 		foreach(var group in pack.Groups) {
 			MetaMemoryCondition.ValidateAll(group.MemoryConditions);
 			if(group.AlternateArtwork == null || group.AlternateArtwork.Count > 64) { throw new InvalidDataException("Invalid alternate artwork list."); }
@@ -101,6 +103,17 @@ public sealed class MetaSpritePack
 		}
 		return pack;
 	}
+	public void ValidateSavedCamera() {
+		SavedCamera?.Validate();
+		if(BackgroundLayers.Any(layer => layer.UseSavedCamera) && SavedCamera == null) { throw new InvalidDataException("Linked backgrounds require a saved CPU camera."); }
+	}
+}
+
+public sealed class MetaSavedCamera
+{
+	public MetaCameraAxis X { get; set; } = new();
+	public MetaCameraAxis Y { get; set; } = new();
+	public void Validate() { if(X == null || Y == null) { throw new InvalidDataException("Invalid saved CPU camera."); } X.Validate(); Y.Validate(); }
 }
 
 // Artwork coordinates are native pixels; PNG dimensions include ArtworkScale.
@@ -109,6 +122,7 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
 	private int _artworkScale = 1, _x, _y;
+	private bool _ignoreRasterScroll;
 	public static int? ResolveGameboyRole(int tilemap, bool backgroundMap, bool windowMap)
 	{
 		if(tilemap < 0 || tilemap > 1) { return null; }
@@ -126,6 +140,20 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	public int X { get => _x; set { if(_x != value) { _x = value; PropertyChanged?.Invoke(this, new(nameof(X))); } } }
 	public int Y { get => _y; set { if(_y != value) { _y = value; PropertyChanged?.Invoke(this, new(nameof(Y))); } } }
 	public bool FollowScroll { get; set; } = true;
+	public double ScrollSpeedX { get; set; } = 1;
+	public double ScrollSpeedY { get; set; } = 1;
+	public bool IgnoreRasterScroll { get => _ignoreRasterScroll; set { if(_ignoreRasterScroll != value) { _ignoreRasterScroll = value; PropertyChanged?.Invoke(this, new(nameof(IgnoreRasterScroll))); } } }
+	public bool HideOriginalLayer { get; set; }
+	private bool _useCpuCamera;
+	public bool UseCpuCamera { get => _useCpuCamera; set { _useCpuCamera = value; PropertyChanged?.Invoke(this, new(nameof(UseCpuCamera))); PropertyChanged?.Invoke(this, new(nameof(ScrollSourceIndex))); PropertyChanged?.Invoke(this, new(nameof(UseHardwareScroll))); } }
+	[JsonIgnore] public int ScrollSourceIndex { get => UseCpuCamera ? 1 : 0; set => UseCpuCamera = value == 1; }
+	[JsonIgnore] public bool UseHardwareScroll => !UseCpuCamera;
+	public MetaCameraAxis CameraX { get; set; } = new() { Format = 2 };
+	public MetaCameraAxis CameraY { get; set; } = new();
+	private bool _useSavedCamera;
+	public bool UseSavedCamera { get => _useSavedCamera; set { _useSavedCamera = value; PropertyChanged?.Invoke(this, new(nameof(UseSavedCamera))); PropertyChanged?.Invoke(this, new(nameof(CameraEditable))); } }
+	[JsonIgnore] public bool CameraEditable => !UseSavedCamera;
+	public int ScrollReferenceScanline { get; set; } = 32;
 	public bool WrapX { get; set; }
 	public bool WrapY { get; set; }
 	public bool Enabled { get; set; }
@@ -139,13 +167,21 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 		}
 		MetaSpritePlacement.ValidateCanvas(ArtworkWidth, ArtworkHeight, ArtworkScale);
 		MetaMemoryCondition.ValidateAll(MemoryConditions);
+		ValidateScrollSpeed(ScrollSpeedX); ValidateScrollSpeed(ScrollSpeedY);
+		if(CameraX == null || CameraY == null) { throw new InvalidDataException("Missing CPU camera axes."); }
+		if(!UseSavedCamera) { CameraX.Validate(); CameraY.Validate(); }
+		if(ScrollReferenceScanline < 0 || ScrollReferenceScanline > 239) { throw new InvalidDataException("NES scroll reference scanline must be 0 through 239."); }
+	}
+	public static int ValidateScrollSpeed(double speed) {
+		if(!double.IsFinite(speed) || speed < -16 || speed > 16) { throw new InvalidDataException("Scroll multipliers must be between -16 and 16."); }
+		return (int)Math.Round(speed * 1000, MidpointRounding.AwayFromZero);
 	}
 
 	public bool TryGetArtworkPixel(int screenX, int screenY, int scrollX, int scrollY, out int artworkX, out int artworkY)
 	{
 		Validate();
-		long x = (long)screenX + (FollowScroll ? scrollX : 0) - X;
-		long y = (long)screenY + (FollowScroll ? scrollY : 0) - Y;
+		long x = screenX + (FollowScroll ? (long)Math.Floor((long)scrollX * ValidateScrollSpeed(ScrollSpeedX) / 1000.0) : 0) - X;
+		long y = screenY + (FollowScroll ? (long)Math.Floor((long)scrollY * ValidateScrollSpeed(ScrollSpeedY) / 1000.0) : 0) - Y;
 		int width = ArtworkWidth / ArtworkScale, height = ArtworkHeight / ArtworkScale;
 		if(WrapX) { x = (x % width + width) % width; }
 		if(WrapY) { y = (y % height + height) % height; }
@@ -170,19 +206,71 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	}
 }
 
+public sealed class MetaCameraAxis : INotifyPropertyChanged
+{
+	public event PropertyChangedEventHandler? PropertyChanged;
+	private int _format;
+	private int _pageSize = 256;
+	private bool _signedPage;
+	public bool SignedPage { get => _signedPage; set { _signedPage = value; PropertyChanged?.Invoke(this, new(nameof(SignedPage))); } }
+	private string? _addressDraft, _pageDraft;
+	public int Format { get => _format; set { _format = value; PropertyChanged?.Invoke(this, new(nameof(Format))); PropertyChanged?.Invoke(this, new(nameof(IsPaged))); } }
+	public uint Address { get; set; }
+	public uint PageAddress { get; set; }
+	public int PageSize { get => _pageSize; set { _pageSize = value; PropertyChanged?.Invoke(this, new(nameof(PageSize))); } }
+	[JsonIgnore] public bool IsPaged => Format == 4;
+	[JsonIgnore] public string AddressHex { get => _addressDraft ?? Address.ToString("X4"); set { _addressDraft = value; if(TryAddress(value, out uint address)) { Address = address; } PropertyChanged?.Invoke(this, new(nameof(AddressHex))); } }
+	[JsonIgnore] public string PageAddressHex { get => _pageDraft ?? PageAddress.ToString("X4"); set { _pageDraft = value; if(TryAddress(value, out uint address)) { PageAddress = address; } PropertyChanged?.Invoke(this, new(nameof(PageAddressHex))); } }
+	private static bool TryAddress(string text, out uint address) => uint.TryParse(text.Trim().TrimStart('$'), System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out address);
+	public void Validate() {
+		if(Format < 0 || Format > 4 || PageSize < 1 || PageSize > 65536 || ((Format == 2 || Format == 3) && Address == uint.MaxValue)
+			|| (Format != 0 && _addressDraft != null && !TryAddress(_addressDraft, out _)) || (IsPaged && _pageDraft != null && !TryAddress(_pageDraft, out _))) { throw new InvalidDataException("Invalid CPU camera format, hex address or page size."); }
+	}
+	public IEnumerable<uint> Addresses() {
+		Validate(); if(Format == 0) { yield break; } yield return Address;
+		if(Format == 2 || Format == 3) { yield return Address + 1; }
+		if(IsPaged) { yield return PageAddress; }
+	}
+	public int Decode(Func<uint, byte> read) {
+		Validate(); if(Format == 0) { return 0; }
+		int first = read(Address); if(Format == 1) { return first; }
+		int second = read(IsPaged ? PageAddress : Address + 1);
+		if(IsPaged && SignedPage && second >= 128) { second -= 256; }
+		return Format == 3 ? first * 256 + second : second * (IsPaged ? PageSize : 256) + first;
+	}
+	public MetaCameraAxis Copy() { Validate(); return new() { Format = Format, Address = Address, PageAddress = PageAddress, PageSize = PageSize, SignedPage = SignedPage }; }
+}
+
 public static class MetaBackgroundRuntimePacket
 {
 	public const uint Magic = 0x3147424D; // MBG1
 	public const uint ConditionalMagic = 0x3247424D; // MBG2 adds per-layer byte/mask conditions
+	public const uint ComparisonMagic = 0x3347424D; // MBG3 adds comparison operators
+	public const uint ScrollMagic = 0x3447424D; // MBG4 adds per-axis scroll multipliers
+	public const uint RasterMagic = 0x3547424D; // MBG5 adds NES frame-wide scroll tracking
+	public const uint HideLayerMagic = 0x3647424D; // MBG6 adds native layer suppression
+	public const uint CameraMagic = 0x3747424D; // MBG7 adds CPU camera axes
+	public const uint SignedCameraMagic = 0x3847424D; // MBG8 adds per-axis signed pages
 	public static byte[] Create(MetaSpritePack pack, Func<MetaBackgroundLayer, (int Width, int Height, uint[] Pixels)> loadArtwork)
 	{
+		pack.ValidateSavedCamera();
 		using MemoryStream stream = new();
 		using BinaryWriter writer = new(stream);
 		// Keep older conditionless definitions editable, but never activate them.
 		var layers = pack.BackgroundLayers.Where(layer => layer.Enabled && layer.MemoryConditions.Count > 0).ToList();
 		if(layers.Count > 128 || layers.Select(layer => layer.Id).Distinct().Count() != layers.Count) { throw new InvalidDataException("Invalid background layers."); }
 		bool conditional = layers.Any(layer => layer.MemoryConditions.Count > 0);
-		writer.Write(conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
+		bool comparisons = layers.Any(layer => layer.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal));
+		bool customScroll = layers.Any(layer => layer.ScrollSpeedX != 1 || layer.ScrollSpeedY != 1);
+		bool rasterScroll = layers.Any(layer => layer.IgnoreRasterScroll);
+		bool hideLayer = layers.Any(layer => layer.HideOriginalLayer);
+		bool camera = layers.Any(layer => layer.UseCpuCamera);
+		bool signedCamera = layers.Any(layer => layer.UseCpuCamera && (layer.UseSavedCamera ? pack.SavedCamera!.X.SignedPage || pack.SavedCamera.Y.SignedPage : layer.CameraX.SignedPage || layer.CameraY.SignedPage));
+		hideLayer |= camera;
+		rasterScroll |= hideLayer;
+		customScroll |= rasterScroll;
+		comparisons |= customScroll;
+		writer.Write(signedCamera ? SignedCameraMagic : camera ? CameraMagic : hideLayer ? HideLayerMagic : rasterScroll ? RasterMagic : customScroll ? ScrollMagic : comparisons ? ComparisonMagic : conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
 		foreach(var layer in layers) {
 			layer.Validate();
 			var artwork = loadArtwork(layer);
@@ -192,11 +280,19 @@ public static class MetaBackgroundRuntimePacket
 			writer.Write(layer.Id); writer.Write(layer.NativeLayer); writer.Write(layer.X); writer.Write(layer.Y);
 			writer.Write((layer.FollowScroll ? 1 : 0) | (layer.WrapX ? 2 : 0) | (layer.WrapY ? 4 : 0));
 			writer.Write(layer.ArtworkScale); writer.Write(artwork.Width); writer.Write(artwork.Height);
+			if(customScroll) { writer.Write(MetaBackgroundLayer.ValidateScrollSpeed(layer.ScrollSpeedX)); writer.Write(MetaBackgroundLayer.ValidateScrollSpeed(layer.ScrollSpeedY)); }
+			if(rasterScroll) { writer.Write(layer.IgnoreRasterScroll ? 1 : 0); writer.Write(layer.ScrollReferenceScanline); }
+			if(hideLayer) { writer.Write(layer.HideOriginalLayer ? 1 : 0); }
+			if(camera) {
+				writer.Write(layer.UseCpuCamera ? 1 : 0);
+				foreach(var axis in layer.UseSavedCamera ? new[] {pack.SavedCamera!.X, pack.SavedCamera.Y} : new[] {layer.CameraX, layer.CameraY}) { writer.Write(axis.Format); writer.Write(axis.Address); writer.Write(axis.PageAddress); writer.Write(axis.PageSize); if(signedCamera) { writer.Write(axis.SignedPage ? 1 : 0); } }
+			}
 			foreach(uint pixel in artwork.Pixels) { writer.Write(pixel); }
 			if(conditional) {
 				writer.Write(layer.MemoryConditions.Count);
 				foreach(var condition in layer.MemoryConditions) {
 					writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask);
+					if(comparisons) { writer.Write((int)condition.Comparison); }
 				}
 			}
 		}
@@ -258,14 +354,18 @@ public sealed class MetaSpriteGroup : INotifyPropertyChanged
 
 // Conditions refer to the owning console CPU's mapped byte addresses.
 // Missing snapshots fail closed; an empty list is unconditional.
+public enum MetaMemoryComparison { Equal, NotEqual, Greater, Less, GreaterOrEqual, LessOrEqual }
+
 public sealed class MetaMemoryCondition
 {
 	public uint Address { get; set; }
 	public int Value { get; set; }
 	public int Mask { get; set; } = 255;
+	public MetaMemoryComparison Comparison { get; set; } = MetaMemoryComparison.Equal;
 	public void Validate()
 	{
 		if(Value < 0 || Value > 255 || Mask < 0 || Mask > 255) { throw new InvalidDataException("Memory conditions require byte values and masks."); }
+		if(!Enum.IsDefined(Comparison)) { throw new InvalidDataException("Invalid memory comparison operator."); }
 	}
 	public static void ValidateAll(List<MetaMemoryCondition> conditions)
 	{
@@ -277,7 +377,15 @@ public sealed class MetaMemoryCondition
 		ValidateAll(conditions);
 		foreach(var condition in conditions) {
 			byte? value = readSnapshot(condition.Address);
-			if(!value.HasValue || (value.Value & condition.Mask) != (condition.Value & condition.Mask)) { return false; }
+			if(!value.HasValue) { return false; }
+			int left = value.Value & condition.Mask, right = condition.Value & condition.Mask;
+			bool matches = condition.Comparison switch {
+				MetaMemoryComparison.Equal => left == right, MetaMemoryComparison.NotEqual => left != right,
+				MetaMemoryComparison.Greater => left > right, MetaMemoryComparison.Less => left < right,
+				MetaMemoryComparison.GreaterOrEqual => left >= right, MetaMemoryComparison.LessOrEqual => left <= right,
+				_ => false
+			};
+			if(!matches) { return false; }
 		}
 		return true;
 	}
@@ -290,23 +398,32 @@ public static class MetaMemoryConditionText
 		List<MetaMemoryCondition> result = new();
 		foreach(string line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)) {
 			if(string.IsNullOrWhiteSpace(line)) { continue; }
-			string[] values = line.Split(new[] { ' ', '\t', '=', '/' }, StringSplitOptions.RemoveEmptyEntries);
-			if(values.Length < 2 || values.Length > 3) { throw new InvalidDataException("Use one hexadecimal ADDRESS = VALUE / MASK condition per line."); }
+			var match = System.Text.RegularExpressions.Regex.Match(line, @"^\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+)\s*(==|!=|>=|<=|>|<|=)\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+)(?:\s*/\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+))?\s*$");
+			if(!match.Success) { throw new InvalidDataException("Use one hexadecimal ADDRESS OP VALUE / MASK condition per line; OP is ==, !=, >, <, >= or <=."); }
 			static uint Hex(string value) {
 				if(value.StartsWith("$")) { value = value[1..]; }
 				else if(value.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) { value = value[2..]; }
 				try { return Convert.ToUInt32(value, 16); }
 				catch(Exception ex) when(ex is FormatException || ex is OverflowException || ex is ArgumentException) { throw new InvalidDataException("Conditions require hexadecimal addresses, byte values, and masks."); }
 			}
-			uint value = Hex(values[1]), mask = values.Length == 3 ? Hex(values[2]) : 255;
+			uint value = Hex(match.Groups[3].Value), mask = match.Groups[4].Success ? Hex(match.Groups[4].Value) : 255;
 			if(value > 255 || mask > 255) { throw new InvalidDataException("Condition values and masks must be 00 through FF."); }
-			result.Add(new() { Address = Hex(values[0]), Value = (int)value, Mask = (int)mask });
+			MetaMemoryComparison comparison = match.Groups[2].Value switch {
+				"!=" => MetaMemoryComparison.NotEqual, ">" => MetaMemoryComparison.Greater, "<" => MetaMemoryComparison.Less,
+				">=" => MetaMemoryComparison.GreaterOrEqual, "<=" => MetaMemoryComparison.LessOrEqual, _ => MetaMemoryComparison.Equal
+			};
+			result.Add(new() { Address = Hex(match.Groups[1].Value), Value = (int)value, Mask = (int)mask, Comparison = comparison });
 		}
 		MetaMemoryCondition.ValidateAll(result);
 		return result;
 	}
 	public static string Format(List<MetaMemoryCondition> conditions) => string.Join(Environment.NewLine,
-		conditions.Select(c => $"${c.Address:X} = ${c.Value:X2} / ${c.Mask:X2}"));
+		conditions.Select(c => $"${c.Address:X} {Operator(c.Comparison)} ${c.Value:X2} / ${c.Mask:X2}"));
+	public static string Operator(MetaMemoryComparison comparison) => comparison switch {
+		MetaMemoryComparison.Equal => "==", MetaMemoryComparison.NotEqual => "!=", MetaMemoryComparison.Greater => ">",
+		MetaMemoryComparison.Less => "<", MetaMemoryComparison.GreaterOrEqual => ">=", MetaMemoryComparison.LessOrEqual => "<=",
+		_ => throw new InvalidDataException("Invalid memory comparison operator.")
+	};
 }
 
 public sealed class MetaAlternateArtwork : INotifyPropertyChanged
@@ -416,6 +533,7 @@ public static class MetaSpriteRuntimePacket
 	public const uint Magic = 0x3150534D; // MSP1, little endian
 	public const uint ConditionalMagic = 0x3250534D; // MSP2 adds per-group byte/mask conditions
 	public const uint AlternateMagic = 0x3350534D; // MSP3 adds alternate PNGs
+	public const uint ComparisonMagic = 0x3450534D; // MSP4 adds comparison operators
 	public static byte[] Create(MetaSpritePack pack, Func<MetaSpriteGroup, (int Width, int Height, uint[] Pixels)> loadArtwork,
 		Func<MetaAlternateArtwork, (int Width, int Height, uint[] Pixels)>? loadAlternate = null)
 	{
@@ -423,8 +541,11 @@ public static class MetaSpriteRuntimePacket
 		using BinaryWriter writer = new(stream);
 		var groups = pack.Groups.Where(g => g.Enabled).ToList();
 		bool alternates = groups.Any(g => g.AlternateArtwork.Any(a => a.MemoryConditions.Count > 0));
+		bool comparisons = groups.Any(g => g.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal)
+			|| g.AlternateArtwork.Where(a => a.MemoryConditions.Count > 0).Any(a => a.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal)));
+		alternates |= comparisons; // MSP4 retains the alternate-image count even when zero.
 		bool conditional = alternates || groups.Any(g => g.MemoryConditions.Count > 0);
-		writer.Write(alternates ? AlternateMagic : conditional ? ConditionalMagic : Magic);
+		writer.Write(comparisons ? ComparisonMagic : alternates ? AlternateMagic : conditional ? ConditionalMagic : Magic);
 		writer.Write(groups.Count);
 		foreach(var group in groups) {
 			var artwork = loadArtwork(group);
@@ -446,6 +567,7 @@ public static class MetaSpriteRuntimePacket
 				writer.Write(group.MemoryConditions.Count);
 				foreach(var condition in group.MemoryConditions) {
 					writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask);
+					if(comparisons) { writer.Write((int)condition.Comparison); }
 				}
 			}
 			if(alternates) {
@@ -464,6 +586,7 @@ public static class MetaSpriteRuntimePacket
 					writer.Write(alternate.MemoryConditions.Count);
 					foreach(var condition in alternate.MemoryConditions) {
 						writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask);
+						if(comparisons) { writer.Write((int)condition.Comparison); }
 					}
 				}
 			}

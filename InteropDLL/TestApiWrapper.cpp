@@ -252,11 +252,11 @@ static bool VerifyLiveMemoryConditions(Emulator* emu, MetaSpriteTestRenderer& re
 		value = renderer.Capture->MemorySnapshot.at(0);
 		hdWidth = renderer.Width; hdHeight = renderer.Height;
 	}
-	auto waitFor = [&](bool enabled, bool missing) {
+	auto waitFor = [&](bool enabled, bool missing, uint64_t newerThan = 0) {
 		for(int attempt = 0; attempt < 500; attempt++) {
 			{
 				std::lock_guard<std::mutex> lock(renderer.Mutex);
-				if(renderer.Capture && renderer.Width == (enabled ? hdWidth : hdWidth / 2)
+				if(renderer.Capture && renderer.FrameNumber > newerThan && renderer.Width == (enabled ? hdWidth : hdWidth / 2)
 					&& renderer.Height == (enabled ? hdHeight : hdHeight / 2)
 					&& (missing ? renderer.Capture->MemorySnapshot.empty() : renderer.Capture->MemorySnapshot.count(0) == 1)) { return true; }
 			}
@@ -264,6 +264,18 @@ static bool VerifyLiveMemoryConditions(Emulator* emu, MetaSpriteTestRenderer& re
 		}
 		return false;
 	};
+	group.MemoryConditions = {{0, value, 0xFF}};
+	for(uint8_t comparison = 0; comparison < 6; comparison++) {
+		for(uint8_t threshold : std::initializer_list<uint8_t>{0, value, 255}) {
+			bool expected = comparison == 0 ? value == threshold : comparison == 1 ? value != threshold
+				: comparison == 2 ? value > threshold : comparison == 3 ? value < threshold : comparison == 4 ? value >= threshold : value <= threshold;
+			group.MemoryConditions = {{0, threshold, 0xFF, comparison}};
+			uint64_t previous;
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); previous = renderer.FrameNumber + 1; }
+			emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+			if(!waitFor(expected, false, previous)) { return false; }
+		}
+	}
 	group.MemoryConditions = {{0, value, 0xFF}};
 	emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
 	if(!waitFor(true, false)) { return false; }
@@ -1054,6 +1066,7 @@ extern "C"
 	}
 	DllExport uint32_t __stdcall RunMetaSpriteNesCaptureTest(const char* filename)
 	{
+		bool rasterFixture = string(filename).find("sprite0-raster") != string::npos;
 		bool backgroundFixture = string(filename).find("background") != string::npos;
 		bool scrollFixture = string(filename).find("scroll") != string::npos;
 		bool maskFixture = string(filename).find("mask") != string::npos;
@@ -1156,6 +1169,41 @@ extern "C"
 						}
 						return renderer.Pixels[0] == expectedBackground(cropLeft * 2, cropTop * 2);
 					})) { flags |= 2; }
+					if(rasterFixture && (flags & 2)) {
+						MetaBackgroundReplacement raster;
+						raster.Id = 1; raster.Width = raster.Height = 64; raster.Scale = 2; raster.WrapX = raster.WrapY = true;
+						raster.MemoryConditions = {{0, 0, 0}}; raster.Artwork.resize(4096);
+						for(int y = 0; y < 64; y++) { for(int x = 0; x < 64; x++) { raster.Artwork[y * 64 + x] = 0xFF000000 | (x << 16) | (y << 8); } }
+						for(int mode = 0; mode < 6; mode++) {
+							raster.IgnoreRasterScroll = mode != 0; raster.ScrollReferenceScanline = mode == 2 ? 0 : 32;
+							raster.ScrollSpeedX = mode == 3 ? 500 : 1000;
+							raster.UseCpuCamera = mode >= 4; raster.CameraX = mode == 5 ? MetaCameraAxis{4, 0x62, 0x63, 256, true} : MetaCameraAxis{4, 0x60, 0x61, 256};
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, {raster});
+							if(!waitFor([&]() {
+								if(renderer.Width != 512 || renderer.Height != 480 || !renderer.Capture) { return false; }
+								const auto& top = renderer.Capture->Pixels[0].BackgroundSample;
+								const auto& lower = renderer.Capture->Pixels[32 * 256].BackgroundSample;
+								if(!top.Valid || !lower.Valid || !top.NesRasterScroll || top.ScrollX != 0 || lower.ScrollX != 24) { return false; }
+								for(int y = 0; y < 480; y++) { for(int x = 0; x < 512; x++) {
+									if(x >= 16 && x < 32 && y >= 16 && y < 32) { continue; }
+									const auto& sample = renderer.Capture->Pixels[(y / 2) * 256 + x / 2].BackgroundSample;
+									if(!sample.Valid) { return false; }
+									int scrollX = mode == 0 ? sample.ScrollX : mode == 2 ? top.ScrollX : lower.ScrollX;
+									int scrollY = mode == 0 ? sample.ScrollY : mode == 2 ? top.ScrollY : lower.ScrollY;
+									if(mode == 3) { scrollX /= 2; }
+									if(mode == 4) { scrollX = 781; scrollY = 0; }
+									if(mode == 5) { scrollX = -10; scrollY = 0; }
+									int ax = ((x / 2 + scrollX) % 32 + 32) % 32 * 2 + x % 2, ay = ((y / 2 + scrollY) % 32 + 32) % 32 * 2 + y % 2;
+									if(renderer.Pixels[y * 512 + x] != (0xFF000000u | (uint32_t)(ax << 16) | (uint32_t)(ay << 8))) { return false; }
+								} }
+								return renderer.Capture->MemorySnapshot.size() == (mode >= 4 ? 3 : 1) && renderer.Capture->MemorySnapshot.count(0)
+									&& (mode < 4 || (renderer.Capture->MemorySnapshot.count(raster.CameraX.Address) && renderer.Capture->MemorySnapshot.count(raster.CameraX.PageAddress)));
+							})) { flags |= 128; }
+						}
+						if(!(flags & 128)) { std::cout << "PASS: NES NROM sprite-0-hit split remains native; PNG uses gameplay/HUD reference, half-rate tracking or CPU pixel/page camera beyond nametable wrapping." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+						if(!waitFor([&]() { return renderer.Width == 512 && renderer.Pixels[0] == 0xFF0000FF && renderer.Pixels[17 * 512 + 17] == 0xFF00FF00; })) { flags |= 128; }
+					}
 					if(!VerifyExpandedCanvas(emu.get(), renderer, group, 8 - cropLeft, 8 - cropTop, 0, source.ExpansionClass, cropLeft, cropTop)) { flags |= 128; }
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[(8 - cropTop) * nativeWidth + 8 - cropLeft] == (transparentFixture ? 0xFF0000FF : 0xFFFF0000); })) { flags |= 4; }
@@ -1168,8 +1216,10 @@ extern "C"
 	DllExport uint32_t __stdcall RunMetaSpriteWsCaptureTest(const char* filename)
 	{
 		bool monochrome = string(filename).find("mono") != string::npos;
+		bool underlayFixture = string(filename).find("underlay") != string::npos;
+		bool clearForegroundFixture = string(filename).find("underlay-clear") != string::npos;
 		uint32_t nativeSprite = monochrome ? 0xFF000000 : 0xFFFF0000;
-		uint32_t nativeBackground = monochrome ? 0xFFFFFFFF : 0xFF0000FF;
+		uint32_t nativeBackground = underlayFixture ? 0xFFFFFF00 : monochrome ? 0xFFFFFFFF : 0xFF0000FF;
 		bool holes = string(filename).find("holes") != string::npos;
 		bool occluded = string(filename).find("occluded") != string::npos;
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
@@ -1203,7 +1253,7 @@ extern "C"
 										for(int x = 0; x < 224; x++) {
 											const auto& sample = renderer.Capture->Pixels[y * 224 + x].BackgroundSample;
 											bool inside = x >= 40 && x <= 95 && y >= 24 && y <= 63;
-											bool window = windowFixture && inside != outside;
+											bool window = windowFixture && inside != outside && !clearForegroundFixture;
 											valid &= sample.Valid && sample.Layer == (window ? 1 : 0) && sample.X == ((x + (window ? 7 : scrolled ? 253 : 0)) & 255)
 												&& sample.Y == ((y + (window ? 9 : scrolled ? 250 : 0)) & 255);
 										}
@@ -1211,7 +1261,7 @@ extern "C"
 									if(!valid) { continue; }
 								}
 								if((occluded ? pixel.VisibleSprite == -1 : pixel.VisibleSprite == 0 && pixel.SpriteColor == (monochrome ? 0 : 0xF00))
-									&& pixel.BackgroundColor == (monochrome ? 0xFFF : 15) && renderer.Pixels[8 * 224 + 8] == (occluded ? nativeBackground : nativeSprite)
+									&& pixel.BackgroundColor == (underlayFixture ? 0xFF0 : monochrome ? 0xFFF : 15) && renderer.Pixels[8 * 224 + 8] == (occluded ? nativeBackground : nativeSprite)
 									&& renderer.Pixels[0] == nativeBackground) { flags = 1; source = graphic; }
 							}
 						}
@@ -1226,6 +1276,7 @@ extern "C"
 					group.Artwork.assign(256, 0xFF00FF00); group.Artwork[0] = 0;
 					bool backgroundFixture = string(filename).find("background") != string::npos;
 					bool patterned = backgroundFixture && string(filename).find("scroll") != string::npos;
+					bool customScroll = backgroundFixture && string(filename).find("scroll-speed") != string::npos;
 					bool windowFixture = backgroundFixture && string(filename).find("window") != string::npos;
 					bool outsideWindow = windowFixture && string(filename).find("outside") != string::npos;
 					auto texture = [](int x, int y) { return 0xFF000000u | ((uint32_t)x * 13 << 16) | ((uint32_t)y * 11 << 8) | ((x ^ y) * 7); };
@@ -1234,8 +1285,8 @@ extern "C"
 						bool inside = x / 2 >= 40 && x / 2 <= 95 && y / 2 >= 24 && y / 2 <= 63;
 						if(windowFixture && inside != outsideWindow) { return 0xFFFF00FFu; }
 						if(!patterned) { return 0xFFFFFFFFu; }
-						int tx = (((x / 2 + 253) & 255) % 8) * 2 + x % 2;
-						int ty = (((y / 2 + 250) & 255) % 8) * 2 + y % 2;
+						int tx = (((x / 2 + (customScroll ? 126 : 253)) & 255) % 8) * 2 + x % 2;
+						int ty = (((y / 2 + (customScroll ? -250 : 250)) & 255) % 8) * 2 + y % 2;
 						return texture(tx, ty);
 					};
 					std::vector<MetaBackgroundReplacement> authoredBackgrounds;
@@ -1243,6 +1294,7 @@ extern "C"
 						MetaBackgroundReplacement bg;
 						bg.Id = 1; bg.Width = bg.Height = 2; bg.Scale = 2; bg.WrapX = bg.WrapY = true; bg.Artwork.assign(4, 0xFFFFFFFF);
 						bg.MemoryConditions = {{0, 0, 0}, {1, 0, 0}};
+						if(customScroll) { bg.ScrollSpeedX = 500; bg.ScrollSpeedY = -1000; }
 						if(patterned) {
 							bg.Width = bg.Height = 16; bg.Artwork.resize(256);
 							for(int y = 0; y < 16; y++) { for(int x = 0; x < 16; x++) { bg.Artwork[y * 16 + x] = texture(x, y); } }
@@ -1288,6 +1340,28 @@ extern "C"
 						return renderer.Pixels[0] == expectedBackground(0, 0);
 					})) { flags |= 2; }
 					if(!VerifyExpandedCanvas(emu.get(), renderer, group, 8, 8, 0, source.ExpansionClass)) { flags |= 128; }
+					if(underlayFixture) {
+						MetaBackgroundReplacement upper = authoredBackgrounds[1]; upper.HideOriginalLayer = true; upper.Artwork.assign(4, 0);
+						auto check = [&](uint32_t expected) { return waitFor([&]() {
+							if(renderer.Width != 448 || !renderer.Capture || renderer.Capture->BackgroundUnderlays.size() != 224 * 144) { return false; }
+							const auto& lower = renderer.Capture->BackgroundUnderlays[30 * 224 + 50];
+								return lower.Sample.Valid && lower.Sample.Layer == 0 && lower.Color == 0xFF0
+									&& lower.ForegroundSample.Valid && lower.ForegroundOpaque == !clearForegroundFixture
+								&& renderer.Capture->Pixels[30 * 224 + 50].NativeBackdropColor == 15 && renderer.Pixels[60 * 448 + 100] == expected;
+						}); };
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {authoredBackgrounds[0], upper});
+						if(!check(0xFFFFFFFF)) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {upper});
+						if(!check(0xFFFFFF00)) { flags |= 128; }
+						upper.Artwork.assign(4, 0x8000FF00); emu->GetVideoDecoder()->SetMetaReplacements({group}, {upper});
+						if(!check(0xFF7FFF00)) { flags |= 128; }
+						MetaBackgroundReplacement lower = authoredBackgrounds[0]; lower.HideOriginalLayer = true; lower.Artwork.assign(4, 0);
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {lower, upper});
+						if(!check(0xFF00807F)) { flags |= 128; }
+						if(!(flags & 128)) { std::cout << "PASS: WonderSwan hidden BG1 reveals distinct native BG0 or its PNG; both hidden layers reveal backdrop with partial-alpha artwork." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, authoredBackgrounds);
+						if(!waitFor([&]() { return renderer.Width == 448 && renderer.Pixels[60 * 448 + 100] == 0xFFFF00FF; })) { flags |= 128; }
+					}
 					if(backgroundFixture) {
 						uint8_t first = 0, second = 0;
 						if(!waitFor([&]() {
@@ -1306,6 +1380,7 @@ extern "C"
 								if(renderer.Width != 448 || renderer.Height != 288 || !renderer.Capture || renderer.Capture->MemorySnapshot.size() != 2) { return false; }
 								for(auto point : {std::pair<int, int>{0, 0}, {80, 48}}) {
 									uint32_t expected = failingCondition < 0 ? expectedBackground(point.first, point.second) : nativeBackground;
+									if(underlayFixture && !clearForegroundFixture && failingCondition >= 0 && point.first == 80) { expected = 0xFF0000FF; }
 									if(renderer.Pixels[point.second * 448 + point.first] != expected) { return false; }
 								}
 								return true;
@@ -1596,6 +1671,8 @@ extern "C"
 	DllExport uint32_t __stdcall RunMetaSpritePceGameplayTest(const char* filename)
 	{
 		bool behindOpaque = string(filename).find("opaque-bg-behind") != string::npos;
+		bool opaqueNative = string(filename).find("opaque-bg") != string::npos;
+		bool hideFixture = string(filename).find("opaque-bg-behind-hide") != string::npos;
 		bool behindPng = string(filename).find("png-background-behind") != string::npos;
 		bool backgroundFixture = string(filename).find("background") != string::npos;
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
@@ -1646,6 +1723,11 @@ extern "C"
 							if(!correct) { continue; }
 						}
 						x = candidate.X - PceConstants::GetLeftOverscan(divider); y = candidate.Y;
+						if(opaqueNative) {
+							const auto& captured = renderer.Capture->Pixels[candidate.Y * renderer.Capture->Width + candidate.X];
+							if(!captured.NativeBackdropCaptured || captured.NativeBackdropColor != 0 || captured.BackgroundColor == captured.NativeBackdropColor) { continue; }
+							if(captured.ExpandedSpriteClassesWithoutBackground != 3 || captured.ExpandedSpriteClasses != 1) { continue; }
+						}
 						if(x < 0 || y < 0 || x + spriteWidth > (int)width || y + 16 > (int)height || renderer.Pixels[y * width + x] != (behindOpaque ? 0xFF0000FF : candidate.Pixels[0])) { continue; }
 						if(string(filename).find("background") != string::npos) {
 							const auto& sample = renderer.Capture->Pixels[candidate.Y * renderer.Capture->Width + candidate.X].BackgroundSample;
@@ -1693,6 +1775,33 @@ extern "C"
 					})) { flags |= 4; }
 					if(waitFor([&]() { return renderer.Width == width * 2 && renderer.Pixels[0] == background
 						&& (!backgroundFixture || renderer.Pixels[y * 2 * renderer.Width + (x + spriteWidth + 1) * 2] == 0xFFFFFFFF); })) { flags |= 8; }
+					if(hideFixture) {
+						MetaBackgroundReplacement hidden; hidden.Id = 1; hidden.Width = hidden.Height = 2; hidden.Scale = 2;
+						hidden.WrapX = hidden.WrapY = true; hidden.HideOriginalLayer = true; hidden.Artwork.assign(4, 0); hidden.MemoryConditions = {{0, 0, 0}};
+						auto check = [&](uint32_t inside, uint32_t outside, bool scaled) {
+							return waitFor([&]() {
+								uint32_t scale = scaled ? 2 : 1;
+								return renderer.Width == width * scale && renderer.Height == height * scale
+									&& renderer.Pixels[(y + 2) * scale * renderer.Width + (x + 2) * scale] == inside
+									&& renderer.Pixels[(y + 2) * scale * renderer.Width + (x + spriteWidth + 3) * scale] == outside;
+								});
+						};
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {hidden});
+						if(!check(0xFF00FF00, 0xFF000000, true)) { flags |= 128; }
+						emu->GetVideoDecoder()->SetMetaReplacements({}, {hidden});
+						if(!check(0xFFFF0000, 0xFF000000, true)) { flags |= 128; }
+						hidden.Artwork.assign(4, 0x8000FF00); emu->GetVideoDecoder()->SetMetaReplacements({}, {hidden});
+						if(!check(0xFF7F8000, 0xFF008000, true)) { flags |= 128; }
+						uint8_t capturedValue = 0;
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Capture && renderer.Capture->MemorySnapshot.count(0)) { capturedValue = renderer.Capture->MemorySnapshot.at(0); } else { flags |= 128; } }
+						hidden.MemoryConditions = {{0, (uint8_t)(capturedValue ^ 1), 255}}; emu->GetVideoDecoder()->SetMetaReplacements({}, {hidden});
+						if(!check(0xFF0000FF, 0xFF0000FF, false)) { flags |= 128; }
+						hidden.MemoryConditions = {{0, capturedValue, 255}}; hidden.HideOriginalLayer = false; emu->GetVideoDecoder()->SetMetaReplacements({}, {hidden});
+						if(!check(0xFF00807F, 0xFF00807F, true)) { flags |= 128; }
+						if(!(flags & 128)) { std::cout << "PASS: PCE hide-layer toggle reveals native/replacement sprites and backdrop through PNG alpha; mismatch restores tiles and toggle-off restores overlay behavior." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+						if(!check(0xFF0000FF, 0xFF0000FF, true)) { flags |= 128; }
+					}
 					if(!VerifyExpandedCanvas(emu.get(), renderer, group, x, y, 0, source.ExpansionClass, PceConstants::GetLeftOverscan(divider), 0, behindPng)) { flags |= 128; }
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group, !behindOpaque)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
@@ -1722,8 +1831,12 @@ extern "C"
 		emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
 		auto& cfg = emu->GetSettings()->GetGameboyConfig();
 		bool gbcFixture = string(filename).find(".gbc") != string::npos;
-		bool scrolledGbFixture = gbcFixture && string(filename).find("scroll") != string::npos;
-		bool windowGbFixture = gbcFixture && string(filename).find("window") != string::npos;
+		bool scrolledGbFixture = string(filename).find("scroll.gb") != string::npos;
+		bool windowGbFixture = string(filename).find("window") != string::npos && string(filename).find(".gb") != string::npos;
+		bool distinctGbUnderlay = windowGbFixture && string(filename).find("underlay") != string::npos;
+		bool windowObjectFixture = windowGbFixture && string(filename).find("window-object") != string::npos;
+		bool behindWindowObject = windowObjectFixture && string(filename).find("behind") != string::npos;
+		bool nativeOverlapFixture = gbcFixture && string(filename).find("native-overlap") != string::npos;
 		cfg.Model = gbcFixture ? GameboyModel::GameboyColor : GameboyModel::Gameboy;
 		cfg.RamPowerOnState = RamState::AllZeros;
 		cfg.BlendFrames = false;
@@ -1753,13 +1866,15 @@ extern "C"
 				if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(true); }
 				if(sms) { sms->GetVdp()->SetMetaSpriteCapture(true); }
 				uint32_t nativeWidth = sms ? 256 : 160, nativeHeight = sms ? 240 : 144;
-				int spriteY = sms ? 32 : 8;
-				int spriteX = sms && leftFixture ? -4 : sms && maskFixture ? 4 : 8;
+				int spriteY = sms ? 32 : windowObjectFixture ? 30 : 8;
+				int spriteX = sms && leftFixture ? -4 : sms && maskFixture ? 4 : windowObjectFixture ? 50 : 8;
 				int visibleX = maskFixture ? 8 : std::max(0, spriteX);
 				int spriteWidth = sms && zoomFixture && !sms1Fixture ? 16 : 8;
 				int spriteHeight = sms && zoomFixture ? 16 : 8;
 				MetaSpriteGraphic source;
 				uint32_t originalBackground = 0;
+				uint32_t retainedBackgroundArgb = 0;
+				uint16_t retainedBackgroundColor = 0;
 				uint32_t occludedPixel = 0;
 				uint32_t maskedPixel = 0;
 				bool captured = waitFor([&]() {
@@ -1797,7 +1912,7 @@ extern "C"
 							if(gbcFixture) {
 								bool holeFixture = string(filename).find("holes") != string::npos, validGraphic = true;
 								for(size_t i = 0; i < candidate.Pixels.size(); i++) { validGraphic &= candidate.Pixels[i] == (holeFixture && i % 8 == 7 ? 0 : 0xFFFF0000u); }
-								if(!validGraphic || renderer.Pixels[0] != 0xFF0000FF) { continue; }
+								if(!validGraphic || renderer.Pixels[0] != (distinctGbUnderlay ? 0xFFFFFF00 : 0xFF0000FF)) { continue; }
 							}
 							if(gameboy) {
 								if(string(filename).find("holes") != string::npos) {
@@ -1821,6 +1936,7 @@ extern "C"
 								if(!validBackground) { continue; }
 							}
 							source = candidate; originalBackground = renderer.Pixels[0];
+							retainedBackgroundArgb = renderer.Pixels[0]; retainedBackgroundColor = renderer.Capture->Pixels[0].BackgroundColor;
 							if(sms) { occludedPixel = renderer.Pixels[spriteY * nativeWidth + 24]; }
 							if(maskFixture) { maskedPixel = renderer.Pixels[spriteY * nativeWidth + 4]; }
 							return true;
@@ -1852,6 +1968,7 @@ extern "C"
 					}
 					uint32_t partialBackground = 0xFF000000;
 					uint32_t alphaBackground = smsBackgroundFixture ? 0xFFFFFFFF : originalBackground;
+					if(nativeOverlapFixture) { alphaBackground = 0xFFFFFF00; }
 					if(gameboy || smsBackgroundFixture) {
 						group.Artwork[0] = 0;
 						group.Artwork[1] = 0x8000FF00;
@@ -1868,6 +1985,7 @@ extern "C"
 							for(int y = 0; y < spriteHeight * 2; y++) {
 								for(int x = 0; x < spriteWidth * 2; x++) {
 									uint32_t expected = y == 0 && x == 0 ? alphaBackground : y == 0 && x == 1 ? partialBackground : 0xFF00FF00;
+									if(behindWindowObject) { expected = alphaBackground; }
 									if(renderer.Pixels[(spriteY * 2 + y) * renderer.Width + spriteX * 2 + x] != expected) { return false; }
 								}
 							}
@@ -1880,7 +1998,40 @@ extern "C"
 						&& occludedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[priorityY * nativeWidth + priorityX].VisibleSprite == -1; })) { flags |= 32; }
 					if(maskFixture && waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels[spriteY * 2 * renderer.Width + 8] == maskedPixel
 						&& maskedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[spriteY * nativeWidth + 4].VisibleSprite == -1; })) { flags |= 64; }
-					if(!VerifyExpandedCanvas(emu.get(), renderer, group, spriteX, spriteY, 0, source.ExpansionClass, 0, 0, smsBackgroundFixture)) { flags |= 128; }
+					if(!VerifyExpandedCanvas(emu.get(), renderer, group, spriteX, spriteY, 0, source.ExpansionClass, 0, 0, smsBackgroundFixture || behindWindowObject)) { flags |= 128; }
+					if(windowGbFixture) {
+						MetaBackgroundReplacement window; window.Id = 2; window.Layer = 1;
+						window.Width = window.Height = 2; window.Scale = 2; window.WrapX = window.WrapY = true;
+						window.HideOriginalLayer = true; window.Artwork.assign(4, 0);
+						emu->GetVideoDecoder()->SetMetaReplacements({group}, {window});
+						if(!waitFor([&]() {
+							if(renderer.Width != 320 || !renderer.Capture || renderer.Capture->BackgroundUnderlays.size() != 160 * 144) { return false; }
+							const auto& lower = renderer.Capture->BackgroundUnderlays[48 * 160 + 80];
+							return lower.Sample.Valid && lower.Sample.Layer == 0 && lower.Sample.X == ((80 + 253) & 255)
+								&& lower.Sample.Y == ((48 + 250) & 255) && lower.Color == retainedBackgroundColor
+								&& lower.SpriteEligibilityCaptured && renderer.Pixels[96 * 320 + 160] == retainedBackgroundArgb
+								&& (!windowObjectFixture || renderer.Pixels[62 * 320 + 102] == 0xFF00FF00);
+						})) { flags |= 128; }
+						window.Artwork.assign(4, 0x8000FF00); emu->GetVideoDecoder()->SetMetaReplacements({group}, {window});
+						uint32_t blended = 0xFF000000;
+						for(int shift : {0, 8, 16}) { blended |= (((shift == 8 ? 255 : 0) * 128 + ((retainedBackgroundArgb >> shift) & 255) * 127 + 127) / 255) << shift; }
+						if(!waitFor([&]() { return renderer.Width == 320 && renderer.Pixels[96 * 320 + 160] == blended
+							&& (!windowObjectFixture || renderer.Pixels[62 * 320 + 102] == 0xFF00FF00); })) { flags |= 128; }
+						if(windowObjectFixture) {
+							emu->GetVideoDecoder()->SetMetaReplacements({}, {window});
+							if(!waitFor([&]() { return renderer.Width == 320 && renderer.Pixels[62 * 320 + 102] == (behindWindowObject ? 0xFF7F8000 : 0xFFFF0000)
+								&& renderer.Pixels[96 * 320 + 160] == blended; })) { flags |= 128; }
+							window.Artwork.assign(4, 0); emu->GetVideoDecoder()->SetMetaReplacements({}, {window});
+							if(!waitFor([&]() { return renderer.Width == 320 && renderer.Pixels[62 * 320 + 102] == 0xFFFF0000
+								&& renderer.Pixels[96 * 320 + 160] == retainedBackgroundArgb; })) { flags |= 128; }
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+							if(!waitFor([&]() { return renderer.Width == 320 && renderer.Capture
+								&& renderer.Capture->MemorySnapshot.size() == 1 && renderer.Capture->MemorySnapshot.count(0)
+								&& renderer.Pixels[62 * 320 + 102] == 0xFF00FF00; })) { flags |= 128; }
+						}
+						if(!(flags & 128)) { std::cout << "PASS: GB/GBC hidden window retains scrolled native BG and blends PNG alpha above it." << std::endl; }
+						emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
+					}
 					if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({});
 					emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[spriteY * nativeWidth + visibleX] != 0xFF00FF00; })) { flags |= 16; }

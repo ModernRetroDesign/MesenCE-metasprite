@@ -634,6 +634,10 @@ void GbaPpu::PushBgPixels(int renderX)
 				int sampleX = renderX;
 				if constexpr(mosaic) { sampleX -= renderX % (_state.BgMosaicSizeX + 1); }
 				_metaBgSamples[i][renderX] = {(_metaBgMapXBase[i] + sampleX) & _metaBgMapWidthMask[i], _metaBgMapY[i], i, true};
+				_metaBgSamples[i][renderX].ScrollX = _state.BgLayers[i].ScrollX;
+				_metaBgSamples[i][renderX].ScrollY = _state.BgLayers[i].ScrollY;
+				_metaBgSamples[i][renderX].ScrollWrapX = _metaBgMapWidthMask[i] + 1;
+				_metaBgSamples[i][renderX].ScrollWrapY = _state.BgLayers[i].DoubleHeight ? 512 : 256;
 			}
 		}
 		tileData >>= bpp8 ? 8 : 4;
@@ -808,7 +812,12 @@ void GbaPpu::RenderTransformTilemap()
 					if(color != 0 && _layerData[i].XPos < screenSize && _layerData[i].YPos < screenSize) {
 						SetPixelData(_layerOutput[i][_layerData[i].RenderX], color * 2, layer.Priority, i);
 					}
-					if(_metaFrame) { _metaBgSamples[i][_layerData[i].RenderX] = {(int)_layerData[i].XPos, (int)_layerData[i].YPos, i, _layerData[i].XPos < screenSize && _layerData[i].YPos < screenSize}; }
+					if(_metaFrame) {
+						auto& sample = _metaBgSamples[i][_layerData[i].RenderX];
+						sample = {(int)_layerData[i].XPos, (int)_layerData[i].YPos, i, _layerData[i].XPos < screenSize && _layerData[i].YPos < screenSize};
+						sample.ScrollX = ((int32_t)(cfg.OriginX << 4) >> 4) >> 8; sample.ScrollY = ((int32_t)(cfg.OriginY << 4) >> 4) >> 8;
+						if(layer.WrapAround) { sample.ScrollWrapX = sample.ScrollWrapY = screenSize; }
+					}
 				}
 				_layerData[i].RenderX++;
 				//MessageManager::Log(std::to_string(_state.Scanline) + "," + std::to_string(cycle) + " fetch pixel");
@@ -852,7 +861,10 @@ void GbaPpu::RenderBitmapMode()
 			_memoryAccess[cycle + gap] |= GbaPpuMemAccess::Vram;
 
 			if(_layerData[2].YPos < screenHeight && _layerData[2].XPos < screenWidth) {
-				if(_metaFrame) { _metaBgSamples[2][_layerData[2].RenderX] = {(int)_layerData[2].XPos, (int)_layerData[2].YPos, 2, true}; }
+				if(_metaFrame) {
+					auto& sample = _metaBgSamples[2][_layerData[2].RenderX]; sample = {(int)_layerData[2].XPos, (int)_layerData[2].YPos, 2, true};
+					sample.ScrollX = ((int32_t)(cfg.OriginX << 4) >> 4) >> 8; sample.ScrollY = ((int32_t)(cfg.OriginY << 4) >> 4) >> 8;
+				}
 				uint32_t addr = _layerData[2].YPos * screenWidth + _layerData[2].XPos;
 				if constexpr(mode == 3 || mode == 5) {
 					SetPixelData(_layerOutput[2][_layerData[2].RenderX], _vram16[(base >> 1) + addr] | GbaPpu::DirectColorFlag, layer.Priority, 2);

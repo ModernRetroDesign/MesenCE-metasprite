@@ -65,6 +65,9 @@ struct MetaBackgroundSample
 	// Number of captured output pixels per native background texel and the
 	// current pixel's phase within it. Other adapters use the default 1:1 grid.
 	uint8_t PixelScaleX = 1, PixelScaleY = 1, PixelOffsetX = 0, PixelOffsetY = 0;
+	int32_t ScrollX = 0, ScrollY = 0;
+	int32_t ScrollWrapX = 0, ScrollWrapY = 0;
+	bool NesRasterScroll = false;
 };
 
 struct MetaGbaSpriteCoverage
@@ -124,6 +127,9 @@ struct MetaSpritePixelState
 	// Destination eligibility for artwork outside fetched sprite rectangles.
 	// Class bits are supplied by each adapter, not inferred from source alpha.
 	uint8_t ExpandedSpriteClasses = 0;
+	// Same window/enable/clipping rules before native background occlusion.
+	uint8_t ExpandedSpriteClassesWithoutBackground = 0;
+	uint8_t NativeVisibleSpriteClass = 0;
 	// Sprite classes below artwork on the captured background layer. Unlike
 	// eligibility, this also applies when the original background texel is clear.
 	uint8_t BackgroundOverlayOccludesClasses = 0;
@@ -146,6 +152,8 @@ struct MetaSpritePixelState
 		return false;
 	}
 	uint16_t BackgroundColor = 0;
+	uint16_t NativeBackdropColor = 0;
+	bool NativeBackdropCaptured = false;
 	uint16_t SpriteColor = 0;
 	uint8_t BackgroundColorIndex = 0;
 	uint8_t BackgroundAttributes = 0;
@@ -234,6 +242,18 @@ struct MetaSpriteDecodedRow
 	uint8_t SnesField = 0;
 };
 
+struct MetaBackgroundUnderlay
+{
+	MetaBackgroundSample Sample;
+	uint16_t Color = 0;
+	MetaBackgroundSample ForegroundSample;
+	uint16_t ForegroundColor = 0;
+	bool ForegroundOpaque = false;
+	bool SpriteEligibilityCaptured = false;
+	uint8_t SpriteEligibleClasses = 0;
+	uint8_t OverlayOccludesClasses = 0;
+};
+
 struct MetaSpriteFrame
 {
 	uint32_t Width;
@@ -248,6 +268,8 @@ struct MetaSpriteFrame
 	std::vector<MetaSpritePixel> Pixels;
 	// Keep SNES layer capture separate so other systems pay no per-pixel cost.
 	std::vector<MetaSnesBackgroundPixel> SnesBackgrounds;
+	// Allocated by adapters that retain a native background below the winner.
+	std::vector<MetaBackgroundUnderlay> BackgroundUnderlays;
 	// Hires even-column output is the current subscreen pixel, with math
 	// controlled by the previous main pixel. Keep that phase independent of
 	// the current main pixel's state. Allocated only on double-width scanlines.
@@ -269,7 +291,7 @@ struct MetaSpriteFrame
 			static_cast<MetaSpritePixelState&>(pixels[i]) = blank;
 			pixels[i].GbaCoverage.clear(); pixels[i].GbaNativeObjects.clear(); pixels[i].SnesCoverage.clear();
 		}
-		SnesBackgrounds.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+		SnesBackgrounds.clear(); BackgroundUnderlays.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
 	}
 };
 
