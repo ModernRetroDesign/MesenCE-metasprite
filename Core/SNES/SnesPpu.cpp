@@ -827,17 +827,20 @@ void SnesPpu::FetchSpriteTile(bool secondCycle)
 	} else {
 		int16_t xPos = _currentSprite.DrawX;
 		uint16_t fetchOrder = ++_metaFetchOrder;
-		if(_metaFrame && !_state.ObjInterlace && _metaFetchedSprite.Index < 128 && _metaFetchedSprite.X != -256) {
+		if(_metaFrame && _metaFetchedSprite.Index < 128 && _metaFetchedSprite.X != -256) {
 			int rowIndex = (uint8_t)(_scanline - _metaFetchedSprite.Y);
 			int y = _metaFetchedSprite.Y > _scanline ? (int)_metaFetchedSprite.Y - 256 : _metaFetchedSprite.Y;
+			int rowStep = _state.ObjInterlace ? 2 : 1;
+			rowIndex = rowIndex * rowStep + (_state.ObjInterlace && _oddFrame ? 1 : 0);
 			int offset = xPos - _metaFetchedSprite.X;
 			if(rowIndex < _metaFetchedSprite.Height && offset >= 0 && offset + 8 <= _metaFetchedSprite.Width) {
-				MetaSpriteDecodedRow row {_metaFetchedSprite.Index, _metaFetchedSprite.X, y + (_overscanFrame ? 0 : 7), rowIndex,
+				MetaSpriteDecodedRow row {_metaFetchedSprite.Index, _metaFetchedSprite.X, (y + (_overscanFrame ? 0 : 7)) * rowStep, rowIndex,
 					_metaFetchedSprite.Width, _metaFetchedSprite.Height, {}, offset};
 				row.Pixels.reserve(8);
 				row.SnesPriorityCode = _currentSprite.Priority;
 				row.SnesPalette = _currentSprite.Palette;
 				row.SnesFetchOrder = fetchOrder;
+				row.SnesRowStep = (uint8_t)rowStep; row.SnesRowPhase = _state.ObjInterlace && _oddFrame ? 1 : 0;
 				for(int x = 0; x < 8; x++) {
 					uint8_t color = GetTilePixelColor<4>(_currentSprite.ChrData, _currentSprite.HorizontalMirror ? x : 7 - x);
 					uint16_t rgb = _cgram[128 + (_currentSprite.Palette << 4) + color];
@@ -854,8 +857,10 @@ void SnesPpu::FetchSpriteTile(bool secondCycle)
 
 			uint8_t xOffset = _currentSprite.HorizontalMirror ? ((7 - x) & 0x07) : x;
 			uint8_t color = GetTilePixelColor<4>(_currentSprite.ChrData, 7 - xOffset);
-			if(_metaFrame && !_state.ObjInterlace && _metaFetchedSprite.Index < 128 && _metaFetchedSprite.X != -256) {
-				_metaSpriteCoverageCopy[xPos + x].push_back({_metaFetchedSprite.Index, fetchOrder, _currentSprite.Priority, _currentSprite.Palette});
+			if(_metaFrame && _metaFetchedSprite.Index < 128 && _metaFetchedSprite.X != -256) {
+				MetaSpritePixel::SnesCoverageSample sample {_metaFetchedSprite.Index, fetchOrder, _currentSprite.Priority, _currentSprite.Palette};
+				sample.ColorIndex = color;
+				_metaSpriteCoverageCopy[xPos + x].push_back(sample);
 			}
 
 			if(color != 0) {
@@ -1018,7 +1023,7 @@ void SnesPpu::RenderScanline()
 			const bool captureBackgrounds = !_metaFrame->SnesBackgrounds.empty();
 			for(int x = _drawStartX; x <= _drawEndX; x++) {
 				_metaBgMain[x] = _metaBgSub[x] = _cgram[0];
-				if(captureRow) { captureRow[x].SnesCoverage.clear(); }
+				if(captureRow) { captureRow[x].SnesCoverage.clear(); captureRow[x].SnesNativeObjects.clear(); }
 				_metaBgMainFlags[x] = (_state.ColorMathEnabled & 0x20) ? PixelFlags::AllowColorMath : 0;
 				_metaBgSubPriority[x] = 0;
 				_metaBgMainLayer[x] = _metaBgSubLayer[x] = 0xFF;
@@ -1067,6 +1072,7 @@ void SnesPpu::RenderScanline()
 					backgrounds.Captured = !_state.ForcedBlank;
 				}
 				pixel.SnesFallbackCaptured = !_state.ForcedBlank;
+				pixel.SnesObjectSourceY = _state.ObjInterlace ? (int16_t)(metaY * 2 + (_oddFrame ? 1 : 0)) : -1;
 				for(auto& coverage : pixel.SnesCoverage) {
 					coverage.Main &= coverage.Sprite != pixel.VisibleSprite && coverage.Priority > (_metaBgMainFlags[x] & 15);
 					coverage.Sub &= coverage.Sprite != pixel.SecondarySprite && coverage.Priority > _metaBgSubPriority[x];
@@ -1157,6 +1163,10 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 				destination.SnesObjectPriorityCode = _spritePriority[x]; destination.SnesObjectPalette = _spritePalette[x];
 			}
 			for(auto coverage : _metaSpriteCoverage[x]) {
+				if(coverage.Sprite != destination.SnesObjectSprite && (destination.SnesObjectsMain || destination.SnesObjectsSub)
+					&& coverage.ColorIndex && coverage.Priority <= 3 && coverage.Palette <= 7) {
+					destination.SnesNativeObjects.push_back({coverage.Sprite, _cgram[128 + (coverage.Palette << 4) + coverage.ColorIndex], coverage.Priority, coverage.Palette});
+				}
 				if(coverage.Order < _metaSpriteOrder[x]) { continue; }
 				coverage.Priority = priority[coverage.Priority];
 				coverage.Main = drawMain && !ProcessMaskWindow<SnesPpu::SpriteLayerIndex>(mainWindowCount, x);
@@ -1818,9 +1828,13 @@ void SnesPpu::SendFrame()
 	_needFullFrame = false;
 
 	RenderedFrame frame(_currentBuffer, width, height, _useHighResOutput ? 0.5 : 1.0, _frameCount, _console->GetControlManager()->GetPortStates());
-	bool weaveCapture = _metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+	bool weaveCapture = _metaFrame && _interlacedFrame && !isRewinding
 		&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Weave;
 	if(weaveCapture) {
+		_emu->GetVideoDecoder()->CaptureMetaSpriteMemory(*_metaFrame, [&](uint32_t address,uint8_t& value) {
+			if(address>0xFFFFFF) { return false; }
+			value=_memoryManager->Peek(address); return true;
+		});
 		_metaFrame->FrameNumber = _frameCount;
 		_metaInterlaceFields[_oddFrame ? 1 : 0] = _metaFrame;
 		const auto& previous = _metaInterlaceFields[_oddFrame ? 0 : 1];
@@ -1830,13 +1844,13 @@ void SnesPpu::SendFrame()
 		}
 	} else {
 		_metaInterlaceFields[0].reset(); _metaInterlaceFields[1].reset();
-		if(_metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+		if(_metaFrame && _interlacedFrame && !isRewinding
 			&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
 			_metaFrame->FrameNumber = _frameCount;
 			auto output = _metaOutputFramePool.Acquire(width, height);
 			if(MetaSnesCapture::MapFieldWithoutMath(*_metaFrame, *output, _oddFrame)) { frame.MetaSprites = output; }
 		}
-		if(_metaFrame && _interlacedFrame && !_state.ObjInterlace && !isRewinding
+		if(_metaFrame && _interlacedFrame && !isRewinding
 			&& (_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Bob
 				|| _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::BobBlend)) {
 			_metaFrame->FrameNumber = _frameCount;

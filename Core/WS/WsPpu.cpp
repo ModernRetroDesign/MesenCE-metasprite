@@ -89,7 +89,8 @@ void WsPpu::ProcessEndOfScanline()
 		_state.Mode = _state.NextMode;
 		_state.Scanline = 0;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
-		if(_metaFrame && _emu->GetVideoDecoder()->HasMetaBackgroundLayers()) { _metaFrame->BackgroundUnderlays.resize(WsConstants::ScreenWidth * WsConstants::ScreenHeight); }
+		if(_metaFrame) { _metaFrame->WsCapture = true; }
+		if(_metaFrame && _emu->GetVideoDecoder()->HasMetaReplacements()) { _metaFrame->BackgroundUnderlays.resize(WsConstants::ScreenWidth * WsConstants::ScreenHeight); }
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Ws);
 		_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 		_showIcons = _emu->GetSettings()->GetWsConfig().LcdShowIcons;

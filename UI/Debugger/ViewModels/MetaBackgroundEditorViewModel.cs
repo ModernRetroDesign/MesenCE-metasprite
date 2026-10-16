@@ -88,10 +88,20 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
  private readonly Dictionary<MetaBackgroundLayer, string> _invalidConditionDrafts = new();
  private CpuType _cpuType;
  public bool IsNes => _cpuType == CpuType.Nes;
+ public bool SupportsSpriteBands => IsNes || _cpuType == CpuType.Gameboy || _cpuType == CpuType.Pce || _cpuType == CpuType.Sms || _cpuType == CpuType.Ws;
+	public bool IsGba => _cpuType == CpuType.Gba;
+	public bool IsSnes => _cpuType == CpuType.Snes;
+ public IReadOnlyList<string> HardwareLayerNames => _cpuType switch {
+  CpuType.Snes => new[] { "BG1", "BG2", "BG3", "BG4" },
+  CpuType.Gba => new[] { "BG0", "BG1", "BG2", "BG3" },
+  CpuType.Gameboy => new[] { "Background", "Window" },
+  CpuType.Ws => new[] { "BG0 (background)", "BG1 (foreground)" },
+  _ => new[] { "Background" }
+ };
  public MetaBackgroundEditorViewModel(CpuType cpuType) { _cpuType = cpuType; }
  public void Load(CpuType? cpuType = null)
  {
-  if(cpuType.HasValue) { _cpuType = cpuType.Value; OnPropertyChanged(nameof(IsNes)); }
+  if(cpuType.HasValue) { _cpuType = cpuType.Value; OnPropertyChanged(nameof(IsNes)); OnPropertyChanged(nameof(IsGba)); OnPropertyChanged(nameof(IsSnes)); OnPropertyChanged(nameof(HardwareLayerNames)); OnPropertyChanged(nameof(SupportsSpriteBands)); }
   _invalidConditionDrafts.Clear();
   SelectedMetaBackground = null;
   MetaBackgrounds.Clear();
@@ -138,7 +148,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
    var latest = MetaSpritePack.Load(_metaPackPath, _metaPack.RomHash, _cpuType.ToString());
    MetaStatus = MetaSpriteRuntimeLoader.Apply(latest, _metaPackPath) ? "Background definitions saved and applied." : "Saved; could not apply for this console layout.";
 			if(_cpuType == CpuType.Snes && latest.BackgroundLayers.Any(layer => layer.Enabled)) {
-				MetaStatus += " SNES currently requires low-resolution noninterlaced output and neutral color settings with the default filter. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
+				MetaStatus += " SNES requires the default filter and neutral color settings. Hires and interlaced replacements currently require color math to be disabled. OBJ-interlace support is experimental. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
 			}
   } catch(Exception ex) { MetaStatus = "Saved; could not apply backgrounds: " + ex.Message; }
  }
@@ -158,6 +168,25 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 		ImportMetaBackgroundPng(path, nativeLayer, context);
 	}
 
+	private string PrepareBackgroundArtwork(string path, ref string? createdPath)
+	{
+		string sourcePath = Path.GetFullPath(path);
+		string directory = Path.GetFullPath(Path.GetDirectoryName(_metaPackPath)!);
+		if(string.Equals(Path.GetDirectoryName(sourcePath), directory, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) {
+			return sourcePath;
+		}
+		Directory.CreateDirectory(directory);
+		string destination = Path.Combine(directory, Path.GetFileName(sourcePath));
+		for(int number = 2; File.Exists(destination) || Directory.Exists(destination); number++) {
+			destination = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(sourcePath)}-{number:D3}{Path.GetExtension(sourcePath)}");
+		}
+		using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+		using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write);
+		createdPath = destination;
+		source.CopyTo(output);
+		return destination;
+	}
+
 	public void ImportMetaBackgroundPng(string path, int nativeLayer = 0, string context = "")
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
@@ -168,14 +197,9 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 			using Bitmap bitmap = new(path);
 			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, 1);
 			int id = _metaPack.NextBackgroundId;
-			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"background-{id:D3}-{Guid.NewGuid():N}.png");
-			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
-				using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write);
-				createdPath = destination;
-				source.CopyTo(output);
-			}
-			var layer = new MetaBackgroundLayer { Id = id, NativeLayer = nativeLayer, Name = Path.GetFileNameWithoutExtension(path), ArtworkPath = Path.GetFileName(destination), ArtworkWidth = bitmap.PixelSize.Width, ArtworkHeight = bitmap.PixelSize.Height };
+			string destination = PrepareBackgroundArtwork(path, ref createdPath);
+			var layer = new MetaBackgroundLayer { Id = id, NativeLayer = nativeLayer, Name = Path.GetFileNameWithoutExtension(path), ArtworkPath = Path.GetFileName(destination), ArtworkWidth = bitmap.PixelSize.Width, ArtworkHeight = bitmap.PixelSize.Height,
+				UseWidescreenPosition = true, WidescreenPosition = new() { Position = 0 } };
 			_metaPack.BackgroundLayers.Add(layer);
 			_metaPack.NextBackgroundId++;
 			try { SavePack(); }
@@ -213,11 +237,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 			layer.MemoryConditions = MetaMemoryConditionText.Parse(MemoryConditionsText);
 			using Bitmap bitmap = new(path);
 			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, layer.ArtworkScale);
-			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"background-{layer.Id:D3}-{Guid.NewGuid():N}.png");
-			using(var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
-				using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write);
-				createdPath = destination; source.CopyTo(output);
-			}
+			string destination = PrepareBackgroundArtwork(path, ref createdPath);
 			layer.ArtworkPath = Path.GetFileName(destination);
 			layer.ArtworkWidth = bitmap.PixelSize.Width; layer.ArtworkHeight = bitmap.PixelSize.Height;
 			SavePack(); saved = true;

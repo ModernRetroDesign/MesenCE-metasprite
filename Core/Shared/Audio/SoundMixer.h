@@ -3,6 +3,8 @@
 #include "Core/Shared/Interfaces/IAudioDevice.h"
 #include "Utilities/safe_ptr.h"
 #include "Utilities/Audio/HermiteResampler.h"
+#include <functional>
+#include <array>
 
 class Emulator;
 class Equalizer;
@@ -11,6 +13,7 @@ class WaveRecorder;
 class IAudioProvider;
 class CrossFeedFilter;
 class ReverbFilter;
+class MusicReplacement;
 
 class SoundMixer
 {
@@ -31,6 +34,10 @@ private:
 
 	unique_ptr<CrossFeedFilter> _crossFeedFilter;
 	unique_ptr<ReverbFilter> _reverbFilter;
+	shared_ptr<MusicReplacement> _replacementMusic;
+	atomic<bool> _hasMusicTriggers{false};
+	// Low-16-bit prefilter; the engine checks full addresses. Updated with the emulation lock held, or while the CPU is stopped.
+	std::array<uint64_t, 1024> _musicTriggerMask{};
 
 	void ProcessEqualizer(int16_t* samples, uint32_t sampleCount, uint32_t targetRate);
 
@@ -53,4 +60,12 @@ public:
 	void StopRecording();
 	bool IsRecording();
 	void GetLastSamples(int16_t& left, int16_t& right);
+	void SetReplacementMusic(shared_ptr<MusicReplacement> music);
+	void ClearReplacementMusic();
+	void ResetReplacementMusic();
+	bool HasMusicTriggers() const { return _hasMusicTriggers.load(std::memory_order_relaxed); }
+	bool HasMusicTrigger(uint32_t address) const { return HasMusicTriggers() && (_musicTriggerMask[(address & 0xFFFF) >> 6] & (1ULL << (address & 63))); }
+	void ProcessMusicWrite(uint32_t address, uint8_t value, const std::function<bool(uint32_t, uint8_t&)>& read);
+	bool MusicCommand(uint32_t action, uint32_t track);
+	int MusicActiveTrack();
 };

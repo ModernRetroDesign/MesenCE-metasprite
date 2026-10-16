@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "WS/WsMemoryManager.h"
 #include "WS/WsConsole.h"
 #include "WS/WsDmaController.h"
@@ -178,6 +179,8 @@ void WsMemoryManager::WritePort(uint16_t port, T value)
 				InternalWritePort(port, value, true);
 				InternalWritePort(port + 1, value >> 8, true);
 			}
+			NotifyMusicWrite(0x100000u | port, (uint8_t)value);
+			NotifyMusicWrite(0x100000u | (uint16_t)(port + 1), (uint8_t)(value >> 8));
 		}
 	} else {
 		Exec();
@@ -186,6 +189,7 @@ void WsMemoryManager::WritePort(uint16_t port, T value)
 		if(!IsUnmappedPort(port)) {
 			InternalWritePort(port, value, false);
 		}
+		NotifyMusicWrite(0x100000u | port, value);
 	}
 }
 
@@ -508,3 +512,11 @@ template void WsMemoryManager::WritePort(uint16_t port, uint16_t value);
 
 template uint8_t WsMemoryManager::DebugCpuRead(uint16_t seg, uint16_t offset);
 template uint16_t WsMemoryManager::DebugCpuRead(uint16_t seg, uint16_t offset);
+
+void WsMemoryManager::NotifyMusicWrite(uint32_t address, uint8_t value)
+{
+	if(!_emu->GetSoundMixer()->HasMusicTrigger(address)) { return; }
+	_emu->GetSoundMixer()->ProcessMusicWrite(address, value, [&](uint32_t addr, uint8_t& result) {
+		if(addr > 0xFFFFF) { return false; } result = DebugRead(addr); return true;
+	});
+}

@@ -18,6 +18,7 @@ class Emulator;
 class WsMemoryManager final : public ISerializable
 {
 private:
+	void NotifyMusicWrite(uint32_t address, uint8_t value);
 	WsConsole* _console = nullptr;
 	WsCpu* _cpu = nullptr;
 	WsPpu* _ppu = nullptr;
@@ -135,19 +136,24 @@ public:
 		if constexpr(std::is_same<T, uint16_t>::value) {
 			bool splitWrites = !IsWordBus(addr) || (addr & 0x01);
 			if(splitWrites) {
-				Write<uint8_t>(seg, offset, (uint8_t)value);
-				Write<uint8_t>(seg, offset + 1, (uint8_t)(value >> 8));
+				Write<uint8_t>(seg, offset, (uint8_t)value, opType);
+				Write<uint8_t>(seg, offset + 1, (uint8_t)(value >> 8), opType);
 			} else {
 				Exec();
 				if(_emu->ProcessMemoryWrite<CpuType::Ws, 2>(addr, value, opType)) {
 					InternalWrite(addr, (uint8_t)value);
 					InternalWrite(((seg << 4) + (uint16_t)(offset + 1)) & 0xFFFFF, value >> 8);
+					if(opType == MemoryOperationType::Write) {
+						NotifyMusicWrite(addr, (uint8_t)value);
+						NotifyMusicWrite(((seg << 4) + (uint16_t)(offset + 1)) & 0xFFFFF, (uint8_t)(value >> 8));
+					}
 				}
 			}
 		} else {
 			Exec();
 			if(_emu->ProcessMemoryWrite<CpuType::Ws>(addr, value, opType)) {
 				InternalWrite(addr, value);
+				if(opType == MemoryOperationType::Write) { NotifyMusicWrite(addr, value); }
 			}
 		}
 	}

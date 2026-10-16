@@ -16,6 +16,9 @@ namespace MetaSnesCapture
 			for(const auto& coverage : pixel.SnesCoverage) {
 				if(pixel.SnesWindowMathAllowed && coverage.Math && (coverage.Main || coverage.Sub)) { return false; }
 			}
+			if(pixel.SnesWindowMathAllowed && pixel.SnesObjectMath && (pixel.SnesObjectsMain || pixel.SnesObjectsSub)) {
+				for(const auto& object : pixel.SnesNativeObjects) { if(object.Palette > 3) { return false; } }
+			}
 		}
 		for(const auto& phase : source.SnesSubOutput) { if(phase.Captured && phase.SnesMathEnabled) { return false; } }
 		if(!source.SnesBackgrounds.empty() && source.SnesBackgrounds.size() != source.Pixels.size()) { return false; }
@@ -51,6 +54,8 @@ namespace MetaSnesCapture
 						target.SecondarySprite = -1; target.SecondaryColor = 0;
 						target.SnesObjectsMain = sub ? pixel.SnesObjectsSub : pixel.SnesObjectsMain;
 						target.SnesObjectsSub = false; target.SnesObjectMath = false;
+						target.SnesNativeObjects = pixel.SnesNativeObjects;
+						target.SnesObjectSourceY = pixel.SnesObjectSourceY;
 						target.SnesSubBackgroundSample = {};
 						target.BackgroundSample.PixelScaleX = pixel.SnesHiresBackgrounds ? 1 : 2;
 						target.BackgroundSample.PixelScaleY = 2;
@@ -131,6 +136,7 @@ namespace MetaSnesCapture
 			for(const auto& pixel : field->Pixels) {
 				if(pixel.SnesField || pixel.VisibleSprite >= 128 || pixel.SecondarySprite >= 128 || pixel.SnesObjectSprite >= 128) { return false; }
 				for(const auto& coverage : pixel.SnesCoverage) { if(coverage.Sprite >= 128) { return false; } }
+				for(const auto& object : pixel.SnesNativeObjects) { if(object.Sprite >= 128) { return false; } }
 			}
 		}
 		MetaSpriteFrame oddOutput(output.Width, output.Height);
@@ -147,12 +153,15 @@ namespace MetaSnesCapture
 				auto tag = [](int16_t& id) { if(id >= 0) { id += 128; } };
 				tag(pixel.VisibleSprite); tag(pixel.SecondarySprite); tag(pixel.SnesObjectSprite);
 				for(auto& coverage : pixel.SnesCoverage) { tag(coverage.Sprite); }
+				for(auto& object : pixel.SnesNativeObjects) { tag(object.Sprite); }
 			}
 		} }
 		for(auto& row : output.DecodedRows) { row.SnesField = 1; }
 		for(auto row : odd.DecodedRows) { row.Sprite += 128; row.SnesField = 2; output.DecodedRows.push_back(std::move(row)); }
 		const auto& newest = even.FrameNumber > odd.FrameNumber ? even : odd;
 		output.FrameNumber = newest.FrameNumber; output.MemorySnapshot = newest.MemorySnapshot;
+		output.SnesFieldMemory[0] = even.MemorySnapshot; output.SnesFieldMemory[1] = odd.MemorySnapshot;
+		output.SnesFieldMemoryCaptured = true;
 		return true;
 	}
 }

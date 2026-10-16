@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "PCE/PceConsole.h"
 #include "PCE/PceMemoryManager.h"
 #include "PCE/PceVpc.h"
@@ -444,4 +445,15 @@ void PceMemoryManager::Serialize(Serializer& s)
 	if(!s.IsSaving()) {
 		UpdateExecCallback();
 	}
+}
+
+void PceMemoryManager::NotifyMusicWrite(uint16_t address, uint8_t value)
+{
+	if(!_emu->GetSoundMixer()->HasMusicTrigger(address)) { return; }
+	_emu->GetSoundMixer()->ProcessMusicWrite(address, value, [&](uint32_t addr, uint8_t& result) {
+		// DebugRead cannot read I/O without side effects. Missing context must fail,
+		// including != comparisons, rather than treating a placeholder as real RAM.
+		if(addr > 0xFFFF || _state.Mpr[addr >> 13] == 0xFF) { return false; }
+		result = DebugRead((uint16_t)addr); return true;
+	});
 }

@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "SNES/SnesMemoryManager.h"
 #include "SNES/SnesConsole.h"
+#include "SNES/Spc.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "SNES/BaseCartridge.h"
 #include "SNES/SnesCpu.h"
 #include "SNES/SnesPpu.h"
@@ -351,6 +353,9 @@ void SnesMemoryManager::Write(uint32_t addr, uint8_t value, MemoryOperationType 
 		if(handler) {
 			handler->Write(addr, value);
 			_memTypeBusA = handler->GetMemoryType();
+			if(type == MemoryOperationType::Write && _emu->GetSoundMixer()->HasMusicTrigger(addr)) {
+				_emu->GetSoundMixer()->ProcessMusicWrite(addr, value, [&](uint32_t address, uint8_t& result) { return ReadMusicMemory(address, result); });
+			}
 		} else {
 			LogDebug("[Debug] Write - missing handler: $" + HexUtilities::ToHex(addr) + " = " + HexUtilities::ToHex(value));
 		}
@@ -486,4 +491,16 @@ void SnesMemoryManager::Serialize(Serializer& s)
 	if(!s.IsSaving()) {
 		UpdateExecCallbacks();
 	}
+}
+
+bool SnesMemoryManager::ReadMusicMemory(uint32_t addr, uint8_t& value)
+{
+	if(addr >= 0x1000000 && addr <= 0x100FFFF) {
+		value = _console->GetSpc()->DebugRead((uint16_t)addr); return true;
+	}
+	if(addr > 0xFFFFFF) { return false; }
+	auto handler = _mappings.GetHandler(addr);
+	// Register Peek returns placeholders. Do not let unavailable bytes satisfy a condition.
+	if(!handler || handler->GetMemoryType() == MemoryType::SnesRegister) { return false; }
+	value = handler->Peek(addr); return true;
 }

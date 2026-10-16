@@ -10,6 +10,7 @@
 #include "Gameboy/GbDmaController.h"
 #include "Gameboy/GbControlManager.h"
 #include "Shared/Emulator.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "Shared/CheatManager.h"
 #include "Shared/EventType.h"
 #include "Shared/MessageManager.h"
@@ -216,6 +217,14 @@ void GbMemoryManager::Write(uint16_t addr, uint8_t value)
 			WriteRegister(addr, value);
 		} else if(_writes[addr >> 8]) {
 			_writes[addr >> 8][(uint8_t)addr] = value;
+		}
+		if constexpr(type == MemoryOperationType::Write) {
+			if(_emu->GetSoundMixer()->HasMusicTrigger(addr)) {
+				_emu->GetSoundMixer()->ProcessMusicWrite(addr, value, [&](uint32_t address, uint8_t& result) {
+					if(address > 0xFFFF) { return false; }
+					result = DebugRead((uint16_t)address); return true;
+				});
+			}
 		}
 	}
 }

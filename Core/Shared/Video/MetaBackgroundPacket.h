@@ -21,7 +21,7 @@ public:
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t magic = Read();
-		if(magic < 0x3147424D || magic > 0x3847424D || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
+		if(((magic < 0x3147424D || magic > 0x3947424D) && (magic < 0x4147424D || magic > 0x4747424D)) || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t count = Read();
 		if(count > 128) { throw std::runtime_error("Too many background layers"); }
 		std::set<int> ids;
@@ -56,6 +56,29 @@ public:
 					if(!axis->IsValid()) { throw std::runtime_error("Invalid CPU camera axis"); }
 				}
 			}
+			if(magic >= 0x3947424D) { uint32_t extend = Read(); if(extend > 1) { throw std::runtime_error("Invalid margin-extension flag"); } layer.ExtendIntoMargins = extend != 0; }
+			if(magic >= 0x4147424D) {
+				uint32_t use = Read(); if(use > 1) { throw std::runtime_error("Invalid positioning flag"); } layer.UseWidescreenPosition = use != 0;
+				layer.WidescreenPosition = (int32_t)Read(); layer.WidescreenCameraMin = (int32_t)Read(); layer.WidescreenCameraMax = (int32_t)Read(); layer.WidescreenSlideSpeed = (int32_t)Read();
+				if(magic >= 0x4247424D) { layer.WidescreenSlideSpeed /= 1000.0; layer.WidescreenReleaseDelay = Read(); if(layer.WidescreenReleaseDelay > 600) { throw std::runtime_error("Invalid boundary release delay"); } }
+				uint32_t flagsMode = Read(); if(flagsMode > 1) { throw std::runtime_error("Invalid boundary source"); } layer.WidescreenUseRamFlags = flagsMode != 0;
+				if(layer.WidescreenPosition < 0 || layer.WidescreenPosition > 3 || layer.WidescreenSlideSpeed < 0 || layer.WidescreenSlideSpeed > 64
+					|| layer.WidescreenCameraMin < -16777216 || layer.WidescreenCameraMin > 16777216 || layer.WidescreenCameraMax < -16777216 || layer.WidescreenCameraMax > 16777216) { throw std::runtime_error("Invalid positioning settings"); }
+				for(auto* conditions : {&layer.WidescreenLeftFlags, &layer.WidescreenRightFlags}) {
+					uint32_t n = Read(); if(n > 8) { throw std::runtime_error("Too many PNG boundary conditions"); }
+					for(uint32_t c = 0; c < n; c++) { uint32_t address = Read(), value = Read(), mask = Read(), op = Read(); if(value > 255 || mask > 255 || op > 5) { throw std::runtime_error("Invalid PNG boundary condition"); } conditions->push_back({address, (uint8_t)value, (uint8_t)mask, (uint8_t)op}); }
+				}
+				if(layer.UseWidescreenPosition && layer.WidescreenUseRamFlags && layer.WidescreenLeftFlags.empty() && layer.WidescreenRightFlags.empty()) { throw std::runtime_error("Missing PNG boundary conditions"); }
+				if(magic >= 0x4347424D) {
+					auto& speed = layer.WidescreenRamSpeed;
+					uint32_t enabled = Read(); if(enabled > 1) { throw std::runtime_error("Invalid RAM speed flag"); } speed.Enabled = enabled != 0;
+					speed.Format = (int32_t)Read(); speed.Address = Read(); speed.Multiplier = Read() / 1000000.0; speed.Maximum = Read() / 1000.0;
+					if(!speed.IsValid()) { throw std::runtime_error("Invalid RAM speed settings"); }
+				}
+			}
+			if(magic >= 0x4447424D) { uint32_t position = Read(); if(position > (magic >= 0x4747424D ? 6u : magic >= 0x4647424D ? 3u : magic >= 0x4547424D ? 2u : 1u)) { throw std::runtime_error("Invalid PNG composition position"); } layer.CompositionPosition = position; }
+			if(magic >= 0x4547424D) { uint32_t priority = Read(); if(priority > 3) { throw std::runtime_error("Invalid GBA PNG priority"); } layer.GbaPriority = priority; }
+			if(magic >= 0x4647424D) { uint32_t priority = Read(); if(priority < 1 || priority > 15) { throw std::runtime_error("Invalid SNES PNG priority"); } layer.SnesPriority = priority; }
 			if(pixels > (_length - _offset) / 4) { throw std::runtime_error("Invalid background pixels"); }
 			layer.Artwork.reserve(pixels);
 			for(size_t p = 0; p < pixels; p++) { layer.Artwork.push_back(Read()); }

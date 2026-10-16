@@ -86,6 +86,13 @@ struct MetaGbaNativeObject
 	bool SemiTransparent = false;
 };
 
+struct MetaSnesNativeObject
+{
+	int16_t Sprite = -1;
+	uint16_t Color = 0;
+	uint8_t PriorityCode = 0xFF, Palette = 0;
+};
+
 struct MetaSnesBackgroundLayer
 {
 	MetaBackgroundSample Sample;
@@ -188,6 +195,9 @@ struct MetaSpritePixelState
 	uint8_t SnesFirstObject = 0;
 	uint8_t SnesField = 0; // 0: ordinary frame; 1/2: even/odd woven field.
 	uint8_t SnesOutputSampleOffsetY = 0;
+	// Absolute full-source screen row for OBJ-interlace; copied with the
+	// originating field sample through hires/bob/weave. -1 means unavailable.
+	int16_t SnesObjectSourceY = -1;
 };
 
 struct MetaSpritePixel : MetaSpritePixelState
@@ -199,8 +209,10 @@ struct MetaSpritePixel : MetaSpritePixelState
 		uint16_t Order = 0;
 		uint8_t Priority = 0, Palette = 0;
 		bool Main = false, Sub = false, Math = false;
+		uint8_t ColorIndex = 0;
 	};
 	MetaSpriteCoverageList<SnesCoverageSample> SnesCoverage;
+	MetaSpriteCoverageList<MetaSnesNativeObject> SnesNativeObjects;
 };
 
 struct MetaSnesSubOutputPhase : MetaSpritePixelState
@@ -223,6 +235,10 @@ struct MetaSpriteRow
 	uint8_t Attributes = 0;
 	uint8_t Height = 8;
 	uint16_t Palette[4] = {};
+	// GB native reveal uses output-time palette colors, independently of the
+	// fetch-time graphic used for persistent content recognition.
+	uint16_t OutputColors[8] = {};
+	uint8_t OutputColorMask = 0;
 	// Game Boy's evaluated scanline slot, captured while the sprite is fetched.
 	uint8_t ScanlineSpriteIndex = 0xFF;
 	int ExpansionOrder = -1;
@@ -240,12 +256,16 @@ struct MetaSpriteDecodedRow
 	uint8_t SnesPriorityCode = 0xFF, SnesPalette = 0;
 	uint16_t SnesFetchOrder = 0;
 	uint8_t SnesField = 0;
+	// Explicit source-row sampling for OBJ-interlace. Unfetched rows are
+	// unknown, not transparent; ordinary captures must remain complete.
+	uint8_t SnesRowStep = 1, SnesRowPhase = 0;
 };
 
 struct MetaBackgroundUnderlay
 {
 	MetaBackgroundSample Sample;
 	uint16_t Color = 0;
+	uint8_t ColorIndex = 0;
 	MetaBackgroundSample ForegroundSample;
 	uint16_t ForegroundColor = 0;
 	bool ForegroundOpaque = false;
@@ -260,6 +280,10 @@ struct MetaSpriteFrame
 	uint32_t Height;
 	uint32_t FrameNumber = 0;
 	bool GbaColorEffects = false;
+	bool GameboyCapture = false;
+	bool PceCapture = false;
+	bool SmsCapture = false;
+	bool WsCapture = false;
 	bool SnesColorEffects = false;
 	// Captured output pixels may be denser than the decoded hardware-sprite
 	// coordinates used for recognition and persistent group origins.
@@ -280,18 +304,21 @@ struct MetaSpriteFrame
 	std::vector<MetaSpriteRow> NesRows;
 	// Filled on the emulation thread at publication, after prior decode completes.
 	mutable MetaMemorySnapshot MemorySnapshot;
+	MetaMemorySnapshot SnesFieldMemory[2];
+	bool SnesFieldMemoryCaptured = false;
 
 	MetaSpriteFrame(uint32_t width, uint32_t height) : Width(width), Height(height), Pixels(width * height) {}
 	void Reset()
 	{
-		FrameNumber = 0; GbaColorEffects = SnesColorEffects = false; SpriteCoordinateScale = 1; SnesOutputOffsetY = 0;
+		FrameNumber = 0; GbaColorEffects = SnesColorEffects = GameboyCapture = PceCapture = SmsCapture = WsCapture = false; SpriteCoordinateScale = 1; SnesOutputOffsetY = 0;
 		const MetaSpritePixelState blank;
 		MetaSpritePixel* pixels = Pixels.data();
 		for(size_t i = 0, count = Pixels.size(); i < count; i++) {
 			static_cast<MetaSpritePixelState&>(pixels[i]) = blank;
-			pixels[i].GbaCoverage.clear(); pixels[i].GbaNativeObjects.clear(); pixels[i].SnesCoverage.clear();
+			pixels[i].GbaCoverage.clear(); pixels[i].GbaNativeObjects.clear(); pixels[i].SnesCoverage.clear(); pixels[i].SnesNativeObjects.clear();
 		}
 		SnesBackgrounds.clear(); BackgroundUnderlays.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+		SnesFieldMemory[0].clear(); SnesFieldMemory[1].clear(); SnesFieldMemoryCaptured = false;
 	}
 };
 

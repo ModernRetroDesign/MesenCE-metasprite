@@ -137,7 +137,7 @@ public:
 					pixel.NativeBackdropColor = GetBgColor(); pixel.NativeBackdropCaptured = true;
 					pixel.BackgroundSample = _metaBackgroundSamples[rowIndex][_state.Cycle];
 					pixel.BackgroundOverlayOccludesClasses = pixel.BackgroundSample.Layer == 1 ? 10 : 0;
-					pixel.NativeVisibleSpriteClass = pixel.VisibleSprite >= 0 ? (data.Priority >= 3 ? 1 : 2) : 0;
+					pixel.NativeVisibleSpriteClass = pixel.VisibleSprite >= 0 ? (data.Priority >= 2 ? 1 : 2) : 0;
 					if(!_metaFrame->BackgroundUnderlays.empty()) {
 						auto& lower = _metaFrame->BackgroundUnderlays[(_state.Scanline - 1) * WsConstants::ScreenWidth + _state.Cycle];
 						const auto& lowerData = _metaLowerBackground[rowIndex][_state.Cycle];

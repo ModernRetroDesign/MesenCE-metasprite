@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Shared/Audio/SoundMixer.h"
+#include "Shared/Audio/MusicReplacement.h"
 #include "Shared/Audio/AudioPlayerHud.h"
 #include "Shared/Emulator.h"
 #include "Shared/EmuSettings.h"
@@ -102,6 +103,10 @@ void SoundMixer::PlayAudioBuffer(int16_t* samples, uint32_t sampleCount, uint32_
 	for(IAudioProvider* provider : _audioProviders) {
 		provider->MixAudio(out, count, targetRate);
 	}
+	if(auto music = std::atomic_load(&_replacementMusic)) {
+		if(_emu->GetRewindManager()->IsRewinding()) { music->ResetPlayback(); }
+		else if(!_emu->IsRunAheadFrame() && !_emu->IsPaused()) { music->Mix(out, count, targetRate); }
+	}
 
 	if(cfg.EnableEqualizer) {
 		ProcessEqualizer(out, count, targetRate);
@@ -166,6 +171,28 @@ void SoundMixer::PlayAudioBuffer(int16_t* samples, uint32_t sampleCount, uint32_
 		}
 	}
 }
+
+void SoundMixer::SetReplacementMusic(shared_ptr<MusicReplacement> music)
+{
+	bool triggers = music && music->HasTriggers();
+	_musicTriggerMask.fill(0);
+	if(triggers) { for(uint32_t address : music->TriggerAddresses()) { _musicTriggerMask[(address & 0xFFFF) >> 6] |= 1ULL << (address & 63); } }
+	std::atomic_store(&_replacementMusic, std::move(music));
+	_hasMusicTriggers.store(triggers, std::memory_order_relaxed);
+}
+void SoundMixer::ClearReplacementMusic() { SetReplacementMusic(nullptr); }
+void SoundMixer::ResetReplacementMusic() { if(auto music = std::atomic_load(&_replacementMusic)) { music->ResetPlayback(); } }
+void SoundMixer::ProcessMusicWrite(uint32_t address, uint8_t value, const std::function<bool(uint32_t, uint8_t&)>& read)
+{
+	if(_emu->IsRunAheadFrame() || _emu->GetRewindManager()->IsRewinding()) { return; }
+	if(auto music = std::atomic_load(&_replacementMusic)) { music->ProcessWrite(address, value, read); }
+}
+bool SoundMixer::MusicCommand(uint32_t action, uint32_t track)
+{
+	if(auto music = std::atomic_load(&_replacementMusic)) { return music->Command(action, track); }
+	return false;
+}
+int SoundMixer::MusicActiveTrack() { if(auto music = std::atomic_load(&_replacementMusic)) { return music->ActiveTrack(); } return 0; }
 
 void SoundMixer::ProcessEqualizer(int16_t* samples, uint32_t sampleCount, uint32_t targetRate)
 {

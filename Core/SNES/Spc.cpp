@@ -282,8 +282,10 @@ void Spc::Write(uint16_t addr, uint8_t value, MemoryOperationType type)
 #else
 
 	//Writes always affect the underlying RAM
+	bool writeAccepted = true;
 	if(_state.WriteEnabled) {
-		if(_emu->ProcessMemoryWrite<CpuType::Spc>(addr, value, type)) {
+		writeAccepted = _emu->ProcessMemoryWrite<CpuType::Spc>(addr, value, type);
+		if(writeAccepted) {
 			_ram[addr] = value;
 		}
 	}
@@ -342,6 +344,9 @@ void Spc::Write(uint16_t addr, uint8_t value, MemoryOperationType type)
 		case 0xFD: break;
 		case 0xFE: break;
 		case 0xFF: break;
+	}
+	if(writeAccepted && type == MemoryOperationType::Write && _emu->GetSoundMixer()->HasMusicTrigger(0x1000000u | addr)) {
+		_emu->GetSoundMixer()->ProcessMusicWrite(0x1000000u | addr, value, [&](uint32_t address, uint8_t& result) { return _memoryManager->ReadMusicMemory(address, result); });
 	}
 #endif
 }

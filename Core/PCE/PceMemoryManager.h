@@ -51,6 +51,7 @@ private:
 	uint32_t _cardRamEndBank = 0;
 
 	uint8_t* _unmappedBank = nullptr;
+	void NotifyMusicWrite(uint16_t address, uint8_t value);
 	uint8_t* _saveRam = nullptr;
 	uint8_t* _cdromRam = nullptr;
 
@@ -140,5 +141,6 @@ __forceinline void PceMemoryManager::Write(uint16_t addr, uint8_t value, MemoryO
 		} else {
 			WriteRegister(addr & 0x1FFF, value);
 		}
+		if(type == MemoryOperationType::Write) { NotifyMusicWrite(addr, value); }
 	}
 }

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "SMS/SmsMemoryManager.h"
 #include "SMS/SmsConsole.h"
 #include "SMS/SmsVdp.h"
@@ -286,6 +287,7 @@ void SmsMemoryManager::Write(uint16_t addr, uint8_t value)
 			_writes[addr >> 8][(uint8_t)addr] = value;
 		}
 		_state.OpenBus = value;
+		NotifyMusicWrite(addr, value);
 	}
 }
 
@@ -332,6 +334,7 @@ void SmsMemoryManager::WritePort(uint8_t port, uint8_t value)
 		case SmsModel::GameGear: WriteGameGearPort(port, value); break;
 		default: WriteSmsPort(port, value); break;
 	}
+	NotifyMusicWrite(0x10000u | port, value);
 }
 
 void SmsMemoryManager::WriteSmsPort(uint8_t port, uint8_t value)
@@ -558,4 +561,12 @@ void SmsMemoryManager::Serialize(Serializer& s)
 	if(!s.IsSaving()) {
 		RefreshMappings();
 	}
+}
+
+void SmsMemoryManager::NotifyMusicWrite(uint32_t address, uint8_t value)
+{
+	if(!_emu->GetSoundMixer()->HasMusicTrigger(address)) { return; }
+	_emu->GetSoundMixer()->ProcessMusicWrite(address, value, [&](uint32_t addr, uint8_t& result) {
+		if(addr > 0xFFFF) { return false; } result = DebugRead((uint16_t)addr); return true;
+	});
 }

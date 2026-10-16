@@ -13,6 +13,7 @@
 #include "GBA/APU/GbaApu.h"
 #include "GBA/Cart/GbaCart.h"
 #include "Shared/Emulator.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "Shared/EmuSettings.h"
 #include "Shared/MemoryType.h"
 #include "Shared/KeyManager.h"
@@ -387,12 +388,14 @@ void GbaMemoryManager::Write(GbaAccessModeVal mode, uint32_t addr, uint32_t valu
 		if(_emu->ProcessMemoryWrite<CpuType::Gba, 1>(addr, value, MemoryOperationType::Write)) {
 			InternalWrite(mode, addr, (uint8_t)value, addr, value);
 			UpdateOpenBus<1>(value);
+			NotifyMusicWrite(mode, addr, value, 1);
 		}
 	} else if(mode & GbaAccessMode::HalfWord) {
 		if(_emu->ProcessMemoryWrite<CpuType::Gba, 2>(addr & ~0x01, value, MemoryOperationType::Write)) {
 			InternalWrite(mode, addr & ~0x01, (uint8_t)value, addr, value);
 			InternalWrite(mode, (addr & ~0x01) | 0x01, (uint8_t)(value >> 8), addr, value);
 			UpdateOpenBus<2>(value);
+			NotifyMusicWrite(mode, addr & ~1u, value, 2);
 		}
 	} else {
 		if(_emu->ProcessMemoryWrite<CpuType::Gba, 4>(addr & ~0x03, value, MemoryOperationType::Write)) {
@@ -401,6 +404,20 @@ void GbaMemoryManager::Write(GbaAccessModeVal mode, uint32_t addr, uint32_t valu
 			InternalWrite(mode, (addr & ~0x03) | 0x02, (uint8_t)(value >> 16), addr, value);
 			InternalWrite(mode, (addr & ~0x03) | 0x03, (uint8_t)(value >> 24), addr, value);
 			UpdateOpenBus<4>(value);
+			NotifyMusicWrite(mode, addr & ~3u, value, 4);
+		}
+	}
+}
+
+void GbaMemoryManager::NotifyMusicWrite(GbaAccessModeVal mode, uint32_t address, uint32_t value, uint32_t width)
+{
+	if((mode & GbaAccessMode::Dma) || !_emu->GetSoundMixer()->HasMusicTriggers()) { return; }
+	// Every byte observes the fully committed bus transaction, including sibling bytes.
+	for(uint32_t i = 0; i < width; i++) {
+		if(_emu->GetSoundMixer()->HasMusicTrigger(address + i)) {
+			_emu->GetSoundMixer()->ProcessMusicWrite(address + i, (uint8_t)(value >> (i * 8)), [&](uint32_t addr, uint8_t& result) {
+				if(addr > 0x0FFFFFFF) { return false; } result = DebugRead(addr); return true;
+			});
 		}
 	}
 }

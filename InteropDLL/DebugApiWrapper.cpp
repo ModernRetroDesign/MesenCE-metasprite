@@ -1,5 +1,7 @@
 #include "Common.h"
 #include "Core/Shared/Emulator.h"
+#include "Core/Shared/Audio/SoundMixer.h"
+#include "Core/Shared/Audio/MusicReplacement.h"
 #include "Core/Shared/DebuggerRequest.h"
 #include "Core/Debugger/Debugger.h"
 #include "Core/Debugger/IDebugger.h"
@@ -80,10 +82,13 @@ extern "C"
 			auto ws = dynamic_cast<WsConsole*>(console.get());
 			auto nes = dynamic_cast<NesConsole*>(console.get());
 			auto gba = dynamic_cast<GbaConsole*>(console.get());
-			auto layers = MetaBackgroundPacket(packet, length).Parse();
-			auto snes = dynamic_cast<SnesConsole*>(console.get());
-			if(snes && _emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
 			auto pce = dynamic_cast<PceConsole*>(console.get());
+			auto layers = MetaBackgroundPacket(packet, length).Parse();
+			if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return false; }
+			if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return false; }
+			auto snes = dynamic_cast<SnesConsole*>(console.get());
+			if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return false; }
+			if(snes && _emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
 			if(!layers.empty() && ((!gameboy && !sms && !ws && !nes && !pce && !gba && !snes) || (pce && pce->IsSuperGrafx()) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
 				|| (nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole())))) { return false; }
 			if(gameboy && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.Layer > 1; })) { return false; }
@@ -122,6 +127,9 @@ extern "C"
 			auto groups = MetaSpritePacket(packet, length).Parse();
 			if(combined) {
 				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength).Parse();
+				if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return false; }
+				if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return false; }
+				if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return false; }
 				// Accept SMS assets before its program selects the VDP mode. Capture
 				// remains guarded by UseMode4 at rendering time.
 				if(!layers.empty() && !gameboy && !sms && !ws && !nes && !pce && !gba && !snes) { return false; }
@@ -147,6 +155,29 @@ extern "C"
 	{
 		return ApplyMetaReplacements(romHash, sprites, spriteLength, backgrounds, backgroundLength, true);
 	}
+	DllExport bool __stdcall SetMusicReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
+	{
+		try {
+			if(!romHash || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			auto sourceConsole = _emu->GetConsole();
+			bool gba = dynamic_cast<GbaConsole*>(sourceConsole.get()) != nullptr;
+			bool sms = dynamic_cast<SmsConsole*>(sourceConsole.get()) != nullptr;
+			bool snes = dynamic_cast<SnesConsole*>(sourceConsole.get()) != nullptr;
+			bool ws = dynamic_cast<WsConsole*>(sourceConsole.get()) != nullptr;
+			auto music = std::make_shared<MusicReplacement>(packet, length, gba ? 0x0FFFFFFF : snes ? 0x100FFFF : ws ? 0x10FFFF : sms ? 0x100FF : 0xFFFF, sms ? 0xFFFF : ws ? 0xFFFFF : 0xFFFFFFFF);
+			auto emuLock = _emu->AcquireLock();
+			auto nes = dynamic_cast<NesConsole*>(_emu->GetConsole().get());
+			bool supported = (nes && !nes->GetVsMainConsole() && !nes->GetVsSubConsole()) || dynamic_cast<Gameboy*>(_emu->GetConsole().get()) || dynamic_cast<PceConsole*>(_emu->GetConsole().get()) || ws || snes || sms || gba;
+			bool valid = supported && sourceConsole == _emu->GetConsole() && _emu->GetHash(HashType::Sha1) == romHash;
+			if(valid) { _emu->GetSoundMixer()->SetReplacementMusic(std::move(music)); }
+			return valid;
+		} catch(...) { return false; }
+	}
+	DllExport bool __stdcall ReplacementMusicCommand(const char* romHash, uint32_t action, uint32_t track)
+	{
+		auto emuLock = _emu->AcquireLock(); return romHash && _emu->GetHash(HashType::Sha1) == romHash && _emu->GetSoundMixer()->MusicCommand(action, track);
+	}
+	DllExport int32_t __stdcall GetReplacementMusicTrack() { return _emu->GetSoundMixer()->MusicActiveTrack(); }
 	// Request is atomic; the PPU activates capture on the next complete frame.
 	DllExport bool __stdcall SetMetaSpriteFrameCapture(bool enabled)
 	{

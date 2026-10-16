@@ -1094,6 +1094,7 @@
     <ClCompile Include="Shared\ShortcutKeyHandler.cpp" />
     <ClCompile Include="SNES\Input\SnesController.cpp" />
     <ClCompile Include="Shared\Audio\SoundMixer.cpp" />
+    <ClCompile Include="Shared\Audio\MusicReplacement.cpp" />
     <ClCompile Include="Shared\Audio\SoundResampler.cpp" />
     <ClCompile Include="SNES\Spc.cpp" />
     <ClCompile Include="SNES\Spc.Instructions.cpp" />

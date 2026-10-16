@@ -22,21 +22,55 @@ internal static class Program
 {
 	[DllImport("MesenCore.dll")]
 	private static extern void ConfigureMetaSoftwareRendererTest();
+	[DllImport("MesenCore.dll")] private static extern uint RunMetaSpriteSnesAuthoredPackTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename, byte[] packet, uint length);
+	[DllImport("MesenCore.dll")]
+	[return: MarshalAs(UnmanagedType.I1)] private static extern bool CheckWidescreenPresentationInterop();
+	[DllImport("MesenCore.dll")] private static extern uint RunWsMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunSnesMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunSmsMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunPceMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunGbaMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunGbMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll")] private static extern uint RunMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 	[STAThread]
 	private static void Main(string[] args)
 	{
+		int coreIndex = Array.IndexOf(args, "--native-core");
+		if(coreIndex >= 0) {
+			IntPtr core = NativeLibrary.Load(Path.GetFullPath(args[coreIndex + 1]));
+			NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? core : IntPtr.Zero);
+			NativeLibrary.SetDllImportResolver(typeof(EmuApi).Assembly, (name, _, _) => name == "MesenCore.dll" ? core : IntPtr.Zero);
+		}
 		AssemblyLoadContext.Default.Resolving += (context, name) => {
 			string path = Path.Combine(AppContext.BaseDirectory, name.Name + ".dll");
 			return File.Exists(path) ? context.LoadFromAssemblyPath(path) : null;
 		};
 		int pointerIndex = Array.IndexOf(args, "--pointer-suite");
-		if(pointerIndex >= 0) {
+		if(pointerIndex >= 0 || Array.IndexOf(args, "--widescreen-profile") >= 0 || Array.IndexOf(args, "--music-replacement") >= 0) {
 			string uiHome = Path.Combine(AppContext.BaseDirectory, "artifacts", "pointer-ui-" + Guid.NewGuid().ToString("N"));
 			Directory.CreateDirectory(uiHome);
 			typeof(ConfigManager).GetField("_homeFolder", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, uiHome);
 			typeof(ConfigManager).GetField("_config", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, Configuration.CreateConfig());
 			AppBuilder.Configure<Mesen.App>().UsePlatformDetect().SetupWithoutStarting();
 		} else { AppBuilder.Configure<Application>().UsePlatformDetect().SetupWithoutStarting(); }
+		if(Array.IndexOf(args, "--widescreen-profile") >= 0) { CheckWidescreenProfile(); return; }
+		if(Array.IndexOf(args, "--music-replacement") >= 0) { CheckMusicReplacement(); return; }
+		if(Array.IndexOf(args, "--widescreen-settings") >= 0) {
+			var video = new VideoConfig {
+				DecorativeWidescreen = true, DecorativeRatioPreset = 2, DecorativeAspectRatio = 2.25,
+				DecorativeSideBrightness = 37, DecorativeViewportPosition = 3, DecorativeCustomWidths = true,
+				DecorativeLeftWidth = 23, DecorativeRightWidth = 71, DecorativeFadeWidth = 12
+			};
+			var saved = video.Clone();
+			if(!video.IsIdentical(saved) || !saved.DecorativeWidescreen || !saved.CustomDecorativeRatio
+				|| saved.DecorativeSideBrightness != 37 || saved.DecorativeViewportPosition != 3
+				|| !saved.DecorativeCustomWidths || saved.DecorativeLeftWidth != 23 || saved.DecorativeRightWidth != 71
+				|| saved.DecorativeFadeWidth != 12) {
+				throw new Exception("Widescreen settings did not survive configuration serialization.");
+			}
+			Console.WriteLine("PASS: widescreen ratio, arbitrary brightness, asymmetric widths, fade and gameplay selector persist through configuration serialization.");
+			return;
+		}
 		if(pointerIndex >= 0) { CheckSelection(pointerIndex + 1 < args.Length ? args[pointerIndex + 1] : "Nes", false, false, true); return; }
 		int coldIndex = Array.IndexOf(args, "--cold-start");
 		int stateIndex = Array.IndexOf(args, "--state");
@@ -272,6 +306,375 @@ internal static class Program
 		} finally { window.Close(); }
 	}
 
+	private static void CheckMusicReplacement()
+	{
+		void Check(bool condition, string message) { if(!condition) { throw new Exception(message); } }
+		string home = ConfigManager.HomeFolder;
+		string MakeWave(string name, int direction) {
+			string path = Path.Combine(home, name); using var data = new BinaryWriter(File.Create(path));
+			data.Write(System.Text.Encoding.ASCII.GetBytes("RIFF")); data.Write(36 + 128); data.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt ")); data.Write(16); data.Write((ushort)1); data.Write((ushort)1); data.Write(8000); data.Write(16000); data.Write((ushort)2); data.Write((ushort)16); data.Write(System.Text.Encoding.ASCII.GetBytes("data")); data.Write(128);
+			for(int i = 0; i < 64; i++) { data.Write((short)(direction * (4000 + i * 10))); } return path;
+		}
+		string first = MakeWave("music-positive.wav", 1), second = MakeWave("music-negative.wav", -1);
+		var pack = new MusicReplacementPack { RomHash = new string('A', 40), Enabled = true, MuteNative = true };
+		pack.Tracks.Add(new() { Id = 1, Name = "Track 1", Path = Path.GetFileName(first), LoopStart = 16, LoopEnd = 32 });
+		pack.Tracks.Add(new() { Id = 2, Name = "Track 2", Path = Path.GetFileName(second), LoopStart = 16, LoopEnd = 32 });
+		pack.Rules.Add(new() { Id = 1, Name = "Context six", TrackId = 1, Trigger = "0652 == 08", Conditions = "0760 == 06\n0652 == 08" });
+		pack.Rules.Add(new() { Id = 2, Name = "Context four", TrackId = 2, Trigger = "0652 == 08", Conditions = "0760 == 04\n0652 == 08" });
+		pack.Rules.Add(new() { Id = 3, Name = "Pause", Action = 2, TrackId = 0, Trigger = "0653 == 01" });
+		pack.Rules.Add(new() { Id = 4, Name = "Resume", Action = 3, TrackId = 0, Trigger = "0654 == 01" });
+		pack.Rules.Add(new() { Id = 5, Name = "Stop", Action = 1, TrackId = 0, Trigger = "0655 == 01" });
+		byte[] packet = pack.CreatePacket(home);
+		string saved = Path.Combine(home, "music.json"); File.WriteAllText(saved, pack.ToJson());
+		var loaded = MusicReplacementPack.Load(saved, pack.RomHash); Check(loaded.Rules.Count == 5 && loaded.Tracks[0].LoopStart == 16, "Music JSON round trip failed.");
+		bool rejected = false; try { MusicReplacementPack.Load(saved, new string('B', 40)); } catch(InvalidDataException) { rejected = true; } Check(rejected, "ROM isolation failed.");
+		rejected = false; try { MusicReplacementPack.AssetPath(home, "../outside.wav"); } catch(InvalidDataException) { rejected = true; } Check(rejected, "Escaping music path was accepted.");
+		byte[] rom = new byte[16 + 16384 + 8192]; new byte[] {0x4E, 0x45, 0x53, 0x1A, 1, 1}.CopyTo(rom, 0);
+		new byte[] {0x78, 0xD8, 0x4C, 0x02, 0x80}.CopyTo(rom, 16); for(int vector = 0x3FFA; vector < 0x4000; vector += 2) { rom[16 + vector + 1] = 0x80; }
+		string romPath = Path.Combine(home, "music-write-nrom-mapper0.nes"); File.WriteAllBytes(romPath, rom);
+		uint native = RunMusicReplacementChecks(packet, (uint)packet.Length, romPath); Check(native == 0, $"Native music checks failed at stage {native}.");
+		// Original generated ROM-only fixture, with a simple idle loop and no copyrighted assets.
+		byte[] gbRom = new byte[32768]; gbRom[0x100] = 0x18; gbRom[0x101] = 0xFE;
+		System.Text.Encoding.ASCII.GetBytes("AUDIO-ROMONLY").CopyTo(gbRom, 0x134);
+		gbRom[0x143] = 0x80; gbRom[0x147] = 0; gbRom[0x148] = 0; gbRom[0x149] = 0;
+		byte checksum = 0; for(int i = 0x134; i <= 0x14C; i++) { checksum = unchecked((byte)(checksum - gbRom[i] - 1)); } gbRom[0x14D] = checksum;
+		string gbPath = Path.Combine(home, "audio-rom-only.gb"), gbcPath = Path.Combine(home, "audio-rom-only.gbc"); File.WriteAllBytes(gbPath, gbRom); File.WriteAllBytes(gbcPath, gbRom);
+		var gbPack = MusicReplacementPack.Load(saved, pack.RomHash); gbPack.System = "Gameboy";
+		gbPack.Rules.Clear();
+		gbPack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "C652 == 08", Conditions = "C760 == 06\nC652 == 08" });
+		gbPack.Rules.Add(new() { Id = 2, TrackId = 2, Trigger = "C652 == 08", Conditions = "C760 == 04\nC652 == 08" });
+		gbPack.Rules.Add(new() { Id = 3, Action = 4, TrackId = 1, Restart = true, Trigger = "C653 == 01" });
+		byte[] gbPacket = gbPack.CreatePacket(home);
+		foreach(string fixture in new[] { gbPath, gbcPath }) { uint result = RunGbMusicReplacementChecks(gbPacket, (uint)gbPacket.Length, fixture); Check(result == 0, $"GB/GBC audio write checks failed at stage {result}."); }
+		Console.WriteLine("PASS: GB/GBC ROM-only post-commit write triggers, RAM context, effects and debugger/DMA exclusion.");
+		byte[] gbaRom = new byte[32768]; BitConverter.GetBytes(0xEA00002Eu).CopyTo(gbaRom, 0); BitConverter.GetBytes(0xEAFFFFFEu).CopyTo(gbaRom, 0xC0);
+		System.Text.Encoding.ASCII.GetBytes("AUDIOFIXTURE").CopyTo(gbaRom, 0xA0); gbaRom[0xB2] = 0x96;
+		string gbaPath = Path.Combine(home, "audio-arm-rom-only.gba"); File.WriteAllBytes(gbaPath, gbaRom);
+		var gbaPack = MusicReplacementPack.Load(saved, pack.RomHash); gbaPack.System = "Gba"; gbaPack.Rules.Clear();
+		gbaPack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "02000652 == 08", Conditions = "02000760 == 06\n02000652 == 08\n02000653 == 55" });
+		gbaPack.Rules.Add(new() { Id = 2, TrackId = 2, Trigger = "03000652 == 08", Conditions = "03000760 == 04" });
+		gbaPack.Rules.Add(new() { Id = 3, Action = 4, TrackId = 1, Restart = true, Trigger = "02000655 == AB", Conditions = "02000654 == CD\n02000656 == 34\n02000657 == 12" });
+		byte[] gbaPacket = gbaPack.CreatePacket(home); Check(BitConverter.ToUInt32(gbaPacket) == 0x3252554D, "GBA packet version incorrect.");
+		uint gbaResult = RunGbaMusicReplacementChecks(gbaPacket, (uint)gbaPacket.Length, gbaPath); Check(gbaResult == 0, $"GBA native audio checks failed at stage {gbaResult}.");
+		Console.WriteLine("PASS: GBA full addresses, byte/halfword/word triggers, committed sibling conditions, effects, DMA/debug exclusion and packet rejection.");
+		byte[] pceRom = new byte[8192]; new byte[] { 0x78, 0xD8, 0xA9, 0xFF, 0x53, 0x01, 0xA9, 0xF8, 0x53, 0x02, 0x80, 0xFE }.CopyTo(pceRom, 0);
+		pceRom[0x1FFE] = 0; pceRom[0x1FFF] = 0xE0;
+		string pcePath = Path.Combine(home, "audio-hucard-8k.pce"); File.WriteAllBytes(pcePath, pceRom);
+		var pcePack = MusicReplacementPack.Load(saved, pack.RomHash); pcePack.System = "PcEngine"; pcePack.Rules.Clear();
+		pcePack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "2652 == 08", Conditions = "2760 == 06\n2652 == 08" });
+		pcePack.Rules.Add(new() { Id = 2, TrackId = 2, Trigger = "4652 == 08", Conditions = "4760 == 04\n4652 == 08" });
+		pcePack.Rules.Add(new() { Id = 3, Action = 4, TrackId = 2, Trigger = "2653 == 01", Conditions = "0000 != 00" });
+		pcePack.Rules.Add(new() { Id = 4, Action = 4, TrackId = 1, Trigger = "2653 == 01", Conditions = "2760 == 04" });
+		byte[] pcePacket = pcePack.CreatePacket(home); uint pceResult = RunPceMusicReplacementChecks(pcePacket, (uint)pcePacket.Length, pcePath); Check(pceResult == 0, $"PCE native audio checks failed at stage {pceResult}.");
+		Console.WriteLine("PASS: PCE HuCard logical write triggers, post-write context, MPR remapping, effects, debugger/non-CPU exclusion and unavailable I/O checks.");
+		byte[] smsRom = new byte[32768]; new byte[] { 0xF3, 0x31, 0xF0, 0xDF, 0x18, 0xFE }.CopyTo(smsRom, 0);
+		System.Text.Encoding.ASCII.GetBytes("TMR SEGA").CopyTo(smsRom, 0x7FF0); smsRom[0x7FFF] = 0x4C;
+		string smsPath = Path.Combine(home, "audio-z80-sega-mapper.sms"), ggPath = Path.Combine(home, "audio-z80-sega-mapper.gg"); File.WriteAllBytes(smsPath, smsRom); smsRom[0x7FFF] = 0x6C; File.WriteAllBytes(ggPath, smsRom);
+		var smsPack = MusicReplacementPack.Load(saved, pack.RomHash); smsPack.System = "Sms"; smsPack.Rules.Clear();
+		smsPack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "C652 == 08", Conditions = "C760 == 06\nC652 == 08" });
+		smsPack.Rules.Add(new() { Id = 2, TrackId = 2, Trigger = "C652 == 08", Conditions = "C760 == 04\nC652 == 08" });
+		smsPack.Rules.Add(new() { Id = 3, TrackId = 1, TriggerSource = 1, Trigger = "7F == 90", Conditions = "C760 == 04" });
+		smsPack.Rules.Add(new() { Id = 4, Action = 4, TrackId = 1, TriggerSource = 1, Trigger = "7F == 91", Conditions = "C760 == 04" });
+		byte[] smsPacket = smsPack.CreatePacket(home);
+		foreach(string fixture in new[] { smsPath, ggPath }) { uint result = RunSmsMusicReplacementChecks(smsPacket, (uint)smsPacket.Length, fixture); Check(result == 0, $"SMS/GG native audio checks failed at stage {result}."); }
+		string smsJson = Path.Combine(home, "sms-music.json"); File.WriteAllText(smsJson, smsPack.ToJson()); Check(MusicReplacementPack.Load(smsJson, pack.RomHash, "Sms").Rules[2].TriggerSource == 1, "SMS source lost on JSON reload.");
+		smsPack.Rules[2].Trigger = "100 == 90"; bool portRejected = false; try { smsPack.Validate(); } catch(InvalidDataException) { portRejected = true; } Check(portRejected, "Out-of-range SMS port accepted.");
+		Console.WriteLine("PASS: SMS/GG Sega mapper memory/port triggers, source isolation, RAM mirrors, effects, debugger exclusion and source persistence/validation.");
+		byte[] snesRom = new byte[32768]; new byte[] { 0x78, 0xD8, 0x80, 0xFE }.CopyTo(snesRom, 0); System.Text.Encoding.ASCII.GetBytes("AUDIO LOROM TEST     ").CopyTo(snesRom, 0x7FC0);
+		snesRom[0x7FD5] = 0x20; snesRom[0x7FD7] = 5; snesRom[0x7FD9] = 1; snesRom[0x7FDC] = 255; snesRom[0x7FDD] = 255; snesRom[0x7FFC] = 0; snesRom[0x7FFD] = 0x80;
+		string snesPath = Path.Combine(home, "audio-65816-lorom.sfc"); File.WriteAllBytes(snesPath, snesRom);
+		var snesPack = MusicReplacementPack.Load(saved, pack.RomHash); snesPack.System = "Snes"; snesPack.Rules.Clear();
+		snesPack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "7E0652 == 08", Conditions = "7E0760 == 06\n7E0652 == 08" });
+		snesPack.Rules.Add(new() { Id = 2, TrackId = 1, Trigger = "002140 == 08", Conditions = "7E0760 == 04" });
+		snesPack.Rules.Add(new() { Id = 3, TrackId = 2, TriggerSource = 1, ContextSource = 1, Trigger = "0652 == 08", Conditions = "0760 == 06\n0652 == 08" });
+		snesPack.Rules.Add(new() { Id = 4, Action = 4, TrackId = 1, TriggerSource = 1, Trigger = "0653 == 01", Conditions = "7E0760 == 04" });
+		byte[] snesPacket = snesPack.CreatePacket(home); uint snesResult = RunSnesMusicReplacementChecks(snesPacket, (uint)snesPacket.Length, snesPath); Check(snesResult == 0, $"SNES audio checks failed at stage {snesResult}.");
+		Console.WriteLine("PASS: SNES LoROM main CPU/APU command writes, interpreted SPC writes, separate main/SPC context, effects and debugger/DMA/DSP exclusion.");
+		byte[] wsRom = new byte[65536]; new byte[] { 0xFA, 0x31, 0xC0, 0x8E, 0xD8, 0xEB, 0xFE }.CopyTo(wsRom, 0); new byte[] { 0xEA, 0, 0, 0, 0xF0 }.CopyTo(wsRom, 0xFFF0);
+		string wsPath = Path.Combine(home, "audio-v30-rom-64k.ws"), wscPath = Path.Combine(home, "audio-v30-rom-64k.wsc"); File.WriteAllBytes(wsPath, wsRom); wsRom[0xFFF7] = 1; File.WriteAllBytes(wscPath, wsRom);
+		var wsPack = MusicReplacementPack.Load(saved, pack.RomHash); wsPack.System = "Ws"; wsPack.Rules.Clear();
+		wsPack.Rules.Add(new() { Id = 1, TrackId = 1, Trigger = "00652 == 08", Conditions = "00760 == 06\n00652 == 08\n00653 == 55" });
+		wsPack.Rules.Add(new() { Id = 2, TrackId = 2, Trigger = "10652 == 08", Conditions = "00760 == 04" });
+		wsPack.Rules.Add(new() { Id = 3, TrackId = 2, TriggerSource = 1, Trigger = "0080 == 90", Conditions = "00760 == 04" });
+		wsPack.Rules.Add(new() { Id = 4, Action = 4, TrackId = 1, TriggerSource = 1, Trigger = "0081 == 34", Conditions = "00760 == 04" });
+		byte[] wsPacket = wsPack.CreatePacket(home);
+		foreach(string fixture in new[] { wsPath, wscPath }) { uint result = RunWsMusicReplacementChecks(wsPacket, (uint)wsPacket.Length, fixture); Check(result == 0, $"WS/WSC audio checks failed at stage {result}."); }
+		wsPack.Rules[0].Trigger = "100000 == 08"; bool wsRangeRejected = false; try { wsPack.Validate(); } catch(InvalidDataException) { wsRangeRejected = true; } Check(wsRangeRejected, "Out-of-range WS memory accepted."); wsPack.Rules[0].Trigger = "00652 == 08";
+		wsPack.Rules[2].Trigger = "10000 == 90"; wsRangeRejected = false; try { wsPack.Validate(); } catch(InvalidDataException) { wsRangeRejected = true; } Check(wsRangeRejected, "Out-of-range WS port accepted.");
+		Console.WriteLine("PASS: WS/WSC 20-bit memory, segment/wrap addressing, byte/word/split writes, operation-type preservation, I/O sources and effect playback.");
+
+
+
+
+
+		ConfigManager.Config.Preferences.GameSelectionScreenMode = GameSelectionMode.Disabled;
+		ConfigManager.Config.Gba.SkipBootScreen = true; // Original fixture needs no proprietary BIOS.
+		EmuApi.InitDll(); EmuApi.InitializeEmu(home, IntPtr.Zero, IntPtr.Zero, true, true, true, true); ConfigManager.Config.ApplyConfig();
+		try {
+			Check(EmuApi.LoadRom(romPath), "Music editor ROM failed to load."); EmuApi.Pause();
+			var model = new MusicReplacementViewModel(); model.Import(first); model.Import(second);
+			Check(model.Pack.Tracks.Count == 2, model.Status); model.Pack.Enabled = model.Pack.MuteNative = true;
+			foreach(var track in model.Pack.Tracks) { track.LoopStart = 16; track.LoopEnd = 32; }
+			foreach(var rule in pack.Rules) { model.Pack.Rules.Add(rule); }
+			model.AddEffectRule(); Check(model.SelectedRule?.Action == 4 && model.SelectedRule.Restart && model.SelectedRule.TrackId == 2, "Effect rule defaults failed.");
+			model.SaveApply(); Check(model.Status.Contains("saved and applied"), model.Status);
+			model.Playback(0); Check(DebugApi.GetReplacementMusicTrack() == 2, model.Status);
+			model.Playback(4); Check(model.Status.StartsWith("Playback command sent"), model.Status);
+			model.Playback(5); Check(DebugApi.GetReplacementMusicTrack() == 2, "Effect stop changed music.");
+			model.RemoveTrack(); Check(model.Status.Contains("Remove rules"), "Referenced effect track was removed.");
+			string before = File.ReadAllText(model.PackPath);
+			Check(!DebugApi.SetMusicReplacements(new string('B', 40), packet, (uint)packet.Length) && DebugApi.GetReplacementMusicTrack() == 2, "Stale ROM modified playback.");
+			string badFile = Path.Combine(home, "broken.ogg"); File.WriteAllText(badFile, "invalid audio"); model.Import(badFile); model.SaveApply();
+			Check(model.Status.Contains("Apply failed") && File.ReadAllText(model.PackPath) == before && DebugApi.GetReplacementMusicTrack() == 2, "Failed decode modified saved pack or live music.");
+			model.RemoveTrack(); Check(model.Pack.Tracks.Count == 2, model.Status);
+			File.WriteAllText(model.PackPath, before + " "); model.SaveApply(); Check(model.Status.Contains("changed on disk") && File.ReadAllText(model.PackPath) == before + " ", "Stale editor overwrote saved rules."); model.Reload();
+			var window = new Mesen.Debugger.Windows.MusicReplacementWindow { Width = 860, Height = 820, ShowInTaskbar = false, Opacity = 0 }; window.Show(); Dispatcher.UIThread.RunJobs();
+			window.Measure(new Size(860, 820)); window.Arrange(new Rect(0, 0, 860, 820)); Dispatcher.UIThread.RunJobs();
+			((Panel)window.Content!).Background = Avalonia.Media.Brushes.White;
+			var scroll = window.FindControl<ScrollViewer>("musicScroll") ?? throw new Exception("Music editor did not construct.");
+			Check(scroll.Extent.Width <= scroll.Viewport.Width + 1, "Music editor overflows horizontally.");
+			using(var image = new RenderTargetBitmap(new PixelSize(860, 820), new Vector(96, 96))) { image.Render((Control)window.Content!); image.Save(Path.Combine(home, "music-editor.png"), PngBitmapEncoderOptions.Default); }
+			scroll.Offset = new Vector(0, 500); Dispatcher.UIThread.RunJobs();
+			using(var image = new RenderTargetBitmap(new PixelSize(860, 820), new Vector(96, 96))) { image.Render((Control)window.Content!); image.Save(Path.Combine(home, "music-rules.png"), PngBitmapEncoderOptions.Default); }
+			window.Width = 650; window.Measure(new Size(650, 820)); window.Arrange(new Rect(0, 0, 650, 820)); Dispatcher.UIThread.RunJobs();
+			Check(scroll.Extent.Width <= scroll.Viewport.Width + 1, "Music editor overflows at its minimum width.");
+			window.FindControl<TabControl>("audioTabs")!.SelectedIndex = 1; Dispatcher.UIThread.RunJobs();
+			var effectsScroll = window.FindControl<ScrollViewer>("effectsScroll")!;
+			Check(effectsScroll.Extent.Width <= effectsScroll.Viewport.Width + 1, "Sound effect editor overflows at minimum width.");
+			using(var image = new RenderTargetBitmap(new PixelSize(650, 820), new Vector(96, 96))) { image.Render((Control)window.Content!); image.Save(Path.Combine(home, "sound-effects-editor.png"), PngBitmapEncoderOptions.Default); }
+			window.Close(); model.Playback(1);
+			EmuApi.Stop(); Check(DebugApi.GetReplacementMusicTrack() == 0, "Stopping a ROM retained replacement music.");
+			bool preloaded = false; uint beforeFrame = 0, afterFrame = 1; ulong beforeClock = 0, afterClock = 1;
+			using var listener = new NotificationListener();
+			listener.OnNotification += e => {
+				if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+				var beforeTiming = EmuApi.GetTimingInfo(CpuType.Nes); beforeFrame = beforeTiming.FrameCount; beforeClock = beforeTiming.MasterClock;
+				typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { model.Pack.RomHash });
+				preloaded = DebugApi.ReplacementMusicCommand(model.Pack.RomHash, 0, 1);
+				var afterTiming = EmuApi.GetTimingInfo(CpuType.Nes); afterFrame = afterTiming.FrameCount; afterClock = afterTiming.MasterClock;
+			};
+			Check(EmuApi.LoadRom(romPath) && preloaded && beforeFrame == afterFrame && beforeClock == afterClock, "Saved music failed to load during GameLoaded before CPU execution."); EmuApi.Pause();
+			Check(EmuApi.LoadRom(gbPath), "GB audio editor fixture failed to load."); EmuApi.Pause();
+			var gbModel = new MusicReplacementViewModel(); Check(gbModel.Pack.System == "Gameboy" && gbModel.PackPath.Contains("Gameboy"), "GB pack path/system incorrect.");
+			gbModel.Import(first); gbModel.Pack.Enabled = true; gbModel.AddEffectRule(); gbModel.SaveApply();
+			Check(gbModel.Status.Contains("saved and applied"), gbModel.Status); gbModel.Playback(4); Check(gbModel.Status.StartsWith("Playback command sent"), gbModel.Status);
+			bool wrongSystem = false; try { MusicReplacementPack.Load(gbModel.PackPath, gbModel.Pack.RomHash, "Nes"); } catch(InvalidDataException) { wrongSystem = true; }
+			Check(wrongSystem, "Cross-system audio pack accepted.");
+			gbModel.Reload(); Check(gbModel.Pack.Rules.Single().Action == 4, "GB effect pack reload failed.");
+			bool gbPreloaded = false;
+			using(var gbListener = new NotificationListener()) {
+				gbListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var timing = EmuApi.GetTimingInfo(CpuType.Gameboy);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { gbModel.Pack.RomHash });
+					var after = EmuApi.GetTimingInfo(CpuType.Gameboy);
+					gbPreloaded = DebugApi.ReplacementMusicCommand(gbModel.Pack.RomHash, 4, 1) && timing.MasterClock == after.MasterClock && timing.FrameCount == after.FrameCount;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(gbPath) && gbPreloaded, "GB audio pack failed to load before CPU execution."); EmuApi.Pause();
+			}
+			Console.WriteLine("PASS: Game Boy editor import/apply/effect preview/reload and system isolation.");
+			Check(EmuApi.LoadRom(gbaPath), "GBA editor fixture failed to load."); EmuApi.Pause();
+			var gbaModel = new MusicReplacementViewModel(); Check(gbaModel.Pack.System == "Gba" && gbaModel.PackPath.Contains("Gba"), "GBA audio system/path incorrect.");
+			gbaModel.Import(first); gbaModel.Pack.Enabled = true; gbaModel.AddEffectRule(); Check(gbaModel.SelectedRule!.Trigger == "02000652 == 08", "GBA default trigger incorrect.");
+			gbaModel.SaveApply(); Check(gbaModel.Status.Contains("saved and applied"), gbaModel.Status); gbaModel.Playback(4); Check(gbaModel.Status.StartsWith("Playback command sent"), gbaModel.Status);
+			gbaModel.Reload(); Check(gbaModel.Pack.Rules.Single().Trigger == "02000652 == 08", "GBA address lost on reload.");
+			gbaModel.SelectedRule!.Trigger = "10000000 == 08"; bool gbaAddressRejected = false; try { gbaModel.Pack.Validate(); } catch(InvalidDataException) { gbaAddressRejected = true; } Check(gbaAddressRejected, "GBA out-of-range address accepted."); gbaModel.Reload();
+			bool gbaPreloaded = false;
+			using(var gbaListener = new NotificationListener()) {
+				gbaListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var beforeTiming = EmuApi.GetTimingInfo(CpuType.Gba);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { gbaModel.Pack.RomHash });
+					var afterTiming = EmuApi.GetTimingInfo(CpuType.Gba);
+					gbaPreloaded = DebugApi.ReplacementMusicCommand(gbaModel.Pack.RomHash, 4, 1) && beforeTiming.MasterClock == afterTiming.MasterClock;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(gbaPath) && gbaPreloaded, "GBA audio pack failed to preload."); EmuApi.Pause();
+				// Wait for startup before stopping: Run clears its stop flag when it starts.
+				var startup = Stopwatch.StartNew();
+				while(EmuApi.GetTimingInfo(CpuType.Gba).FrameCount == 0 && startup.ElapsedMilliseconds < 5000) { System.Threading.Thread.Sleep(1); }
+				Check(EmuApi.GetTimingInfo(CpuType.Gba).FrameCount > 0, "GBA running fixture never completed its first frame.");
+			}
+			Console.WriteLine("PASS: GBA editor apply/preview/reload, address validation and pre-execution loading.");
+			Check(EmuApi.LoadRom(pcePath), "PCE editor fixture failed to load."); EmuApi.Pause();
+			var pceModel = new MusicReplacementViewModel(); Check(pceModel.Pack.System == "PcEngine" && pceModel.PackPath.Contains("PcEngine"), "PCE audio system/path incorrect.");
+			pceModel.Import(first); pceModel.Pack.Enabled = true; pceModel.AddEffectRule(); Check(pceModel.SelectedRule!.Trigger == "2652 == 08", "PCE default trigger incorrect.");
+			pceModel.SaveApply(); Check(pceModel.Status.Contains("saved and applied"), pceModel.Status); pceModel.Playback(4); Check(pceModel.Status.StartsWith("Playback command sent"), pceModel.Status);
+			pceModel.Reload(); Check(pceModel.Pack.Rules.Single().Action == 4, "PCE effect pack reload failed.");
+			bool pcePreloaded = false;
+			using(var pceListener = new NotificationListener()) {
+				pceListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var beforeTiming = EmuApi.GetTimingInfo(CpuType.Pce);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { pceModel.Pack.RomHash });
+					var afterTiming = EmuApi.GetTimingInfo(CpuType.Pce);
+					pcePreloaded = DebugApi.ReplacementMusicCommand(pceModel.Pack.RomHash, 4, 1) && beforeTiming.MasterClock == afterTiming.MasterClock;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(pcePath) && pcePreloaded, "PCE audio pack failed to preload."); EmuApi.Pause();
+				var startup = Stopwatch.StartNew(); while(EmuApi.GetTimingInfo(CpuType.Pce).FrameCount == 0 && startup.ElapsedMilliseconds < 5000) { System.Threading.Thread.Sleep(1); }
+				Check(EmuApi.GetTimingInfo(CpuType.Pce).FrameCount > 0, "PCE fixture never completed its first frame.");
+			}
+			Console.WriteLine("PASS: PCE editor apply/preview/reload and pre-execution loading.");
+			Check(EmuApi.LoadRom(smsPath), "SMS editor fixture failed to load."); EmuApi.Pause();
+			var smsModel = new MusicReplacementViewModel(); Check(smsModel.Pack.System == "Sms" && smsModel.PackPath.Contains("Sms") && smsModel.SupportsPortTriggers, "SMS audio editor system/path/source incorrect.");
+			smsModel.Import(first); smsModel.Pack.Enabled = true; smsModel.AddEffectRule(); smsModel.SelectedRule!.TriggerSource = 1; smsModel.SelectedRule.Trigger = "7F == 91";
+			smsModel.SaveApply(); Check(smsModel.Status.Contains("saved and applied"), smsModel.Status); smsModel.Playback(4); Check(smsModel.Status.StartsWith("Playback command sent"), smsModel.Status);
+			smsModel.Reload(); Check(smsModel.Pack.Rules.Single().TriggerSource == 1, "SMS source lost on editor reload.");
+			var smsWindow = new Mesen.Debugger.Windows.MusicReplacementWindow { Width = 650, Height = 820, ShowInTaskbar = false, Opacity = 0 }; smsWindow.Show(); Dispatcher.UIThread.RunJobs();
+			try {
+				smsWindow.Measure(new Size(650, 820)); smsWindow.Arrange(new Rect(0, 0, 650, 820)); Dispatcher.UIThread.RunJobs();
+				var smsWindowModel = (MusicReplacementViewModel)smsWindow.DataContext!;
+				var sourceSelector = smsWindow.FindControl<ComboBox>("musicTriggerSource")!;
+				Check(sourceSelector.IsVisible && sourceSelector.SelectedIndex == 1, "SMS trigger source did not load in actual UI.");
+				sourceSelector.SelectedIndex = 0; Dispatcher.UIThread.RunJobs(); Check(smsWindowModel.SelectedRule!.TriggerSource == 0, "SMS source selector did not update rule.");
+				sourceSelector.SelectedIndex = 1; Dispatcher.UIThread.RunJobs(); Check(smsWindowModel.SelectedRule!.TriggerSource == 1, "SMS port source selection failed.");
+				var smsScroll = smsWindow.FindControl<ScrollViewer>("musicScroll")!; Check(smsScroll.Extent.Width <= smsScroll.Viewport.Width + 1, "SMS editor overflows at minimum width.");
+			} finally { smsWindow.Close(); }
+			bool smsPreloaded = false;
+			using(var smsListener = new NotificationListener()) {
+				smsListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var beforeTiming = EmuApi.GetTimingInfo(CpuType.Sms);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { smsModel.Pack.RomHash });
+					var afterTiming = EmuApi.GetTimingInfo(CpuType.Sms);
+					smsPreloaded = DebugApi.ReplacementMusicCommand(smsModel.Pack.RomHash, 4, 1) && beforeTiming.MasterClock == afterTiming.MasterClock;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(smsPath) && smsPreloaded, "SMS audio pack failed to preload."); EmuApi.Pause();
+				var startup = Stopwatch.StartNew(); while(EmuApi.GetTimingInfo(CpuType.Sms).FrameCount == 0 && startup.ElapsedMilliseconds < 5000) { System.Threading.Thread.Sleep(1); }
+				Check(EmuApi.GetTimingInfo(CpuType.Sms).FrameCount > 0, "SMS fixture never completed its first frame.");
+			}
+			Console.WriteLine("PASS: SMS editor port rule apply/preview/reload and pre-execution loading.");
+			Check(EmuApi.LoadRom(snesPath), "SNES editor fixture failed to load."); EmuApi.Pause();
+			var snesModel = new MusicReplacementViewModel(); Check(snesModel.Pack.System == "Snes" && snesModel.SupportsSpcTriggers, "SNES audio editor system/source incorrect.");
+			snesModel.Import(first); snesModel.Pack.Enabled = true; snesModel.AddEffectRule(); snesModel.SelectedRule!.TriggerSource = 1; snesModel.SelectedRule.ContextSource = 1; snesModel.SelectedRule.Trigger = "0652 == 08"; snesModel.SelectedRule.Conditions = "0760 == 06";
+			snesModel.SaveApply(); Check(snesModel.Status.Contains("saved and applied"), snesModel.Status); snesModel.Playback(4); Check(snesModel.Status.StartsWith("Playback command sent"), snesModel.Status);
+			snesModel.Reload(); Check(snesModel.Pack.Rules.Single().TriggerSource == 1 && snesModel.SelectedRule!.ContextSource == 1, "SNES CPU source settings lost.");
+			snesModel.SelectedRule!.Trigger = "10000 == 08"; bool spcRangeRejected = false; try { snesModel.Pack.Validate(); } catch(InvalidDataException) { spcRangeRejected = true; } Check(spcRangeRejected, "Wide SPC address accepted."); snesModel.Reload();
+			var snesWindow = new Mesen.Debugger.Windows.MusicReplacementWindow { Width = 650, Height = 820, ShowInTaskbar = false, Opacity = 0 }; snesWindow.Show(); Dispatcher.UIThread.RunJobs();
+			try {
+				snesWindow.Measure(new Size(650, 820)); snesWindow.Arrange(new Rect(0, 0, 650, 820)); Dispatcher.UIThread.RunJobs();
+				var windowModel = (MusicReplacementViewModel)snesWindow.DataContext!;
+				var triggerSelector = snesWindow.FindControl<ComboBox>("musicTriggerSource")!; var contextSelector = snesWindow.FindControl<ComboBox>("musicContextSource")!;
+				Check(triggerSelector.IsVisible && contextSelector.IsVisible && triggerSelector.SelectedIndex == 1 && contextSelector.SelectedIndex == 1, "SNES source selectors did not restore.");
+				contextSelector.SelectedIndex = 0; Dispatcher.UIThread.RunJobs(); Check(windowModel.SelectedRule!.ContextSource == 0 && windowModel.SelectedRule.TriggerSource == 1, "SNES RAM source changed trigger CPU.");
+				triggerSelector.SelectedIndex = 0; Dispatcher.UIThread.RunJobs(); Check(windowModel.SelectedRule!.TriggerSource == 0, "SNES trigger selector failed.");
+				var snesScroll = snesWindow.FindControl<ScrollViewer>("musicScroll")!; Check(snesScroll.Extent.Width <= snesScroll.Viewport.Width + 1, "SNES editor overflows at minimum width.");
+			} finally { snesWindow.Close(); }
+			bool snesPreloaded = false;
+			using(var snesListener = new NotificationListener()) {
+				snesListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var beforeTiming = EmuApi.GetTimingInfo(CpuType.Snes);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { snesModel.Pack.RomHash });
+					var afterTiming = EmuApi.GetTimingInfo(CpuType.Snes);
+					snesPreloaded = DebugApi.ReplacementMusicCommand(snesModel.Pack.RomHash, 4, 1) && beforeTiming.MasterClock == afterTiming.MasterClock;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(snesPath) && snesPreloaded, "SNES audio pack failed to preload."); EmuApi.Pause();
+				var startup = Stopwatch.StartNew(); while(EmuApi.GetTimingInfo(CpuType.Snes).FrameCount == 0 && startup.ElapsedMilliseconds < 5000) { System.Threading.Thread.Sleep(1); }
+				Check(EmuApi.GetTimingInfo(CpuType.Snes).FrameCount > 0, "SNES fixture never completed its first frame.");
+			}
+			Console.WriteLine("PASS: SNES editor CPU/context sources, apply/preview/reload, validation and pre-execution loading.");
+			Check(EmuApi.LoadRom(wsPath), "WS editor fixture failed to load."); EmuApi.Pause();
+			var wsModel = new MusicReplacementViewModel(); Check(wsModel.Pack.System == "Ws" && wsModel.PackPath.Contains("Ws") && wsModel.SupportsPortTriggers, "WS audio editor system/path incorrect.");
+			wsModel.Import(first); wsModel.Pack.Enabled = true; wsModel.AddEffectRule(); Check(wsModel.SelectedRule!.Trigger == "00652 == 08", "WS default address incorrect.");
+			wsModel.SelectedRule.TriggerSource = 1; wsModel.SelectedRule.Trigger = "0081 == 34"; wsModel.SaveApply(); Check(wsModel.Status.Contains("saved and applied"), wsModel.Status);
+			wsModel.Playback(4); Check(wsModel.Status.StartsWith("Playback command sent"), wsModel.Status); wsModel.Reload(); Check(wsModel.SelectedRule!.TriggerSource == 1, "WS port source lost on reload.");
+			var wsWindow = new Mesen.Debugger.Windows.MusicReplacementWindow { Width = 650, Height = 820, ShowInTaskbar = false, Opacity = 0 }; wsWindow.Show(); Dispatcher.UIThread.RunJobs();
+			try {
+				wsWindow.Measure(new Size(650, 820)); wsWindow.Arrange(new Rect(0, 0, 650, 820)); Dispatcher.UIThread.RunJobs();
+				var windowModel = (MusicReplacementViewModel)wsWindow.DataContext!; var selector = wsWindow.FindControl<ComboBox>("musicTriggerSource")!;
+				Check(selector.IsVisible && selector.SelectedIndex == 1, "WS source selector did not restore."); selector.SelectedIndex = 0; Dispatcher.UIThread.RunJobs(); Check(windowModel.SelectedRule!.TriggerSource == 0, "WS selector failed.");
+				var scrollView = wsWindow.FindControl<ScrollViewer>("musicScroll")!; Check(scrollView.Extent.Width <= scrollView.Viewport.Width + 1, "WS editor overflows at minimum width.");
+			} finally { wsWindow.Close(); }
+			bool wsPreloaded = false;
+			using(var wsListener = new NotificationListener()) {
+				wsListener.OnNotification += e => {
+					if(e.NotificationType != ConsoleNotificationType.GameLoaded) { return; }
+					var beforeTiming = EmuApi.GetTimingInfo(CpuType.Ws);
+					typeof(MusicReplacementPack).Assembly.GetType("Mesen.Debugger.Utilities.MusicReplacementRuntime")!.GetMethod("LoadForGame")!.Invoke(null, new object[] { wsModel.Pack.RomHash });
+					var afterTiming = EmuApi.GetTimingInfo(CpuType.Ws);
+					wsPreloaded = DebugApi.ReplacementMusicCommand(wsModel.Pack.RomHash, 4, 1) && beforeTiming.MasterClock == afterTiming.MasterClock;
+				};
+				EmuApi.Stop(); Check(EmuApi.LoadRom(wsPath) && wsPreloaded, "WS audio pack failed to preload."); EmuApi.Pause();
+				var startup = Stopwatch.StartNew(); while(EmuApi.GetTimingInfo(CpuType.Ws).FrameCount == 0 && startup.ElapsedMilliseconds < 5000) { System.Threading.Thread.Sleep(1); }
+				Check(EmuApi.GetTimingInfo(CpuType.Ws).FrameCount > 0, "WS fixture never completed its first frame.");
+			}
+			Console.WriteLine("PASS: WS editor source controls, apply/preview/reload, address validation and pre-execution loading.");
+
+
+
+
+
+			Console.WriteLine("LAYOUT: " + Path.Combine(home, "music-editor.png"));
+			Console.WriteLine("PASS: music editor import/save/apply/reload, loop metadata, previews, ROM/path isolation, failed-decode rollback, stale-save protection, UI layout and pre-emulation pack loading.");
+		} finally { Console.WriteLine("AUDIO: stopping final fixture."); EmuApi.Stop(); Console.WriteLine("AUDIO: releasing emulator."); EmuApi.Release(); Console.WriteLine("AUDIO: shutdown complete."); }
+	}
+	private static void CheckWidescreenProfile()
+	{
+		string home = ConfigManager.HomeFolder;
+		EmuApi.InitDll(); EmuApi.InitializeEmu(home, IntPtr.Zero, IntPtr.Zero, true, true, true, true);
+		ConfigManager.Config.ApplyConfig();
+		try {
+			if(!EmuApi.LoadRom(Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture.gb"))) { throw new Exception("Profile fixture failed to load."); }
+			EmuApi.Pause();
+			string hash = EmuApi.GetRomHash(HashType.Sha1);
+			WidescreenProfileStore.LoadForGame(hash, CpuType.Gameboy);
+			var original = ConfigManager.Config.Video.Clone();
+			using var model = new Mesen.ViewModels.VideoConfigViewModel();
+			model.WidescreenSettings.DecorativeWidescreen = true;
+			model.WidescreenSettings.DecorativeSideBrightness = 37;
+			model.WidescreenSettings.DecorativeCustomWidths = true;
+			model.WidescreenSettings.DecorativeLeftWidth = 23; model.WidescreenSettings.DecorativeRightWidth = 71;
+			model.WidescreenSettings.DecorativeFadeWidth = 12; model.WidescreenSettings.DecorativeViewportPosition = 3;
+			model.SaveGameWidescreenCommand.Execute(null);
+			string path = WidescreenProfileStore.ActivePath!;
+			var profile = WidescreenProfileStore.Read(path) ?? throw new Exception(model.WidescreenProfileStatus);
+			if(profile.DecorativeSideBrightness != 37 || profile.DecorativeViewportPosition != 3 || profile.DecorativeFadeWidth != 12
+				|| !original.IsIdentical(ConfigManager.Config.Video)) { throw new Exception("Profile save lost fields or modified global defaults."); }
+			var interop = new InteropVideoConfig { Brightness = 0.25, Contrast = -0.5 };
+			profile.ApplyTo(ref interop);
+			if(!CheckWidescreenPresentationInterop()) { throw new Exception("Native video config did not receive widescreen presentation settings correctly."); }
+			if(interop.DecorativeLeftWidth != 23 || interop.DecorativeRightWidth != 71 || interop.DecorativeSideBrightness != 37
+				|| interop.Brightness != 0.25 || interop.Contrast != -0.5) { throw new Exception("Profile override altered unrelated video settings."); }
+			string current = File.ReadAllText(path);
+			File.WriteAllText(path, current[..current.LastIndexOf('}')] + ",\"DecorativeCameraMin\":-50,\"DecorativeSlideSpeed\":0.1,\"DecorativeLeftFlags\":\"invalid legacy flags\"}");
+			var legacy = WidescreenProfileStore.Read(path) ?? throw new Exception("Legacy profile did not load.");
+			if(legacy.DecorativeViewportPosition != 3 || legacy.DecorativeSideBrightness != 37) { throw new Exception("Discarding obsolete boundary fields lost presentation settings."); }
+			WidescreenProfileStore.Write(path, legacy);
+			if(File.ReadAllText(path).Contains("DecorativeCameraMin") || File.ReadAllText(path).Contains("DecorativeSlideSpeed")) { throw new Exception("Obsolete boundary fields survived profile saving."); }
+			string prior = File.ReadAllText(path); profile.DecorativeSideBrightness = 101;
+			bool invalid = false; try { WidescreenProfileStore.Write(path, profile); } catch(InvalidDataException) { invalid = true; }
+			if(!invalid || File.ReadAllText(path) != prior) { throw new Exception("Invalid profile overwrote saved settings."); }
+			var view = new Mesen.Views.VideoConfigView { DataContext = model, Background = Avalonia.Media.Brushes.White };
+			var host = new Window { Content = view, Width = 500, Height = 700, ShowInTaskbar = false, Opacity = 0 };
+			host.Show(); Dispatcher.UIThread.RunJobs();
+			var gameplayPosition = view.FindControl<ComboBox>("wideGameplayPosition") ?? throw new Exception("Gameplay position selector was removed.");
+			if(gameplayPosition.ItemCount != 4 || gameplayPosition.SelectedIndex != 3) { throw new Exception("Gameplay position choices or saved selection were lost."); }
+			var brightness = view.FindControl<NumericUpDown>("wideBrightness") ?? throw new Exception("Brightness numeric input is missing.");
+			if(brightness.Value != 37 || brightness.Minimum != 0 || brightness.Maximum != 100 || brightness.Increment != 1) { throw new Exception("Brightness spinbox configuration/binding failed."); }
+			brightness.Value = 38;
+			if(model.WidescreenSettings.DecorativeSideBrightness != 38 || WidescreenProfileStore.Read(path)!.DecorativeSideBrightness != 37) { throw new Exception("Brightness edit failed or saved without the explicit save action."); }
+			brightness.Value = 37;
+			view.Measure(new Size(500, 700)); view.Arrange(new Rect(0, 0, 500, 700)); Dispatcher.UIThread.RunJobs();
+			string imagePath = Path.Combine(home, "widescreen-settings-layout.png");
+			using(var bitmap = new RenderTargetBitmap(new PixelSize(500, 700), new Vector(96, 96))) { bitmap.Render(view); bitmap.Save(imagePath, PngBitmapEncoderOptions.Default); }
+			var scroll = view.FindControl<ScrollViewer>("wideSettingsScroll") ?? throw new Exception("Settings scroll host missing.");
+			if(scroll.Extent.Width > scroll.Viewport.Width + 1) { throw new Exception("Widescreen settings overflow horizontally."); }
+			scroll.Offset = new Vector(0, 350); Dispatcher.UIThread.RunJobs();
+			using(var bitmap = new RenderTargetBitmap(new PixelSize(500, 700), new Vector(96, 96))) { bitmap.Render(view); bitmap.Save(Path.Combine(home, "widescreen-presentation-layout.png"), PngBitmapEncoderOptions.Default); }
+			host.Close();
+			Console.WriteLine("LAYOUT: " + imagePath);
+			WidescreenProfileStore.LoadForGame(new string('A', 40), CpuType.Gameboy);
+			model.SaveGameWidescreenCommand.Execute(null);
+			if(WidescreenProfileStore.Active != null || !model.WidescreenProfileStatus.Contains("game changed")) { throw new Exception("Stale profile editor saved to another game."); }
+			if(WidescreenProfileStore.GetPath(home, hash, CpuType.Gba) == WidescreenProfileStore.GetPath(home, hash, CpuType.Gameboy)) { throw new Exception("Profile system isolation failed."); }
+			WidescreenProfileStore.LoadForGame(hash, CpuType.Gameboy);
+			using var reopened = new Mesen.ViewModels.VideoConfigViewModel();
+			if(reopened.WidescreenSettings.DecorativeSideBrightness != 37 || reopened.WidescreenSettings.DecorativeViewportPosition != 3) { throw new Exception("Saved profile did not restore into controls."); }
+			reopened.RemoveGameWidescreenCommand.Execute(null);
+			if(File.Exists(path) || WidescreenProfileStore.Active != null || !original.IsIdentical(reopened.WidescreenSettings)) { throw new Exception("Profile removal did not restore global defaults."); }
+			Console.WriteLine("PASS: actual profile editor save/load/remove, global isolation, unrelated video settings, invalid-save retention, stale-game rejection, system/hash isolation and UI construction/render.");
+		} finally { WidescreenProfileStore.Clear(); EmuApi.Stop(); EmuApi.Release(); }
+	}
 	private static void CheckGroupLabelBinding()
 	{
 		var group = new MetaSpriteGroup { Id = 17 };
@@ -460,9 +863,10 @@ internal static class Program
 	{
 		var (cpu, extension) = system switch {
 			"Snes" => (CpuType.Snes, "sfc"), "Nes" => (CpuType.Nes, "nes"),
+			"SnesObj" => (CpuType.Snes, "obj-interlace-group-holes.sfc"),
 			"Gameboy" => (CpuType.Gameboy, "gb"), "Gbc" => (CpuType.Gameboy, "gbc"),
 			"Gba" => (CpuType.Gba, "gba"), "Pce" => (CpuType.Pce, "pce"),
-			"Sms" => (CpuType.Sms, "sms"), "Ws" => (CpuType.Ws, "wsc"),
+			"Sms" => (CpuType.Sms, "sms"), "SmsLegacy" => (CpuType.Sms, "legacy-mode0.sms"), "Ws" => (CpuType.Ws, "wsc"),
 			_ => throw new ArgumentException("Unknown selection test system: " + system)
 		};
 		string romPath = Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture." + extension);
@@ -503,6 +907,11 @@ internal static class Program
 				Dispatcher.UIThread.RunJobs();
 				if(viewer.SpritePreviews.Count == 0 || viewer.SpritePreviews[0].Width <= 0 || viewer.SpritePreviews[0].Height <= 0) { throw new Exception("Actual sprite snapshot was not refreshed: " + system); }
 				viewer.ToggleMetaSprite(viewer.SpritePreviews[0]);
+				if(system == "SnesObj") {
+					var second=viewer.SpritePreviews.Single(s => s.SpriteIndex==1);
+					if(viewer.ViewerBitmap.PixelSize.Height!=512 || second.PreviewY-viewer.SpritePreviews[0].PreviewY!=8) { throw new Exception("OBJ-interlace preview did not retain full-source vertical coordinates."); }
+					viewer.ToggleMetaSprite(second);
+				}
 				viewer.CreateMetaGroup();
 				if(viewer.MetaGroups.Count != 1 || !viewer.MetaGroups[0].Enabled || !viewer.MetaStatus.StartsWith("Replacements applied.")) {
 					throw new Exception("Actual Create flow failed: " + viewer.MetaStatus);
@@ -512,6 +921,36 @@ internal static class Program
 				var saved = MetaSpritePack.Load(packPath, hash, cpu.ToString());
 				if(saved.Groups.Count != 1 || !saved.Groups[0].Enabled || !File.Exists(Path.Combine(Path.GetDirectoryName(packPath)!, saved.Groups[0].ReplacementPath))) {
 					throw new Exception("Actual Create flow did not persist its enabled PNG group in the default folder.");
+				}
+				if(system == "SnesObj") {
+					var group=saved.Groups[0];
+					if(group.Width!=20 || group.Height!=16 || group.Members.Count!=2 || group.Members[1].X!=12 || group.Members[1].Y!=8) { throw new Exception("Authored OBJ-interlace member arrangement used field-height coordinates."); }
+					(int Width,int Height,uint[] Pixels) Decode(string path) {
+						using var bitmap=new Bitmap(path); int count=bitmap.PixelSize.Width*bitmap.PixelSize.Height;
+						IntPtr pixels=Marshal.AllocHGlobal(count*4);
+						try {
+							bitmap.CopyPixels(new PixelRect(bitmap.PixelSize),pixels,count*4,bitmap.PixelSize.Width*4);
+							int[] raw=new int[count]; Marshal.Copy(pixels,raw,0,count);
+							return (bitmap.PixelSize.Width,bitmap.PixelSize.Height,raw.Select(p => unchecked((uint)p)).ToArray());
+						} finally { Marshal.FreeHGlobal(pixels); }
+					}
+					var exported=Decode(Path.Combine(Path.GetDirectoryName(packPath)!,group.ReplacementPath));
+					if(exported.Width!=20 || exported.Height!=16 || (exported.Pixels[8]>>24)!=0 || (exported.Pixels[7]>>24)!=0 || (exported.Pixels[8*20+12]>>24)!=255) { throw new Exception("Default OBJ-interlace PNG lost source layout, transparent gap or native hole."); }
+					string enlarged=Path.Combine(home,"obj-canvas.png");
+					using(var canvas=new WriteableBitmap(new PixelSize(22,18),new Vector(96,96),PixelFormat.Bgra8888,AlphaFormat.Unpremul)) {
+						using(var pixels=canvas.Lock()) { Marshal.Copy(Enumerable.Repeat(unchecked((int)0xFF00FF00),22*18).ToArray(),0,pixels.Address,22*18); }
+						canvas.Save(enlarged,PngBitmapEncoderOptions.Default);
+					}
+					viewer.ImportMetaReplacementPng(enlarged);
+					if(!viewer.MetaStatus.StartsWith("Replacements applied.")) { throw new Exception("Authored interlace artwork import failed: "+viewer.MetaStatus); }
+					saved=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+					byte[] packet=MetaSpriteRuntimePacket.Create(saved,g => Decode(Path.Combine(Path.GetDirectoryName(packPath)!,g.ReplacementPath)));
+					uint result=RunMetaSpriteSnesAuthoredPackTest(romPath,packet,(uint)packet.Length);
+					if(result!=7) { throw new Exception("Viewer-authored OBJ-interlace pack failed live whole-frame replacement: "+result); }
+					viewer.LoadMetaGroups();
+					if(viewer.MetaGroups.Count!=1 || viewer.MetaGroups[0].Members[1].Y!=8) { throw new Exception("OBJ-interlace group reload lost source offsets."); }
+					Console.WriteLine("PASS: actual SNES OBJ-interlace two-member selection, full-source PNG export, oversized PNG import, persisted pack decode, live whole-frame rendering and reload.");
+					return;
 				}
 				viewer.SelectedMetaGroup!.Name = "Standing";
 				viewer.SetSelectedMetaOrigin(2, 3);
@@ -614,6 +1053,8 @@ internal static class Program
 					}
 					tilemap.BackgroundEditor.ImportMetaBackgroundPng(exported, 0);
 					var background = tilemap.BackgroundEditor.SelectedMetaBackground ?? throw new Exception("Actual tilemap PNG import failed: " + tilemap.BackgroundEditor.MetaStatus);
+					if(background.ArtworkPath != "tilemap.png") { throw new Exception("Background import did not preserve the source filename."); }
+					if(!background.UseWidescreenPosition || background.WidescreenPosition.Position != 0) { throw new Exception("New PNG background did not receive its own centred gameplay positioning defaults."); }
 					string beforeUngatedBackground = File.ReadAllText(packPath);
 					background.Enabled = true;
 					tilemap.BackgroundEditor.SaveMetaGroups();
@@ -624,6 +1065,10 @@ internal static class Program
 					background.ScrollSpeedX = 0.5; background.ScrollSpeedY = -1;
 					background.IgnoreRasterScroll = cpu == CpuType.Nes; background.ScrollReferenceScanline = 47;
 					background.HideOriginalLayer = true;
+					background.ExtendIntoMargins = true;
+					background.UseWidescreenPosition = true;
+					background.WidescreenPosition = new() { Position = 3, CameraMin = -10, CameraMax = 2048, SlideSpeed = 0.1, ReleaseDelay = 6, UseRamFlags = true, LeftFlags = "$68 == $01", RightFlags = "$68 == $02" };
+					background.WidescreenPosition.RamSpeed = new() { Enabled = true, Format = 0, Address = 0x64, Multiplier = 0.0625, Maximum = 2.5 };
 					background.UseCpuCamera = true;
 					background.CameraX.Format = 4; background.CameraX.AddressHex = "0060"; background.CameraX.PageAddressHex = "0061"; background.CameraX.PageSize = 256;
 					background.CameraY.Format = 0;
@@ -640,8 +1085,50 @@ internal static class Program
 					tilemap.BackgroundEditor.SaveMetaGroups();
 					if(File.ReadAllText(packPath) != beforeUngatedBackground) { throw new Exception("Invalid background condition text overwrote the pack."); }
 					tilemap.BackgroundEditor.MemoryConditionsText = MetaMemoryConditionText.Format(background.MemoryConditions);
+					background.DrawOrder = 7;
+					background.CompositionPosition = 1;
 					tilemap.BackgroundEditor.SaveMetaGroups();
 					if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Actual background activation failed: " + tilemap.BackgroundEditor.MetaStatus); }
+					if(MetaSpritePack.Load(packPath, EmuApi.GetRomHash(HashType.Sha1), cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id).DrawOrder != 7) { throw new Exception("Background editor did not persist the PNG draw order."); }
+					if(MetaSpritePack.Load(packPath, hash, cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id).CompositionPosition != 1) { throw new Exception("Background editor did not persist foreground composition."); }
+					background.CompositionPosition = 0; tilemap.BackgroundEditor.SaveMetaGroups();
+					if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Restoring native PNG position failed."); }
+					if(cpu == CpuType.Gba) {
+						background.CompositionPosition = 2; background.GbaPriority = 3;
+						tilemap.BackgroundEditor.SaveMetaGroups();
+						if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Independent GBA PNG activation failed: " + tilemap.BackgroundEditor.MetaStatus); }
+						var priorityLayer = MetaSpritePack.Load(packPath, hash, cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id);
+						if(priorityLayer.CompositionPosition != 2 || priorityLayer.GbaPriority != 3) { throw new Exception("Independent GBA priority did not persist."); }
+						background.CompositionPosition = 0; tilemap.BackgroundEditor.SaveMetaGroups();
+					}
+					if(cpu == CpuType.Snes) {
+						background.CompositionPosition = 3; background.SnesPriority = 12;
+						tilemap.BackgroundEditor.SaveMetaGroups();
+						if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Independent SNES PNG activation failed: " + tilemap.BackgroundEditor.MetaStatus); }
+						var priorityLayer = MetaSpritePack.Load(packPath, hash, cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id);
+						if(priorityLayer.CompositionPosition != 3 || priorityLayer.SnesPriority != 12) { throw new Exception("Independent SNES priority did not persist."); }
+						background.CompositionPosition = 0; tilemap.BackgroundEditor.SaveMetaGroups();
+					}
+					if(cpu == CpuType.Nes || cpu == CpuType.Gameboy || cpu == CpuType.Pce || cpu == CpuType.Sms || cpu == CpuType.Ws) {
+						foreach(int position in new[] {4, 5, 6}) {
+							background.CompositionPosition = position; tilemap.BackgroundEditor.SaveMetaGroups();
+							if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.") || MetaSpritePack.Load(packPath, hash, cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id).CompositionPosition != position) { throw new Exception("Sprite insertion band failed to save/apply/reload: " + position); }
+						}
+						background.CompositionPosition = 0; tilemap.BackgroundEditor.SaveMetaGroups();
+						var gbaOnlyPack = new MetaSpritePack { System = "Gba", BackgroundLayers = new() { new() { Id = 1, Enabled = true, CompositionPosition = 2, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 0, Mask = 0}} } } };
+						byte[] unsupported = MetaBackgroundRuntimePacket.Create(gbaOnlyPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+						byte[] emptySprites = { (byte)'M', (byte)'S', (byte)'P', (byte)'1', 0, 0, 0, 0 };
+						if(DebugApi.SetMetaBackgroundReplacements(hash, unsupported, (uint)unsupported.Length) || DebugApi.SetMetaReplacements(hash, emptySprites, (uint)emptySprites.Length, unsupported, (uint)unsupported.Length)) { throw new Exception("NES accepted a GBA-only priority pack."); }
+						gbaOnlyPack.System = "Snes"; gbaOnlyPack.BackgroundLayers[0].CompositionPosition = 3;
+						unsupported = MetaBackgroundRuntimePacket.Create(gbaOnlyPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+						if(DebugApi.SetMetaBackgroundReplacements(hash, unsupported, (uint)unsupported.Length) || DebugApi.SetMetaReplacements(hash, emptySprites, (uint)emptySprites.Length, unsupported, (uint)unsupported.Length)) { throw new Exception("NES accepted a SNES-only priority pack."); }
+					}
+					if(cpu == CpuType.Gba) {
+						var nesOnlyPack = new MetaSpritePack { System = "Nes", BackgroundLayers = new() { new() { Id = 1, Enabled = true, CompositionPosition = 4, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 0, Mask = 0}} } } };
+						byte[] unsupported = MetaBackgroundRuntimePacket.Create(nesOnlyPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+						byte[] emptySprites = { (byte)'M', (byte)'S', (byte)'P', (byte)'1', 0, 0, 0, 0 };
+						if(DebugApi.SetMetaBackgroundReplacements(hash, unsupported, (uint)unsupported.Length) || DebugApi.SetMetaReplacements(hash, emptySprites, (uint)emptySprites.Length, unsupported, (uint)unsupported.Length)) { throw new Exception("GBA accepted NES-only insertion bands."); }
+					}
 					if(cpu == CpuType.Nes) {
 						tilemap.BackgroundEditor.SaveCpuCamera();
 						if(!tilemap.BackgroundEditor.HasSavedCamera) { throw new Exception("CPU camera profile was not saved."); }
@@ -669,6 +1156,12 @@ internal static class Program
 							|| background.MemoryConditions.Count != 1 || !background.Enabled || !File.Exists(backgroundAssetPath)
 							|| !tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Replacing the resized background failed to preserve placement/conditions or activate."); }
 					} finally { File.WriteAllBytes(backgroundAssetPath, originalBackgroundAsset); }
+					if(background.ArtworkPath != "tilemap-002.png") { throw new Exception("Background filename collision did not use a short numbered suffix."); }
+					int beforeReuseCount = Directory.GetFiles(Path.GetDirectoryName(packPath)!, "*.png").Length;
+					string reusedPath = background.ArtworkPath;
+					tilemap.BackgroundEditor.ReplaceBackgroundPngFile(Path.Combine(Path.GetDirectoryName(packPath)!, reusedPath));
+					if(background.ArtworkPath != reusedPath || Directory.GetFiles(Path.GetDirectoryName(packPath)!, "*.png").Length != beforeReuseCount
+						|| !tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Background artwork already in the pack folder was copied or renamed."); }
 					string beforeFailedBackgroundReplacement = File.ReadAllText(packPath);
 					string retainedBackgroundPath = background.ArtworkPath;
 					var retainedBackgroundPreview = tilemap.BackgroundEditor.MetaBackgroundPreview;
@@ -687,7 +1180,11 @@ internal static class Program
 						|| !saved.BackgroundLayers[0].Enabled || !saved.BackgroundLayers[0].FollowScroll || !saved.BackgroundLayers[0].WrapX
 						|| saved.BackgroundLayers[0].ScrollSpeedX != 0.5 || saved.BackgroundLayers[0].ScrollSpeedY != -1
 						|| saved.BackgroundLayers[0].IgnoreRasterScroll != (cpu == CpuType.Nes) || saved.BackgroundLayers[0].ScrollReferenceScanline != 47
-						|| !saved.BackgroundLayers[0].HideOriginalLayer
+						|| !saved.BackgroundLayers[0].HideOriginalLayer || !saved.BackgroundLayers[0].ExtendIntoMargins
+						|| !saved.BackgroundLayers[0].UseWidescreenPosition || saved.BackgroundLayers[0].WidescreenPosition.CameraMin != -10 || saved.BackgroundLayers[0].WidescreenPosition.LeftFlags != "$68 == $01"
+						|| saved.BackgroundLayers[0].WidescreenPosition.SlideSpeed != 0.1 || saved.BackgroundLayers[0].WidescreenPosition.ReleaseDelay != 6
+						|| !saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Enabled || saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Address != 0x64
+						|| saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Multiplier != 0.0625 || saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Maximum != 2.5
 						|| !saved.BackgroundLayers[0].UseCpuCamera || saved.BackgroundLayers[0].CameraX.Format != 4
 						|| saved.BackgroundLayers[0].CameraX.Address != 0x60 || saved.BackgroundLayers[0].CameraX.PageAddress != 0x61 || saved.BackgroundLayers[0].CameraX.PageSize != 256
 						|| saved.BackgroundLayers[0].MemoryConditions.Count != 1 || saved.BackgroundLayers[0].MemoryConditions[0].Mask != 15) {

@@ -57,12 +57,23 @@ namespace Mesen.Config
 
 		[ObservableProperty] public partial ScreenRotation ScreenRotation { get; set; } = ScreenRotation.None;
 		[ObservableProperty] public partial bool DisableHighPrecisionFramePacing { get; set; } = false;
+		[ObservableProperty] public partial bool DecorativeWidescreen { get; set; } = false;
+		[ObservableProperty][MinMax(1, 5)] public partial double DecorativeAspectRatio { get; set; } = 16.0 / 9.0;
+		[ObservableProperty][MinMax(0, 2)] public partial int DecorativeRatioPreset { get; set; } = 0;
+		[System.Text.Json.Serialization.JsonIgnore] public bool CustomDecorativeRatio => DecorativeRatioPreset == 2;
+		partial void OnDecorativeRatioPresetChanged(int value) => OnPropertyChanged(nameof(CustomDecorativeRatio));
+		[ObservableProperty][MinMax(0, 100)] public partial UInt32 DecorativeSideBrightness { get; set; } = 50;
+		[ObservableProperty][MinMax(0, 3)] public partial UInt32 DecorativeViewportPosition { get; set; } = 0;
+		[ObservableProperty] public partial bool DecorativeCustomWidths { get; set; } = false;
+		[ObservableProperty][MinMax(0, 1024)] public partial UInt32 DecorativeLeftWidth { get; set; } = 64;
+		[ObservableProperty][MinMax(0, 1024)] public partial UInt32 DecorativeRightWidth { get; set; } = 64;
+		[ObservableProperty][MinMax(0, 1024)] public partial UInt32 DecorativeFadeWidth { get; set; } = 0;
 
 		public VideoConfig()
 		{
 		}
 
-		public void ApplyConfig()
+		public void ApplyConfig(WidescreenProfile? widescreenPreview = null)
 		{
 			double customAspectRatio = CustomAspectRatio;
 			VideoAspectRatio aspectRatio = AspectRatio;
@@ -85,7 +96,7 @@ namespace Mesen.Config
 
 			ShaderConfigHelper.LoadConfig(shaderFile).ApplyConfig();
 
-			ConfigApi.SetVideoConfig(new InteropVideoConfig() {
+			var interop = new InteropVideoConfig() {
 				CustomAspectRatio = customAspectRatio,
 				VideoFilter = videoFilter,
 				AspectRatio = aspectRatio,
@@ -127,8 +138,18 @@ namespace Mesen.Config
 				ExclusiveFullscreenRefreshRatePal = this.ExclusiveFullscreenRefreshRatePal,
 
 				ScreenRotation = (uint)ScreenRotation,
-				DisableHighPrecisionFramePacing = this.DisableHighPrecisionFramePacing
-			});
+				DisableHighPrecisionFramePacing = this.DisableHighPrecisionFramePacing,
+				DecorativeWidescreen = this.DecorativeWidescreen,
+				DecorativeAspectRatio = DecorativeRatioPreset == 0 ? 16.0 / 9.0 : DecorativeRatioPreset == 1 ? 21.0 / 9.0 : DecorativeAspectRatio,
+				DecorativeSideBrightness = this.DecorativeSideBrightness,
+				DecorativeViewportPosition = this.DecorativeViewportPosition,
+				DecorativeCustomWidths = this.DecorativeCustomWidths,
+				DecorativeLeftWidth = this.DecorativeLeftWidth,
+				DecorativeRightWidth = this.DecorativeRightWidth,
+				DecorativeFadeWidth = this.DecorativeFadeWidth,
+			};
+			(widescreenPreview ?? WidescreenProfileStore.Active ?? WidescreenProfile.From(this)).ApplyTo(ref interop);
+			ConfigApi.SetVideoConfig(interop);
 		}
 
 		public UInt32 GetFullscreenWidth()
@@ -197,6 +218,13 @@ namespace Mesen.Config
 		public UInt32 ScreenRotation;
 
 		[MarshalAs(UnmanagedType.I1)] public bool DisableHighPrecisionFramePacing;
+		[MarshalAs(UnmanagedType.I1)] public bool DecorativeWidescreen;
+		public double DecorativeAspectRatio;
+		public UInt32 DecorativeSideBrightness;
+		public UInt32 DecorativeViewportPosition;
+		[MarshalAs(UnmanagedType.I1)] public bool DecorativeCustomWidths;
+		public UInt32 DecorativeLeftWidth, DecorativeRightWidth;
+		public UInt32 DecorativeFadeWidth;
 	}
 
 	public enum VideoFilterType

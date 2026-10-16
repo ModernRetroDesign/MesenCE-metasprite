@@ -21,6 +21,13 @@ namespace Mesen.ViewModels
 		public IRelayCommand PresetRgbCommand { get; }
 		public IRelayCommand PresetMonochromeCommand { get; }
 		public IRelayCommand ResetPictureSettingsCommand { get; }
+		public IRelayCommand SaveGameWidescreenCommand { get; }
+		public IRelayCommand RemoveGameWidescreenCommand { get; }
+		public IRelayCommand UseGlobalWidescreenCommand { get; }
+		public VideoConfig WidescreenSettings { get; }
+		private readonly string? _widescreenGamePath;
+		public bool CanSaveGameWidescreen => _widescreenGamePath != null;
+		[ObservableProperty] public partial string WidescreenProfileStatus { get; set; } = "";
 
 		[ObservableProperty] public partial VideoConfig Config { get; set; }
 		[ObservableProperty] public partial VideoConfig OriginalConfig { get; set; }
@@ -30,6 +37,31 @@ namespace Mesen.ViewModels
 		{
 			Config = ConfigManager.Config.Video;
 			OriginalConfig = Config.Clone();
+			WidescreenSettings = Config.Clone();
+			WidescreenProfileStore.Active?.CopyTo(WidescreenSettings);
+			_widescreenGamePath = WidescreenProfileStore.ActivePath;
+			WidescreenProfileStatus = WidescreenProfileStore.Active != null ? "Saved game profile loaded." : "Using global defaults.";
+			SaveGameWidescreenCommand = new RelayCommand(() => {
+				try {
+					if(_widescreenGamePath == null) { throw new InvalidOperationException("Load a game first."); }
+					WidescreenProfileStore.Save(_widescreenGamePath, WidescreenProfile.From(WidescreenSettings));
+					WidescreenProfileStatus = "Widescreen profile saved for this game.";
+				} catch(Exception ex) { WidescreenProfileStatus = "Could not save profile: " + ex.Message; }
+			});
+			RemoveGameWidescreenCommand = new RelayCommand(() => {
+				try {
+					if(_widescreenGamePath == null) { throw new InvalidOperationException("Load a game first."); }
+					WidescreenProfileStore.Remove(_widescreenGamePath);
+					WidescreenProfile.From(Config).CopyTo(WidescreenSettings);
+					Config.ApplyConfig(); WidescreenProfileStatus = "Game profile removed; using global defaults.";
+				} catch(Exception ex) { WidescreenProfileStatus = "Could not remove profile: " + ex.Message; }
+			});
+			UseGlobalWidescreenCommand = new RelayCommand(() => {
+				try {
+					var profile = WidescreenProfile.From(WidescreenSettings); profile.Validate(); profile.CopyTo(Config);
+					WidescreenProfileStatus = "Global defaults updated; confirm the Settings dialog to keep them.";
+				} catch(Exception ex) { WidescreenProfileStatus = "Could not update defaults: " + ex.Message; }
+			});
 
 			PresetCompositeCommand = new RelayCommand(() => SetNtscPreset(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15, false));
 			PresetSVideoCommand = new RelayCommand(() => SetNtscPreset(0, 0, 0, 0, 20, 0, 20, -100, -100, 0, 15, false));
@@ -58,7 +90,12 @@ namespace Mesen.ViewModels
 				return;
 			}
 
-			AddDisposable(ReactiveHelper.RegisterRecursiveObserver(Config, (s, e) => { Config.ApplyConfig(); }));
+			AddDisposable(ReactiveHelper.RegisterRecursiveObserver(Config, (s, e) => {
+				Config.ApplyConfig(_widescreenGamePath == WidescreenProfileStore.ActivePath ? WidescreenProfile.From(WidescreenSettings) : null);
+			}));
+			AddDisposable(ReactiveHelper.RegisterRecursiveObserver(WidescreenSettings, (s, e) => {
+				if(_widescreenGamePath == WidescreenProfileStore.ActivePath) { Config.ApplyConfig(WidescreenProfile.From(WidescreenSettings)); }
+			}));
 		}
 
 		private void SetNtscPreset(int hue, int saturation, int contrast, int brightness, int sharpness, int gamma, int resolution, int artifacts, int fringing, int bleed, int scanlines, bool mergeFields)

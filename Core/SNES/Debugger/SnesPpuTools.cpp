@@ -262,7 +262,7 @@ void SnesPpuTools::GetSpritePreview(GetSpritePreviewOptions options, BaseState& 
 	uint32_t bgColor = GetSpriteBackgroundColor(options.Background, palette, false);
 
 	std::fill(outBuffer, outBuffer + size.Width * size.Height, GetSpriteBackgroundColor(options.Background, palette, true));
-	for(int i = 0; i < (state.OverscanMode ? 239 : 224); i++) {
+	for(int i = 0; i < (state.OverscanMode ? 239 : 224) * (state.ObjInterlace ? 2 : 1); i++) {
 		std::fill(outBuffer + size.Width * i + 256, outBuffer + size.Width * i + 512, bgColor);
 	}
 
@@ -281,12 +281,6 @@ void SnesPpuTools::GetSpritePreview(GetSpritePreviewOptions options, BaseState& 
 			if(yPos >= (int)size.Height) {
 				yPos -= size.Height;
 			}
-
-			/*int yGap = (scanline - sprite.Y);
-			if(state.ObjInterlace) {
-				yGap <<= 1;
-				yGap |= (state.FrameCount & 0x01);
-			}*/
 
 			for(int x = 0; x < sprite.Width; x++) {
 				int xPos = 256 + sprite.X + x;
@@ -339,7 +333,9 @@ void SnesPpuTools::GetSpriteInfo(DebugSpriteInfo& sprite, uint32_t* spritePrevie
 	sprite.SpriteIndex = spriteIndex;
 	sprite.UseExtendedVram = false;
 	sprite.X = spriteX;
-	sprite.Y = spriteY;
+	// The preview retains full source artwork. OBJ-interlace places it in
+	// full-source vertical coordinates so group offsets match field capture.
+	sprite.Y = spriteY * (state.ObjInterlace ? 2 : 1);
 	sprite.RawX = sign | oamRam[addr];
 	sprite.RawY = spriteY;
 	sprite.Height = height;
@@ -551,7 +547,7 @@ DebugSpritePreviewInfo SnesPpuTools::GetSpritePreviewInfo(GetSpritePreviewOption
 	SnesPpuState& state = (SnesPpuState&)baseState;
 
 	DebugSpritePreviewInfo info = {};
-	info.Height = 256;
+	info.Height = state.ObjInterlace ? 512 : 256;
 	info.Width = 512;
 	info.SpriteCount = 128;
 	info.CoordOffsetX = 256;
@@ -560,7 +556,7 @@ DebugSpritePreviewInfo SnesPpuTools::GetSpritePreviewInfo(GetSpritePreviewOption
 	info.VisibleX = 256;
 	info.VisibleY = 0;
 	info.VisibleWidth = 256;
-	info.VisibleHeight = state.OverscanMode ? 239 : 224;
+	info.VisibleHeight = (state.OverscanMode ? 239 : 224) * (state.ObjInterlace ? 2 : 1);
 
 	info.WrapBottomToTop = true;
 

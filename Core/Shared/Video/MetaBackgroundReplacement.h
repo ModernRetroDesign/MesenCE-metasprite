@@ -3,6 +3,31 @@
 #include <vector>
 #include <functional>
 #include <cstddef>
+#include <cmath>
+
+struct MetaSlideRamSpeed
+{
+	bool Enabled = false;
+	// Signed/unsigned 8-bit, signed/unsigned 16-bit LE, signed/unsigned 16-bit BE.
+	int Format = 0;
+	uint32_t Address = 0;
+	double Multiplier = 0.0625, Maximum = 4;
+	bool IsValid() const { return Format >= 0 && Format <= 5 && (Format < 2 || Address != UINT32_MAX)
+		&& std::isfinite(Multiplier) && Multiplier >= 0 && Multiplier <= 64 && std::isfinite(Maximum) && Maximum >= 0 && Maximum <= 64; }
+	bool Decode(const MetaMemorySnapshot& memory, double& speed, bool signedVelocity = false) const {
+		speed = 0; if(!IsValid()) { return false; }
+		auto first = memory.find(Address); if(first == memory.end()) { return false; }
+		int value = first->second;
+		if(Format >= 2) {
+			auto second = memory.find(Address + 1); if(second == memory.end()) { return false; }
+			value = Format >= 4 ? value * 256 + second->second : value + second->second * 256;
+			if((Format == 2 || Format == 4) && value >= 32768) { value -= 65536; }
+		} else if(Format == 0 && value >= 128) { value -= 256; }
+		speed = std::min(Maximum, std::abs(value) * Multiplier);
+		if(signedVelocity && value < 0) { speed = -speed; }
+		return true;
+	}
+};
 
 struct MetaCameraAxis
 {
@@ -32,12 +57,22 @@ struct MetaCameraAxis
 struct MetaBackgroundReplacement
 {
 	int Id = 0, Layer = 0;
+	int CompositionPosition = 0; // 0 native layer, 1 final display overlay, 2 GBA priority
+	int GbaPriority = 0;
+	int SnesPriority = 1;
 	int X = 0, Y = 0;
 	int Width = 0, Height = 0, Scale = 1;
 	bool FollowScroll = true, WrapX = false, WrapY = false;
 	int ScrollSpeedX = 1000, ScrollSpeedY = 1000;
 	bool IgnoreRasterScroll = false;
 	bool HideOriginalLayer = false;
+	bool ExtendIntoMargins = false;
+	bool UseWidescreenPosition = false, WidescreenUseRamFlags = false;
+	int WidescreenPosition = 3, WidescreenCameraMin = 0, WidescreenCameraMax = 1024;
+	double WidescreenSlideSpeed = 0;
+	uint32_t WidescreenReleaseDelay = 0;
+	MetaSlideRamSpeed WidescreenRamSpeed;
+	std::vector<MetaMemoryCondition> WidescreenLeftFlags, WidescreenRightFlags;
 	bool UseCpuCamera = false;
 	MetaCameraAxis CameraX, CameraY;
 	int ScrollReferenceScanline = 32;
@@ -55,11 +90,16 @@ struct MetaBackgroundReplacement
 	bool IsValid() const
 	{
 		return Id > 0 && Layer >= 0 && Layer <= 7 && Scale >= 1 && Scale <= 10
+			&& CompositionPosition >= 0 && CompositionPosition <= 6 && GbaPriority >= 0 && GbaPriority <= 3 && SnesPriority >= 1 && SnesPriority <= 15
 			&& Width > 0 && Height > 0 && Width <= 8192 && Height <= 8192
 			&& Width % Scale == 0 && Height % Scale == 0
 			&& ScrollSpeedX >= -16000 && ScrollSpeedX <= 16000 && ScrollSpeedY >= -16000 && ScrollSpeedY <= 16000
 			&& ScrollReferenceScanline >= 0 && ScrollReferenceScanline <= 239
 			&& CameraX.IsValid() && CameraY.IsValid()
+			&& (!UseWidescreenPosition || (WidescreenPosition >= 0 && WidescreenPosition <= 3 && WidescreenSlideSpeed >= 0 && WidescreenSlideSpeed <= 64 && WidescreenReleaseDelay <= 600
+				&& WidescreenCameraMin >= -16777216 && WidescreenCameraMin <= 16777216 && WidescreenCameraMax >= -16777216 && WidescreenCameraMax <= 16777216
+				&& WidescreenRamSpeed.IsValid() && WidescreenLeftFlags.size() <= 8 && WidescreenRightFlags.size() <= 8
+				&& (!WidescreenUseRamFlags || !WidescreenLeftFlags.empty() || !WidescreenRightFlags.empty())))
 			&& Artwork.size() == static_cast<size_t>(Width) * Height;
 	}
 
@@ -78,8 +118,9 @@ struct MetaBackgroundReplacement
 			|| source.PixelScaleX < 1 || source.PixelScaleY < 1
 			|| source.PixelOffsetX >= source.PixelScaleX || source.PixelOffsetY >= source.PixelScaleY
 			|| subX < 0 || subY < 0 || subX >= outputScale || subY >= outputScale) { return false; }
-		int64_t x = static_cast<int64_t>(FollowScroll ? source.X : screenX / source.PixelScaleX) - X;
-		int64_t y = static_cast<int64_t>(FollowScroll ? source.Y : screenY / source.PixelScaleY) - Y;
+		auto floorDivide = [](int value, int divisor) { return value / divisor - (value % divisor < 0 ? 1 : 0); };
+		int64_t x = static_cast<int64_t>(FollowScroll ? source.X : floorDivide(screenX, source.PixelScaleX)) - X;
+		int64_t y = static_cast<int64_t>(FollowScroll ? source.Y : floorDivide(screenY, source.PixelScaleY)) - Y;
 		auto scaledOffset = [](int offset, int rate) {
 			int64_t value = (int64_t)offset * (rate - 1000);
 			return value / 1000 - (value % 1000 < 0 ? 1 : 0);
@@ -107,6 +148,12 @@ struct MetaBackgroundView
 	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> RasterReferences;
 	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> CameraReferences;
 	bool RasterPrepared = false;
+	bool SnesIndependentPriority = false;
+	bool HasSnesIndependentPriority() const {
+		if(RasterPrepared) { return SnesIndependentPriority; }
+		for(const auto* layer : Layers) { if(layer->CompositionPosition == 3) { return true; } }
+		return false;
+	}
 	uint8_t HiddenNativeLayers = 0;
 	bool HidesNativeLayer(int layer) const {
 		if(layer < 0 || layer > 7) { return false; }
@@ -120,8 +167,10 @@ struct MetaBackgroundView
 		CameraReferences.clear();
 		RasterPrepared = true;
 		HiddenNativeLayers = 0;
+		SnesIndependentPriority = false;
 		if(frame.Pixels.size() != (uint64_t)frame.Width * frame.Height) { return; }
 		for(const auto* layer : Layers) {
+			SnesIndependentPriority |= layer->CompositionPosition == 3;
 			if(layer->UseCpuCamera && layer->FollowScroll) {
 				MetaBackgroundSample camera;
 				camera.Valid = layer->CameraX.Decode(frame.MemorySnapshot, camera.ScrollX) && layer->CameraY.Decode(frame.MemorySnapshot, camera.ScrollY);
@@ -136,15 +185,17 @@ struct MetaBackgroundView
 			}
 		}
 	}
-	bool Sample(const MetaBackgroundReplacement& layer, const MetaBackgroundSample& source, int x, int y, int sx, int sy, int scale, uint32_t& color) const
+	bool Sample(const MetaBackgroundReplacement& layer, const MetaBackgroundSample& source, int x, int y, int sx, int sy, int scale, uint32_t& color, bool independent = false) const
 	{
+		if(layer.CompositionPosition != 0 && !independent) { color = 0; return false; }
 		if(layer.UseCpuCamera && layer.FollowScroll) {
 			auto reference = CameraReferences.find(&layer);
 			if(reference == CameraReferences.end() || !reference->second.Valid) { color = 0; return false; }
 			MetaBackgroundSample camera = source;
 			camera.ScrollX = reference->second.ScrollX; camera.ScrollY = reference->second.ScrollY;
-			camera.X = x / std::max(1, (int)source.PixelScaleX) + camera.ScrollX;
-			camera.Y = y / std::max(1, (int)source.PixelScaleY) + camera.ScrollY;
+			auto floorDivide = [](int value, int divisor) { return value / divisor - (value % divisor < 0 ? 1 : 0); };
+			camera.X = floorDivide(x, std::max(1, (int)source.PixelScaleX)) + camera.ScrollX;
+			camera.Y = floorDivide(y, std::max(1, (int)source.PixelScaleY)) + camera.ScrollY;
 			camera.ScrollWrapX = camera.ScrollWrapY = 0;
 			return layer.SampleValidated(camera, x, y, sx, sy, scale, color);
 		}
@@ -232,7 +283,7 @@ private:
 								if(!layer.IsValid() || !prepared.Sample(layer, sample, x + screenLeft, y + screenTop, sx, sy, outputScale, artwork)) { continue; }
 								uint32_t alpha = artwork >> 24, blended = 0xFF000000;
 								for(int shift : {0, 8, 16}) { blended |= ((((artwork >> shift) & 255) * alpha + ((result >> shift) & 255) * (255 - alpha) + 127) / 255) << shift; }
-								result = blended; break;
+								result = blended;
 							}
 						};
 						if(pair->Sample.Valid) { if(!prepared.HidesNativeLayer(pair->Sample.Layer)) { result = convertColor(pair->Color); } overlay(pair->Sample); }
@@ -260,7 +311,7 @@ private:
 										if(!layer.IsValid() || !prepared.Sample(layer, lower.Sample, x + screenLeft, y + screenTop, sx, sy, outputScale, artwork)) { continue; }
 										uint32_t alpha = artwork >> 24, result = 0xFF000000;
 										for(int shift : {0, 8, 16}) { result |= ((((artwork >> shift) & 255) * alpha + ((outputPixels[offset] >> shift) & 255) * (255 - alpha) + 127) / 255) << shift; }
-										outputPixels[offset] = result; break;
+										outputPixels[offset] = result;
 									}
 								}
 							}
@@ -269,13 +320,13 @@ private:
 							uint32_t color;
 							if(!layer.IsValid() || !prepared.Sample(layer, pixel.BackgroundSample, x + screenLeft, y + screenTop, sx, sy, outputScale, color)) { continue; }
 							uint32_t alpha = color >> 24, result = 0xFF000000;
-							if(alpha == 255) { outputPixels[offset] = color; break; }
-							if(alpha == 0) { outputPixels[offset] |= 0xFF000000; break; }
+							if(alpha == 255) { outputPixels[offset] = color; continue; }
+							if(alpha == 0) { outputPixels[offset] |= 0xFF000000; continue; }
 							for(int shift : {0, 8, 16}) {
 								result |= ((((color >> shift) & 255) * alpha + ((outputPixels[offset] >> shift) & 255) * (255 - alpha) + 127) / 255) << shift;
 							}
 							outputPixels[offset] = result;
-							break; // Authored order determines overlapping replacement priority.
+							// Later authored PNGs compose over earlier PNGs, as in GBA/SNES.
 						}
 					}
 				}

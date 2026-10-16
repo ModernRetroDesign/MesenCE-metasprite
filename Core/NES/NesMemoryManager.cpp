@@ -5,6 +5,7 @@
 #include "NES/InternalRamHandler.h"
 #include "Shared/CheatManager.h"
 #include "Shared/Emulator.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "Utilities/Serializer.h"
 #include "Shared/MemoryOperationType.h"
 
@@ -127,6 +128,11 @@ void NesMemoryManager::Write(uint16_t addr, uint8_t value, MemoryOperationType o
 	if(_emu->ProcessMemoryWrite<CpuType::Nes>(addr, value, operationType)) {
 		_ramWriteHandlers[addr]->WriteRam(addr, value);
 		_openBusHandler.SetOpenBus(value);
+		if(operationType == MemoryOperationType::Write && _emu->GetSoundMixer()->HasMusicTrigger(addr)) {
+			_emu->GetSoundMixer()->ProcessMusicWrite(addr, value, [&](uint32_t address, uint8_t& result) {
+				if(address > 0xFFFF) { return false; } result = DebugRead((uint16_t)address); return true;
+			});
+		}
 	}
 }
 

@@ -343,12 +343,16 @@ namespace Mesen.Windows
 					});
 
 					GameConfig.LoadGameConfig(romInfo).ApplyConfig();
+					WidescreenProfileStore.Clear();
+					ConfigManager.Config.Video.ApplyConfig();
 					if((romInfo.ConsoleType == ConsoleType.Gameboy && romInfo.Format == RomFormat.Gb) || romInfo.ConsoleType == ConsoleType.Sms || romInfo.ConsoleType == ConsoleType.PcEngine || romInfo.ConsoleType == ConsoleType.Gba || romInfo.ConsoleType == ConsoleType.Ws || romInfo.ConsoleType == ConsoleType.Nes || (romInfo.ConsoleType == ConsoleType.Snes && romInfo.Format == RomFormat.Sfc)) {
 						string expectedMetaRomHash = EmuApi.GetRomHash(HashType.Sha1);
 						CpuType metaCpu = romInfo.ConsoleType == ConsoleType.PcEngine ? CpuType.Pce : romInfo.ConsoleType == ConsoleType.Sms ? CpuType.Sms : romInfo.ConsoleType == ConsoleType.Gba ? CpuType.Gba : romInfo.ConsoleType == ConsoleType.Ws ? CpuType.Ws : romInfo.ConsoleType == ConsoleType.Nes ? CpuType.Nes : romInfo.ConsoleType == ConsoleType.Snes ? CpuType.Snes : CpuType.Gameboy;
 						// GameLoaded is delivered before the core starts emulation/video threads.
+						WidescreenProfileStore.LoadForGame(expectedMetaRomHash, metaCpu);
 						// Decode saved artwork here so activation does not compete with gameplay.
 						MetaSpriteRuntimeLoader.LoadForGame(expectedMetaRomHash, metaCpu);
+						if(metaCpu == CpuType.Nes || metaCpu == CpuType.Gameboy || metaCpu == CpuType.Gba || metaCpu == CpuType.Pce || metaCpu == CpuType.Sms || metaCpu == CpuType.Snes || metaCpu == CpuType.Ws) { MusicReplacementRuntime.LoadForGame(expectedMetaRomHash); }
 					}
 
 					GameLoadedEventParams evtParams = Marshal.PtrToStructure<GameLoadedEventParams>(e.Parameter);
@@ -403,6 +407,8 @@ namespace Mesen.Windows
 					break;
 
 				case ConsoleNotificationType.EmulationStopped:
+					WidescreenProfileStore.Clear();
+					ConfigManager.Config.Video.ApplyConfig();
 					Dispatcher.UIThread.Post(() => {
 						_model.RomInfo = new RomInfo();
 						_model.RecentGames.Init(GameScreenMode.RecentGames);

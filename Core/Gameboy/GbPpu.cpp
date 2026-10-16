@@ -520,6 +520,7 @@ void GbPpu::RunDrawCycle()
 					lower.Sample = {bgX, bgY, 0, true}; lower.Sample.ScrollX = _state.ScrollX; lower.Sample.ScrollY = _state.ScrollY;
 					lower.Sample.ScrollWrapX = lower.Sample.ScrollWrapY = 256;
 					lower.Color = LcdReadBgPalette(palette) & 0x7FFF;
+					lower.ColorIndex = color;
 					lower.SpriteEligibilityCaptured = true;
 					lower.SpriteEligibleClasses = color == 0 || (_state.CgbEnabled && !_state.BgEnabled) ? 3 : !(attr & 0x80) ? 1 : 0;
 					lower.OverlayOccludesClasses = _state.CgbEnabled && !_state.BgEnabled ? 0 : (attr & 0x80) ? 3 : 2;
@@ -535,6 +536,13 @@ void GbPpu::RunDrawCycle()
 					for(auto row = _metaSpriteFrame->Rows.rbegin(); row != _metaSpriteFrame->Rows.rend(); ++row) {
 						if(row->Scanline != _state.Scanline) { break; }
 						if(_drawnPixels < row->X || _drawnPixels >= row->X + 8) { continue; }
+						int offset = _drawnPixels - row->X;
+						int bit = row->Attributes & 0x20 ? offset : 7 - offset;
+						uint8_t color = ((row->LowByte >> bit) & 1) | (((row->HighByte >> bit) & 1) << 1);
+						uint8_t paletteIndex = _state.CgbEnabled ? color | ((row->Attributes & 7) << 2)
+							: (((row->Attributes & 0x10) ? 4 : 0) | ((((row->Attributes & 0x10) ? _state.ObjPalette1 : _state.ObjPalette0) >> (color * 2)) & 3));
+						row->OutputColors[offset] = LcdReadObjPalette(paletteIndex) & 0x7FFF;
+						row->OutputColorMask |= (uint8_t)(1 << offset);
 						if(!(entry.Color == 0 || (!(row->Attributes & 0x80) && !(entry.Attributes & 0x80)) || (_state.CgbEnabled && !_state.BgEnabled))) { continue; }
 						int index = row->ScanlineSpriteIndex;
 						if(index >= _spriteCount) { continue; }
@@ -654,6 +662,7 @@ void GbPpu::ResetRenderer()
 	if(_state.Scanline == 0) {
 		_metaSpriteFrame = _metaCaptureRequested && !_gameboy->IsSgb() && !_gameboy->GetLinkedConsole()
 			? _metaFramePool.Acquire(GbConstants::ScreenWidth, GbConstants::ScreenHeight) : nullptr;
+		if(_metaSpriteFrame) { _metaSpriteFrame->GameboyCapture = true; }
 		if(_metaSpriteFrame && _emu->GetVideoDecoder()->HasMetaBackgroundLayers()) {
 			_metaSpriteFrame->BackgroundUnderlays.resize(GbConstants::ScreenWidth * GbConstants::ScreenHeight);
 		}

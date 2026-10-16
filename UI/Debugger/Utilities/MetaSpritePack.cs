@@ -118,6 +118,51 @@ public sealed class MetaSavedCamera
 
 // Artwork coordinates are native pixels; PNG dimensions include ArtworkScale.
 // Runtime adapters supply the selected hardware layer's scroll at each pixel/scanline.
+public sealed class MetaSlideRamSpeed : INotifyPropertyChanged
+{
+	public event PropertyChangedEventHandler? PropertyChanged;
+	private bool _enabled;
+	private string? _addressDraft;
+	public bool Enabled { get => _enabled; set { _enabled = value; PropertyChanged?.Invoke(this, new(nameof(Enabled))); } }
+	public int Format { get; set; } = 0;
+	public uint Address { get; set; } = 0;
+	public double Multiplier { get; set; } = 0.0625;
+	public double Maximum { get; set; } = 4;
+	[JsonIgnore] public string AddressHex { get => _addressDraft ?? Address.ToString("X4"); set { _addressDraft = value; if(TryAddress(value, out uint address)) { Address = address; } PropertyChanged?.Invoke(this, new(nameof(AddressHex))); } }
+	private static bool TryAddress(string text, out uint address) => uint.TryParse(text.Trim().TrimStart('$'), System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out address);
+	public void Validate() {
+		if(Format < 0 || Format > 5 || (Format >= 2 && Address == uint.MaxValue) || (_addressDraft != null && !TryAddress(_addressDraft, out _))
+			|| !double.IsFinite(Multiplier) || Multiplier < 0 || Multiplier > 64 || !double.IsFinite(Maximum) || Maximum < 0 || Maximum > 64) {
+			throw new InvalidDataException("Invalid player speed format, hexadecimal address, multiplier or maximum.");
+		}
+	}
+}
+
+public sealed class MetaWidescreenPosition : INotifyPropertyChanged
+{
+	public event PropertyChangedEventHandler? PropertyChanged;
+	public int Position { get; set; } = 3;
+	public int CameraMin { get; set; } = 0;
+	public int CameraMax { get; set; } = 1024;
+	public double SlideSpeed { get; set; } = 0;
+	public uint ReleaseDelay { get; set; } = 0;
+	public MetaSlideRamSpeed RamSpeed { get; set; } = new();
+	private bool _useRamFlags;
+	public bool UseRamFlags { get => _useRamFlags; set { _useRamFlags = value; PropertyChanged?.Invoke(this, new(nameof(UseRamFlags))); } }
+	public string LeftFlags { get; set; } = "";
+	public string RightFlags { get; set; } = "";
+	public List<MetaMemoryCondition> ParseFlags(string text) {
+		var result = MetaMemoryConditionText.Parse(text ?? "");
+		if(result.Count > 8) { throw new InvalidDataException("Use at most eight boundary conditions per edge."); }
+		return result;
+	}
+	public void Validate() {
+		if(Position < 0 || Position > 3 || CameraMin < -16777216 || CameraMin > 16777216 || CameraMax < -16777216 || CameraMax > 16777216 || !double.IsFinite(SlideSpeed) || SlideSpeed < 0 || SlideSpeed > 64 || ReleaseDelay > 600) { throw new InvalidDataException("Invalid PNG gameplay positioning settings."); }
+		if(RamSpeed == null) { throw new InvalidDataException("Missing player speed settings."); } RamSpeed.Validate();
+		if(UseRamFlags) { var left = ParseFlags(LeftFlags); var right = ParseFlags(RightFlags); if(left.Count + right.Count == 0) { throw new InvalidDataException("Enter a left or right boundary condition for this PNG."); } }
+	}
+}
+
 public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
@@ -133,6 +178,13 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	public int Id { get; set; }
 	public string Name { get; set; } = "";
 	public int NativeLayer { get; set; }
+	// 0 native layer, 1 final display overlay, 2 independent GBA hardware priority.
+	private int _compositionPosition;
+	public int CompositionPosition { get => _compositionPosition; set { if(_compositionPosition != value) { _compositionPosition = value; PropertyChanged?.Invoke(this, new(nameof(CompositionPosition))); } } }
+	public int GbaPriority { get; set; }
+	public int SnesPriority { get; set; } = 1;
+	private int _drawOrder;
+	public int DrawOrder { get => _drawOrder; set { if(_drawOrder != value) { _drawOrder = value; PropertyChanged?.Invoke(this, new(nameof(DrawOrder))); } } }
 	public string ArtworkPath { get; set; } = "";
 	public int ArtworkWidth { get; set; }
 	public int ArtworkHeight { get; set; }
@@ -144,6 +196,12 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	public double ScrollSpeedY { get; set; } = 1;
 	public bool IgnoreRasterScroll { get => _ignoreRasterScroll; set { if(_ignoreRasterScroll != value) { _ignoreRasterScroll = value; PropertyChanged?.Invoke(this, new(nameof(IgnoreRasterScroll))); } } }
 	public bool HideOriginalLayer { get; set; }
+	private bool _extendIntoMargins;
+	public bool ExtendIntoMargins { get => _extendIntoMargins; set { _extendIntoMargins = value; PropertyChanged?.Invoke(this, new(nameof(ExtendIntoMargins))); } }
+	private bool _useWidescreenPosition;
+	public bool UseWidescreenPosition { get => _useWidescreenPosition; set { _useWidescreenPosition = value; PropertyChanged?.Invoke(this, new(nameof(UseWidescreenPosition))); } }
+	private MetaWidescreenPosition _widescreenPosition = new();
+	public MetaWidescreenPosition WidescreenPosition { get => _widescreenPosition; set { _widescreenPosition = value; PropertyChanged?.Invoke(this, new(nameof(WidescreenPosition))); } }
 	private bool _useCpuCamera;
 	public bool UseCpuCamera { get => _useCpuCamera; set { _useCpuCamera = value; PropertyChanged?.Invoke(this, new(nameof(UseCpuCamera))); PropertyChanged?.Invoke(this, new(nameof(ScrollSourceIndex))); PropertyChanged?.Invoke(this, new(nameof(UseHardwareScroll))); } }
 	[JsonIgnore] public int ScrollSourceIndex { get => UseCpuCamera ? 1 : 0; set => UseCpuCamera = value == 1; }
@@ -165,8 +223,11 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 		if(Id < 1 || Name == null || ArtworkPath == null || NativeLayer < 0 || NativeLayer > 7) {
 			throw new InvalidDataException("Invalid background layer identity.");
 		}
+		if(DrawOrder < 0 || DrawOrder > 9) { throw new InvalidDataException("Background draw order must be 0 through 9."); }
+		if(CompositionPosition < 0 || CompositionPosition > 6 || GbaPriority < 0 || GbaPriority > 3 || SnesPriority < 1 || SnesPriority > 15) { throw new InvalidDataException("Invalid PNG composition position or hardware priority."); }
 		MetaSpritePlacement.ValidateCanvas(ArtworkWidth, ArtworkHeight, ArtworkScale);
 		MetaMemoryCondition.ValidateAll(MemoryConditions);
+		if(UseWidescreenPosition) { if(WidescreenPosition == null) { throw new InvalidDataException("Missing PNG gameplay positioning settings."); } WidescreenPosition.Validate(); }
 		ValidateScrollSpeed(ScrollSpeedX); ValidateScrollSpeed(ScrollSpeedY);
 		if(CameraX == null || CameraY == null) { throw new InvalidDataException("Missing CPU camera axes."); }
 		if(!UseSavedCamera) { CameraX.Validate(); CameraY.Validate(); }
@@ -251,13 +312,22 @@ public static class MetaBackgroundRuntimePacket
 	public const uint HideLayerMagic = 0x3647424D; // MBG6 adds native layer suppression
 	public const uint CameraMagic = 0x3747424D; // MBG7 adds CPU camera axes
 	public const uint SignedCameraMagic = 0x3847424D; // MBG8 adds per-axis signed pages
+	public const uint WidescreenMagic = 0x3947424D; // MBG9 adds decorative margin extension
+	public const uint PositionMagic = 0x4147424D; // MBGA adds per-background gameplay positioning
+	public const uint SmoothPositionMagic = 0x4247424D; // MBGB uses milli-pixel speeds and a release delay
+	public const uint RamSpeedMagic = 0x4347424D; // MBGC adds player RAM speed
+	public const uint CompositionMagic = 0x4447424D; // MBGD adds independent composition position
+	public const uint GbaPriorityMagic = 0x4547424D; // MBGE adds independent GBA priority
+	public const uint SnesPriorityMagic = 0x4647424D; // MBGF adds independent SNES priority
+	public const uint NesBandsMagic = 0x4747424D; // MBGG insertion bands: NES, GB/GBC, PCE, SMS and WS
 	public static byte[] Create(MetaSpritePack pack, Func<MetaBackgroundLayer, (int Width, int Height, uint[] Pixels)> loadArtwork)
 	{
 		pack.ValidateSavedCamera();
 		using MemoryStream stream = new();
 		using BinaryWriter writer = new(stream);
 		// Keep older conditionless definitions editable, but never activate them.
-		var layers = pack.BackgroundLayers.Where(layer => layer.Enabled && layer.MemoryConditions.Count > 0).ToList();
+		// Stable sorting preserves saved order for legacy packs and equal slots.
+		var layers = pack.BackgroundLayers.Where(layer => layer.Enabled && layer.MemoryConditions.Count > 0).OrderBy(layer => layer.CompositionPosition switch {4 => 0, 5 => 1, 0 => 2, 6 => 3, 1 => 5, _ => 4}).ThenBy(layer => layer.CompositionPosition == 2 ? -layer.GbaPriority : layer.CompositionPosition == 3 ? layer.SnesPriority : 0).ThenBy(layer => layer.DrawOrder).ToList();
 		if(layers.Count > 128 || layers.Select(layer => layer.Id).Distinct().Count() != layers.Count) { throw new InvalidDataException("Invalid background layers."); }
 		bool conditional = layers.Any(layer => layer.MemoryConditions.Count > 0);
 		bool comparisons = layers.Any(layer => layer.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal));
@@ -266,11 +336,27 @@ public static class MetaBackgroundRuntimePacket
 		bool hideLayer = layers.Any(layer => layer.HideOriginalLayer);
 		bool camera = layers.Any(layer => layer.UseCpuCamera);
 		bool signedCamera = layers.Any(layer => layer.UseCpuCamera && (layer.UseSavedCamera ? pack.SavedCamera!.X.SignedPage || pack.SavedCamera.Y.SignedPage : layer.CameraX.SignedPage || layer.CameraY.SignedPage));
+		bool position = layers.Any(layer => layer.UseWidescreenPosition);
+		bool ramSpeed = layers.Any(layer => layer.UseWidescreenPosition && layer.WidescreenPosition.RamSpeed.Enabled);
+		bool composition = layers.Any(layer => layer.CompositionPosition != 0);
+		bool gbaPriority = layers.Any(layer => layer.CompositionPosition == 2);
+		bool snesPriority = layers.Any(layer => layer.CompositionPosition == 3);
+		bool nesBands = layers.Any(layer => layer.CompositionPosition >= 4);
+		if(gbaPriority && pack.System != "Gba") { throw new InvalidDataException("Independent GBA priority requires a GBA pack."); }
+		if(snesPriority && pack.System != "Snes") { throw new InvalidDataException("Independent SNES priority requires a SNES pack."); }
+		if(nesBands && pack.System != "Nes" && pack.System != "Gameboy" && pack.System != "Pce" && pack.System != "Sms" && pack.System != "Ws") { throw new InvalidDataException("Sprite insertion bands require a NES, Game Boy, PCE, SMS or WonderSwan pack."); }
+		snesPriority |= nesBands; // MBGG retains all MBGF fields.
+		gbaPriority |= snesPriority; // MBGF retains all MBGE fields.
+		ramSpeed |= composition;
+		position |= composition;
+		bool widescreen = position || layers.Any(layer => layer.ExtendIntoMargins);
+		signedCamera |= widescreen;
+		camera |= widescreen;
 		hideLayer |= camera;
 		rasterScroll |= hideLayer;
 		customScroll |= rasterScroll;
 		comparisons |= customScroll;
-		writer.Write(signedCamera ? SignedCameraMagic : camera ? CameraMagic : hideLayer ? HideLayerMagic : rasterScroll ? RasterMagic : customScroll ? ScrollMagic : comparisons ? ComparisonMagic : conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
+		writer.Write(nesBands ? NesBandsMagic : snesPriority ? SnesPriorityMagic : gbaPriority ? GbaPriorityMagic : composition ? CompositionMagic : ramSpeed ? RamSpeedMagic : position ? SmoothPositionMagic : widescreen ? WidescreenMagic : signedCamera ? SignedCameraMagic : camera ? CameraMagic : hideLayer ? HideLayerMagic : rasterScroll ? RasterMagic : customScroll ? ScrollMagic : comparisons ? ComparisonMagic : conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
 		foreach(var layer in layers) {
 			layer.Validate();
 			var artwork = loadArtwork(layer);
@@ -287,6 +373,19 @@ public static class MetaBackgroundRuntimePacket
 				writer.Write(layer.UseCpuCamera ? 1 : 0);
 				foreach(var axis in layer.UseSavedCamera ? new[] {pack.SavedCamera!.X, pack.SavedCamera.Y} : new[] {layer.CameraX, layer.CameraY}) { writer.Write(axis.Format); writer.Write(axis.Address); writer.Write(axis.PageAddress); writer.Write(axis.PageSize); if(signedCamera) { writer.Write(axis.SignedPage ? 1 : 0); } }
 			}
+			if(widescreen) { writer.Write(layer.ExtendIntoMargins ? 1 : 0); }
+			if(position) {
+				var p = layer.UseWidescreenPosition ? layer.WidescreenPosition : new MetaWidescreenPosition();
+				writer.Write(layer.UseWidescreenPosition ? 1 : 0); writer.Write(p.Position); writer.Write(p.CameraMin); writer.Write(p.CameraMax); writer.Write((int)Math.Round(p.SlideSpeed * 1000)); writer.Write(p.ReleaseDelay); writer.Write(p.UseRamFlags ? 1 : 0);
+				foreach(string text in new[] {p.LeftFlags, p.RightFlags}) {
+					var flags = p.UseRamFlags ? p.ParseFlags(text) : new List<MetaMemoryCondition>(); writer.Write(flags.Count);
+					foreach(var c in flags) { writer.Write(c.Address); writer.Write(c.Value); writer.Write(c.Mask); writer.Write((int)c.Comparison); }
+				}
+				if(ramSpeed) { var s = p.RamSpeed; writer.Write(s.Enabled ? 1 : 0); writer.Write(s.Format); writer.Write(s.Address); writer.Write((uint)Math.Round(s.Multiplier * 1000000)); writer.Write((uint)Math.Round(s.Maximum * 1000)); }
+			}
+			if(composition) { writer.Write(layer.CompositionPosition); }
+			if(gbaPriority) { writer.Write(layer.GbaPriority); }
+			if(snesPriority) { writer.Write(layer.SnesPriority); }
 			foreach(uint pixel in artwork.Pixels) { writer.Write(pixel); }
 			if(conditional) {
 				writer.Write(layer.MemoryConditions.Count);

@@ -63,6 +63,7 @@ private:
 	template<bool isPeek> uint8_t ReadSmsPort(uint8_t port);
 	template<bool isPeek> uint8_t ReadColecoVisionPort(uint8_t port);
 	template<bool isPeek> uint8_t ReadGameGearPort(uint8_t port);
+	void NotifyMusicWrite(uint32_t address, uint8_t value);
 	void WriteGameGearPort(uint8_t port, uint8_t value);
 	void WriteSmsPort(uint8_t port, uint8_t value);
 	void WriteColecoVisionPort(uint8_t port, uint8_t value);

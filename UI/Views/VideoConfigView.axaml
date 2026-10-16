@@ -29,9 +29,45 @@
 
 	<TabControl TabStripPlacement="Top" SelectedIndex="0">
 		<TabItem Header="{l:Translate tpgGeneral}">
-			<ScrollViewer AllowAutoHide="False" HorizontalScrollBarVisibility="Auto" Padding="0 0 2 0">
+			<ScrollViewer Name="wideSettingsScroll" AllowAutoHide="False" HorizontalScrollBarVisibility="Disabled" Padding="0 0 2 0">
 				<StackPanel>
 					<c:SystemSpecificSettings ConfigType="Video" />
+					<c:OptionSection Header="Decorative widescreen">
+						<TextBlock Text="Gameplay positioning saved with an active PNG takes priority.&#10;Camera boundaries, RAM checks and slide speed are pack settings.&#10;Edit them in the Tilemap Viewer. Automatic needs an active PNG&#10;with saved gameplay positioning; otherwise it stays centred." TextWrapping="Wrap" />
+						<TextBlock Text="Preview changes here. Save a game profile or update global defaults&#10;to keep them. Profile save/remove takes effect immediately." TextWrapping="Wrap" />
+						<WrapPanel>
+							<Button Content="Save for this game" Command="{Binding SaveGameWidescreenCommand}" IsEnabled="{Binding CanSaveGameWidescreen}" />
+							<Button Content="Remove game profile" Command="{Binding RemoveGameWidescreenCommand}" IsEnabled="{Binding CanSaveGameWidescreen}" />
+							<Button Content="Use as global defaults" Command="{Binding UseGlobalWidescreenCommand}" />
+						</WrapPanel>
+						<TextBlock Text="{Binding WidescreenProfileStatus}" TextWrapping="Wrap" />
+						<CheckBox Content="Enable decorative widescreen" IsChecked="{Binding WidescreenSettings.DecorativeWidescreen}" />
+						<StackPanel IsEnabled="{Binding WidescreenSettings.DecorativeWidescreen}">
+							<TextBlock Text="Extends selected PNG backgrounds beyond the gameplay area.&#10;Enable margin extension on each PNG in the Tilemap Viewer." TextWrapping="Wrap" />
+							<Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto">
+								<TextBlock Grid.Row="0" Text="Output aspect ratio" />
+								<ComboBox Grid.Row="0" Grid.Column="1" SelectedIndex="{Binding WidescreenSettings.DecorativeRatioPreset}" IsEnabled="{Binding !WidescreenSettings.DecorativeCustomWidths}">
+									<ComboBoxItem Content="16:9" /><ComboBoxItem Content="21:9" /><ComboBoxItem Content="Custom" />
+								</ComboBox>
+								<TextBlock Grid.Row="1" Text="Custom width / height" IsVisible="{Binding WidescreenSettings.CustomDecorativeRatio}" />
+								<c:MesenNumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding WidescreenSettings.DecorativeAspectRatio}" IsVisible="{Binding WidescreenSettings.CustomDecorativeRatio}" IsEnabled="{Binding !WidescreenSettings.DecorativeCustomWidths}" Minimum="1" Maximum="5" Increment="0.01" FormatString="0.0000" />
+								<TextBlock Grid.Row="2" Text="Side brightness (%)" />
+								<c:MesenNumericUpDown Name="wideBrightness" Grid.Row="2" Grid.Column="1" Value="{Binding WidescreenSettings.DecorativeSideBrightness}" Minimum="0" Maximum="100" Increment="1" FormatString="0" />
+								<TextBlock Grid.Row="3" Text="Gameplay position" />
+								<ComboBox Name="wideGameplayPosition" Grid.Row="3" Grid.Column="1" SelectedIndex="{Binding WidescreenSettings.DecorativeViewportPosition}">
+									<ComboBoxItem Content="Centre" /><ComboBoxItem Content="Left" /><ComboBoxItem Content="Right" /><ComboBoxItem Content="Automatic" />
+								</ComboBox>
+								<CheckBox Grid.Row="4" Grid.ColumnSpan="2" Content="Use custom side widths instead of aspect ratio" IsChecked="{Binding WidescreenSettings.DecorativeCustomWidths}" />
+								<TextBlock Grid.Row="5" Text="Left margin (native pixels)" />
+								<c:MesenNumericUpDown Grid.Row="5" Grid.Column="1" Value="{Binding WidescreenSettings.DecorativeLeftWidth}" IsEnabled="{Binding WidescreenSettings.DecorativeCustomWidths}" Minimum="0" Maximum="1024" Increment="1" FormatString="0" />
+								<TextBlock Grid.Row="6" Text="Right margin (native pixels)" />
+								<c:MesenNumericUpDown Grid.Row="6" Grid.Column="1" Value="{Binding WidescreenSettings.DecorativeRightWidth}" IsEnabled="{Binding WidescreenSettings.DecorativeCustomWidths}" Minimum="0" Maximum="1024" Increment="1" FormatString="0" />
+								<TextBlock Grid.Row="7" Text="Brightness fade&#10;(pixels; 0 = off)" />
+								<c:MesenNumericUpDown Grid.Row="7" Grid.Column="1" Value="{Binding WidescreenSettings.DecorativeFadeWidth}" Minimum="0" Maximum="1024" Increment="1" FormatString="0" />
+							</Grid>
+							<TextBlock Text="Fade starts at full brightness beside gameplay and transitions&#10;outward to side brightness. Gameplay stays unchanged." TextWrapping="Wrap" />
+						</StackPanel>
+					</c:OptionSection>
 
 					<c:OptionSection Header="{l:Translate tpgGeneral}">
 						<Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto">

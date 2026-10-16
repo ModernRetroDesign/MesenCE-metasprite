@@ -6,6 +6,7 @@
 #include "Shared/Emulator.h"
 #include "Shared/DebuggerRequest.h"
 #include "Shared/NotificationManager.h"
+#include "Shared/Video/VideoDecoder.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/Serializer.h"
 
@@ -529,8 +530,12 @@ uint32_t EmuSettings::GetEmulationSpeed()
 	}
 }
 
-double EmuSettings::GetAspectRatio(ConsoleRegion region, FrameInfo baseFrameSize)
+double EmuSettings::GetAspectRatio(ConsoleRegion region, FrameInfo baseFrameSize, bool ignoreDecorative)
 {
+	if(!ignoreDecorative && _video.DecorativeWidescreen) {
+		double aspect = _emu->GetVideoDecoder()->GetDecorativeAspectRatio();
+		if(aspect > 0) { return _video.ScreenRotation % 180 ? 1.0 / aspect : aspect; }
+	}
 	double screenAspectRatio = (double)baseFrameSize.Width / baseFrameSize.Height;
 
 	switch(_video.AspectRatio) {

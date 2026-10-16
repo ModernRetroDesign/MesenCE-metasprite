@@ -88,6 +88,7 @@ private:
 		int16_t SpriteX = 0;
 		uint8_t SpriteRow = 0;
 		uint8_t CapturedTileData[4] = {};
+		uint8_t CapturedOffsetX = 0;
 		int16_t CapturedX = 0;
 		uint8_t EvaluatedDisplayRow = 0, CapturedDisplayRow = 0;
 		int CapturedSprite = -1;
@@ -165,6 +166,7 @@ private:
 	void LoadExtraSpritesSg();
 	void ShiftSprite(uint8_t sprIndex);
 	void CaptureFetchedSprite(uint8_t sprIndex);
+	void CaptureFetchedSpriteSg(uint8_t index, int hardwareSprite, int16_t x, uint8_t row, uint8_t offset);
 	void ShiftSpriteSg(uint8_t sprIndex);
 
 	__forceinline bool IsZoomedSpriteAllowed(int spriteIndex);

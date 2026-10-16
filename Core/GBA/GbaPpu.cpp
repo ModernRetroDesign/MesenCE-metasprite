@@ -1184,6 +1184,34 @@ void GbaPpu::CaptureSpritePixel(const GbaSpriteRendererData& sprite, uint32_t co
 	int height = sprite.Height << (uint8_t)(sprite.TransformEnabled && sprite.DoubleSize);
 	int offset = sprite.RenderX - 1;
 	if(row >= height || offset < 0 || offset >= width) { return; }
+	if(sprite.Mosaic && row != sprite.YOffset) {
+		// Recognition uses the underlying graphic, before vertical display mosaic.
+		// Keep native fetch/arbitration and retained lower-OBJ samples untouched.
+		int sx, sy;
+		if(sprite.TransformEnabled) {
+			int ox = offset - (sprite.CenterX << (uint8_t)sprite.DoubleSize);
+			int oy = row - (sprite.CenterY << (uint8_t)sprite.DoubleSize);
+			sx = ((ox * sprite.MatrixData[0] + oy * sprite.MatrixData[1]) >> 8) + sprite.CenterX;
+			sy = ((ox * sprite.MatrixData[2] + oy * sprite.MatrixData[3]) >> 8) + sprite.CenterY;
+		} else {
+			sx = sprite.HoriMirror ? sprite.Width - offset - 1 : offset;
+			sy = sprite.VertMirror ? sprite.Height - row - 1 : row;
+		}
+		color = 0;
+		if(sx >= 0 && sx < sprite.Width && sy >= 0 && sy < sprite.Height) {
+			uint16_t tile = _objData[0].TileIndex;
+			if(_state.ObjVramMappingOneDimension) { tile += (sy / 8) * (sprite.Width / 8) * (sprite.Bpp8Mode ? 2 : 1) + (sx / 8) * (sprite.Bpp8Mode ? 2 : 1); }
+			else { tile = (tile & ~0x1F) + (sy / 8) * 0x20 + ((tile + (sx / 8) * (sprite.Bpp8Mode ? 2 : 1)) & 0x1F); }
+			uint32_t address = tile * 32 + (sy & 7) * (sprite.Bpp8Mode ? 8 : 4) + (sprite.Bpp8Mode ? (sx & 7) : ((sx & 7) >> 1));
+			uint8_t texel = _state.BgMode >= 3 ? ReadSpriteVram<true>(address) : ReadSpriteVram<false>(address);
+			if(!sprite.Bpp8Mode) { texel = (texel >> ((sx & 1) * 4)) & 0x0F; }
+			if(texel) {
+				uint16_t native = _paletteRam[256 + sprite.PaletteIndex * 16 + texel] & 0x7FFF;
+				auto channel = [](int value) { return (value << 3) | (value >> 2); };
+				color = 0xFF000000u | (channel(native & 31) << 16) | (channel((native >> 5) & 31) << 8) | channel((native >> 10) & 31);
+			}
+		}
+	}
 	auto& rows = _metaFrame->DecodedRows;
 	if(!rows.empty()) {
 		auto& previous = rows.back();

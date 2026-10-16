@@ -5,6 +5,7 @@
 #include "Shared/SettingTypes.h"
 #include "Shared/RenderedFrame.h"
 #include "Shared/Video/MetaSpriteCompositor.h"
+#include "Shared/Video/DecorativeWidescreen.h"
 
 class BaseVideoFilter;
 class ScaleFilter;
@@ -31,11 +32,13 @@ private:
 	bool _forceFilterUpdate = false;
 
 	double _lastAspectRatio = 0.0;
+	atomic<double> _decorativeAspectRatio { 0.0 };
 
 	FrameInfo _baseFrameSize = {};
 	FrameInfo _lastFrameSize = {};
 	RenderedFrame _frame = {};
 	MetaSpriteCompositor _metaSpriteCompositor;
+	DecorativeWidescreen _decorativeWidescreen;
 
 	VideoFilterType _videoFilterType = VideoFilterType::None;
 	unique_ptr<BaseVideoFilter> _videoFilter;
@@ -51,6 +54,7 @@ public:
 	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
 	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
 	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
+	void CaptureMetaSpriteMemory(const MetaSpriteFrame& frame, const std::function<bool(uint32_t,uint8_t&)>& readByte) { _metaSpriteCompositor.CaptureMemorySnapshot(frame,readByte); }
 	bool HasMetaBackgroundLayers() { return _metaSpriteCompositor.HasBackgroundLayers(); }
 	VideoDecoder(Emulator* console);
 	~VideoDecoder();
@@ -68,6 +72,7 @@ public:
 	FrameInfo GetBaseFrameInfo(bool removeOverscan);
 	FrameInfo GetFrameInfo();
 	double GetLastFrameScale() { return _frame.Scale; }
+	double GetDecorativeAspectRatio() { return _decorativeAspectRatio.load(); }
 
 	void UpdateFrame(RenderedFrame frame, bool sync, bool forRewind);
 

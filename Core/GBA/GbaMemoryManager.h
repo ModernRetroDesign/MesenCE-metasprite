@@ -95,6 +95,7 @@ private:
 	__forceinline void InternalWrite(GbaAccessModeVal mode, uint32_t addr, uint8_t value, uint32_t writeAddr, uint32_t fullValue);
 
 	uint32_t ReadRegister(uint32_t addr);
+	void NotifyMusicWrite(GbaAccessModeVal mode, uint32_t address, uint32_t value, uint32_t width);
 	void WriteRegister(GbaAccessModeVal mode, uint32_t addr, uint8_t value);
 
 	void TriggerIrqUpdate();

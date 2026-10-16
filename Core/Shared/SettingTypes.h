@@ -1,6 +1,7 @@
 #pragma once
 #include "pch.h"
 #include <algorithm>
+#include "Shared/Video/MetaMemoryCondition.h"
 
 enum class EmulationFlags
 {
@@ -120,6 +121,13 @@ struct VideoConfig
 
 	uint32_t ScreenRotation = 0;
 	bool DisableHighPrecisionFramePacing = false;
+	bool DecorativeWidescreen = false;
+	double DecorativeAspectRatio = 16.0 / 9.0;
+	uint32_t DecorativeSideBrightness = 50;
+	uint32_t DecorativeViewportPosition = 0; // Centre, left, right, automatic
+	bool DecorativeCustomWidths = false;
+	uint32_t DecorativeLeftWidth = 64, DecorativeRightWidth = 64;
+	uint32_t DecorativeFadeWidth = 0;
 };
 
 struct ShaderParam

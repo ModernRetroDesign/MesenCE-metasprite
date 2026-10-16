@@ -593,7 +593,9 @@ void PceVdc::LoadSpriteTiles()
 			row.ExpansionClass = sprite.ForegroundPriority ? 1 : 2;
 			for(int x = 0; x < 16; x++) {
 				uint8_t color = GetSpritePixelColor(sprite.TileData, sprite.HorizontalMirroring ? x : 15 - x);
-				row.Pixels.push_back(color ? palette[_vce->GetPalette(256 + sprite.Palette * 16 + color) & 0x1FF] : 0);
+				// Hardware color zero alone is transparent; palette ARGB alpha is
+				// not an OBJ coverage mask (default palettes may contain RGB only).
+				row.Pixels.push_back(color ? (palette[_vce->GetPalette(256 + sprite.Palette * 16 + color) & 0x1FF] | 0xFF000000) : 0);
 			}
 			_metaSpriteRows.push_back(std::move(row));
 		}

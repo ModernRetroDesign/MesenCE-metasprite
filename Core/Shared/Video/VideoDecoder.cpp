@@ -130,10 +130,13 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 
 	OverscanDimensions overscan = _videoFilter->GetOverscan();
 	uint32_t metaOutputScale = 1;
+	int metaCropLeft = overscan.Left, metaCropTop = overscan.Top;
+	bool metaCompatible = false;
 	if(_frame.MetaSprites) {
 		if(auto pceFilter = dynamic_cast<PceDefaultVideoFilter*>(_videoFilter.get())) {
 			int left = 0, top = 0;
 			if(pceFilter->GetMetaSpriteCrop(left, top)) {
+				metaCropLeft = left; metaCropTop = top; metaCompatible = true;
 				outputBuffer = _metaSpriteCompositor.Apply(outputBuffer, frameSize.Width, frameSize.Height, *_frame.MetaSprites, left, top,
 					[pceFilter](uint16_t color) { return pceFilter->GetNativeColor(color); });
 				metaOutputScale = _metaSpriteCompositor.GetOutputScale();
@@ -150,6 +153,7 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 		auto nesFilter = typeid(*_videoFilter) == typeid(NesDefaultVideoFilter) ? dynamic_cast<NesDefaultVideoFilter*>(_videoFilter.get()) : nullptr;
 		auto snesFilter = dynamic_cast<SnesDefaultVideoFilter*>(_videoFilter.get());
 		if(gbFilter || smsFilter || nesFilter || (snesFilter && snesFilter->SupportsMetaSprites()) || (gbaFilter && gbaFilter->SupportsMetaSprites()) || (wsFilter && wsFilter->SupportsMetaSprites())) {
+			metaCompatible = true;
 			outputBuffer = _metaSpriteCompositor.Apply(outputBuffer, frameSize.Width, frameSize.Height, *_frame.MetaSprites, overscan.Left, overscan.Top,
 				[gbFilter, smsFilter, wsFilter, nesFilter](uint16_t color) { return gbFilter ? gbFilter->GetNativeColor(color) : smsFilter ? smsFilter->GetNativeColor(color) : wsFilter ? wsFilter->GetNativeColor(color) : nesFilter ? nesFilter->GetNativeColor(color) : 0; });
 			metaOutputScale = _metaSpriteCompositor.GetOutputScale();
@@ -159,6 +163,52 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	}
 
 	_videoFilter->FinishFrameBlend(outputBuffer, frameSize.Width * frameSize.Height);
+
+	const auto& videoConfig = _emu->GetSettings()->GetVideoConfig();
+	_decorativeAspectRatio.store(0.0);
+	if(!videoConfig.DecorativeWidescreen || isAudioPlayer) { _decorativeWidescreen.Reset(); }
+	if(videoConfig.DecorativeWidescreen && !isAudioPlayer) {
+		OverscanDimensions logicalOverscan = _emu->GetSettings()->GetOverscan();
+		FrameInfo nativeSize {
+			(uint32_t)(_baseFrameSize.Width * _frame.Scale) - logicalOverscan.Left - logicalOverscan.Right,
+			(uint32_t)(_baseFrameSize.Height * _frame.Scale) - logicalOverscan.Top - logicalOverscan.Bottom
+		};
+		double nativeAspect = _emu->GetSettings()->GetAspectRatio(_emu->GetRegion(), nativeSize, true);
+		uint32_t canvasWidth = DecorativeWidescreen::CanvasWidth(frameSize.Width, nativeAspect, videoConfig.DecorativeAspectRatio);
+		double horizontalScale = (double)frameSize.Width / std::max(1u, nativeSize.Width);
+		DecorativeWidescreenOptions options;
+		if(videoConfig.DecorativeCustomWidths) {
+			uint32_t left = (uint32_t)std::round(std::min(1024u, videoConfig.DecorativeLeftWidth) * horizontalScale);
+			uint32_t right = (uint32_t)std::round(std::min(1024u, videoConfig.DecorativeRightWidth) * horizontalScale);
+			canvasWidth = frameSize.Width + left + right;
+			options.HomeLeft = left;
+		}
+		options.FadeWidth = (uint32_t)std::round(std::min(1024u, videoConfig.DecorativeFadeWidth) * horizontalScale);
+		canvasWidth = (canvasWidth + metaOutputScale - 1) / metaOutputScale * metaOutputScale;
+		_decorativeAspectRatio.store(nativeAspect);
+		auto backgrounds = _metaSpriteCompositor.GetBackgroundLayers();
+		uint32_t viewportPosition = videoConfig.DecorativeViewportPosition;
+		if(auto selected = DecorativeWidescreen::SelectPosition(metaCompatible ? _frame.MetaSprites.get() : nullptr, backgrounds.get())) {
+			viewportPosition = selected->WidescreenPosition; options.PositionKey = selected->Id;
+			options.CameraBackgroundId = selected->Id;
+			options.CameraMin = selected->WidescreenCameraMin; options.CameraMax = selected->WidescreenCameraMax;
+			options.SlideSpeed = selected->WidescreenSlideSpeed * horizontalScale;
+			options.ReleaseDelay = selected->WidescreenReleaseDelay;
+			options.RamSpeed = selected->WidescreenRamSpeed; options.SpeedScale = horizontalScale;
+			options.UseRamBoundaryFlags = selected->WidescreenUseRamFlags;
+			options.LeftFlags = selected->WidescreenLeftFlags; options.RightFlags = selected->WidescreenRightFlags;
+		}
+		else if(viewportPosition == 3) { viewportPosition = 0; } // Automatic requires pack positioning.
+		uint32_t* wider = _decorativeWidescreen.Apply(outputBuffer, frameSize.Width, frameSize.Height, canvasWidth,
+			videoConfig.DecorativeSideBrightness, viewportPosition,
+			metaCompatible ? _frame.MetaSprites.get() : nullptr, backgrounds.get(), metaCropLeft, metaCropTop, metaOutputScale, options);
+		if(wider != outputBuffer) {
+			_decorativeAspectRatio.store(nativeAspect * canvasWidth / frameSize.Width);
+			_baseFrameSize.Width += (uint32_t)std::round((double)nativeSize.Width * (canvasWidth - frameSize.Width) / frameSize.Width / _frame.Scale);
+			frameSize.Width = canvasWidth;
+			outputBuffer = wider;
+		}
+	}
 
 	if(_rotateFilter && !isAudioPlayer) {
 		outputBuffer = _rotateFilter->ApplyFilter(outputBuffer, frameSize.Width, frameSize.Height);
@@ -247,7 +297,7 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
 
 	if(frame.MetaSprites && !forRewind) {
 		auto console = _emu->GetConsole();
-		_metaSpriteCompositor.CaptureMemorySnapshot(*frame.MetaSprites, [&](uint32_t address, uint8_t& value) {
+		auto readByte = [&](uint32_t address, uint8_t& value) {
 			switch(_emu->GetConsoleType()) {
 				case ConsoleType::Gameboy:
 					if(address > 0xFFFF) { return false; }
@@ -273,7 +323,29 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
 				default: return false;
 			}
 			return true;
-		});
+		};
+		_metaSpriteCompositor.CaptureMemorySnapshot(*frame.MetaSprites, readByte);
+		const auto& cfg = _emu->GetSettings()->GetVideoConfig();
+		if(cfg.DecorativeWidescreen) {
+			auto capture = [&](const MetaMemoryCondition* conditions, uint32_t count) {
+				for(uint32_t i = 0; i < std::min(8u, count); i++) {
+					uint32_t address = conditions[i].Address; uint8_t value;
+					if(!frame.MetaSprites->MemorySnapshot.count(address) && readByte(address, value)) { frame.MetaSprites->MemorySnapshot.emplace(address, value); }
+				}
+			};
+			auto backgrounds = _metaSpriteCompositor.GetBackgroundLayers();
+			if(auto selected = DecorativeWidescreen::SelectPosition(frame.MetaSprites.get(), backgrounds.get())) {
+				if(selected->WidescreenPosition == 3 && selected->WidescreenRamSpeed.Enabled) {
+					const auto& speed = selected->WidescreenRamSpeed;
+					MetaMemoryCondition bytes[2] = {{speed.Address, 0, 0}, {speed.Address == UINT32_MAX ? speed.Address : speed.Address + 1, 0, 0}};
+					capture(bytes, speed.Format >= 2 ? 2 : 1);
+				}
+				if(selected->WidescreenPosition == 3 && selected->WidescreenUseRamFlags) {
+					capture(selected->WidescreenLeftFlags.data(), (uint32_t)selected->WidescreenLeftFlags.size());
+					capture(selected->WidescreenRightFlags.data(), (uint32_t)selected->WidescreenRightFlags.size());
+				}
+			}
+		}
 	}
 
 	_frame = frame;
@@ -315,6 +387,8 @@ void VideoDecoder::StopThread()
 		_decodeThread->join();
 
 		_decodeThread.reset();
+		_decorativeWidescreen.Reset();
+		_decorativeAspectRatio.store(0.0);
 
 		//Clear whole screen
 		_emu->GetVideoRenderer()->ClearFrame();

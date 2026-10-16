@@ -498,6 +498,7 @@ void SmsVdp::LoadBgTilesSg()
 				}
 				_bgPatternData <<= 1;
 				PushBgPixel(pixelColor, i);
+				if(_metaFrame) { auto& sample = _metaBgSamples[_pixelsAvailable + i]; sample = {}; sample.Valid = !_disableBackground; sample.Layer = 0; sample.X = cycle - 6 + i; sample.Y = _state.Scanline; sample.ScrollWrapX = 256; sample.ScrollWrapY = 192; }
 			}
 
 			if(_disableBackground) {
@@ -538,6 +539,7 @@ void SmsVdp::LoadBgTilesSgTextMode()
 				uint8_t color = (_bgPatternData & 0x80) ? _state.TextColorIndex : _state.BackgroundColorIndex;
 				_bgPatternData <<= 1;
 				PushBgPixel(color, i);
+				if(_metaFrame) { auto& sample = _metaBgSamples[_pixelsAvailable + i]; sample = {}; sample.Valid = !_disableBackground; sample.Layer = 0; sample.X = _state.Cycle - 2 + i; sample.Y = _state.Scanline; sample.ScrollWrapX = 240; sample.ScrollWrapY = 192; }
 			}
 
 			if(_disableBackground) {
@@ -589,6 +591,7 @@ void SmsVdp::DrawPixel()
 		pixel.VisibleSprite = -1; pixel.ReplacementEligibleSprites = 0; pixel.BackgroundSample.Valid = false;
 			pixel.ExpandedSpriteClasses = 0;
 			pixel.ExpandedSpriteClassesWithoutBackground = 0;
+			pixel.NativeBackdropCaptured = false; // Preserve the CRAM-dot override in ordered composition.
 		}
 	}
 	_bgShifters[0] <<= 1;
@@ -679,6 +682,7 @@ void SmsVdp::ProcessEndOfScanline()
 	} else if(_state.Scanline >= _scanlineCount) {
 		_state.Scanline = 0;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 240) : nullptr;
+	if(_metaFrame) { _metaFrame->SmsCapture = true; }
 		_state.VerticalScrollLatch = _state.VerticalScroll;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Sms);
 		_currentOutputBuffer = _currentOutputBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
@@ -705,6 +709,7 @@ void SmsVdp::ProcessEndOfScanline()
 	}
 
 	_pixelsAvailable = 0;
+	if(_metaFrame) { for(auto& sample : _metaBgSamples) { sample = {}; } }
 	for(int i = 0; i < borderWidth; i++) {
 		PushBgPixel(_state.BackgroundColorIndex, i);
 		_bgPalette |= 0x800000 >> i;
@@ -960,6 +965,7 @@ void SmsVdp::LoadSpriteTilesSg()
 			//Keep lowest bits only - Y may have changed and be out-of-range between sprite eval and sprite fetching
 			uint8_t row = (scanline - sprY) & ((_state.UseLargeSprites ? 0x0F : 0x07) << (uint8_t)_state.EnableDoubleSpriteSize);
 			_spriteShifters[_spriteIndex].SpriteRow = row >> (uint8_t)_state.EnableDoubleSpriteSize;
+			_spriteShifters[_spriteIndex].EvaluatedDisplayRow = scanline - sprY;
 			_spriteShifters[_spriteIndex].HardwareSprite = true;
 			break;
 		}
@@ -1010,6 +1016,7 @@ void SmsVdp::LoadSpriteTilesSg()
 			bool shiftSprite = _spriteShifters[_spriteIndex].TileData[1] & 0x80;
 			_spriteShifters[_spriteIndex].TileData[1] &= 0x0F; //sprite color
 			int16_t xPos = _spriteShifters[_spriteIndex].SpriteX;
+			CaptureFetchedSpriteSg(_spriteIndex, _inRangeSprites[_inRangeSpriteIndex], xPos - (shiftSprite ? 32 : 0), _spriteShifters[_spriteIndex].EvaluatedDisplayRow, 0);
 			if(shiftSprite) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSpriteSg(_spriteIndex);
@@ -1020,6 +1027,7 @@ void SmsVdp::LoadSpriteTilesSg()
 				_spriteShifters[_spriteIndex] = _spriteShifters[_spriteIndex - 1];
 				_spriteShifters[_spriteIndex].TileData[0] = ReadVram(_spriteShifters[_spriteIndex].TileAddr + 16, SmsVdpMemAccess::SpriteLoadTile);
 				_spriteShifters[_spriteIndex].SpriteX = xPos + (_state.EnableDoubleSpriteSize ? 16 : 8);
+				CaptureFetchedSpriteSg(_spriteIndex, _inRangeSprites[_inRangeSpriteIndex], xPos - (shiftSprite ? 32 : 0), _spriteShifters[_spriteIndex].EvaluatedDisplayRow, _state.EnableDoubleSpriteSize ? 16 : 8);
 				if(shiftSprite) {
 					//Shift all sprites to the left by 8 pixels
 					ShiftSpriteSg(_spriteIndex);
@@ -1078,6 +1086,7 @@ void SmsVdp::LoadExtraSpritesSg()
 		bool shiftSprite = _spriteShifters[_spriteIndex].TileData[1] & 0x80;
 		_spriteShifters[_spriteIndex].TileData[1] &= 0x0F; //sprite color
 		int16_t xPos = _spriteShifters[_spriteIndex].SpriteX;
+		CaptureFetchedSpriteSg(_spriteIndex, _inRangeSprites[_inRangeSpriteIndex], xPos - (shiftSprite ? 32 : 0), scanline - sprY, 0);
 		if(shiftSprite) {
 			//Shift all sprites to the left by 8 pixels
 			ShiftSpriteSg(_spriteIndex);
@@ -1091,6 +1100,7 @@ void SmsVdp::LoadExtraSpritesSg()
 			_spriteShifters[_spriteIndex] = _spriteShifters[_spriteIndex - 1];
 			_spriteShifters[_spriteIndex].TileData[0] = _videoRam[_spriteShifters[_spriteIndex].TileAddr + 16];
 			_spriteShifters[_spriteIndex].SpriteX = xPos + (_state.EnableDoubleSpriteSize ? 16 : 8);
+			CaptureFetchedSpriteSg(_spriteIndex, _spriteShifters[_spriteIndex - 1].CapturedSprite, xPos - (shiftSprite ? 32 : 0), scanline - sprY, _state.EnableDoubleSpriteSize ? 16 : 8);
 			if(shiftSprite) {
 				//Shift all sprites to the left by 8 pixels
 				ShiftSpriteSg(_spriteIndex);
@@ -1100,6 +1110,14 @@ void SmsVdp::LoadExtraSpritesSg()
 			_spriteIndex++;
 		}
 	}
+}
+
+void SmsVdp::CaptureFetchedSpriteSg(uint8_t index, int hardwareSprite, int16_t x, uint8_t row, uint8_t offset)
+{
+	auto& sprite = _spriteShifters[index];
+	std::copy(sprite.TileData, sprite.TileData + 4, sprite.CapturedTileData);
+	sprite.CapturedX = x; sprite.CapturedSprite = hardwareSprite;
+	sprite.CapturedDisplayRow = row; sprite.CapturedOffsetX = offset;
 }
 
 void SmsVdp::CaptureFetchedSprite(uint8_t sprIndex)
@@ -1154,7 +1172,7 @@ uint16_t SmsVdp::GetPixelColor()
 	bool spriteDrawn = false;
 	uint8_t spritePixelColor = 0;
 	uint16_t xPos = GetVisiblePixelIndex();
-	if(_metaFrame && xPos == 0 && _state.UseMode4) {
+	if(_metaFrame && xPos == 0 && (_state.UseMode4 || !_state.M1_Use224LineMode)) {
 		for(int i = 0; i < _spriteCount; i++) {
 			auto& fetched = _spriteShifters[i];
 			MetaSpriteDecodedRow row;
@@ -1162,12 +1180,15 @@ uint16_t SmsVdp::GetPixelColor()
 			row.Sprite = fetched.CapturedSprite; row.X = fetched.CapturedX;
 			row.Row = fetched.CapturedDisplayRow; row.Y = _state.Scanline + GetViewportYOffset() - row.Row;
 			int horizontalScale = IsZoomedSpriteAllowed(i) ? 2 : 1;
-			row.Width = 8 * horizontalScale; row.Height = (_state.UseLargeSprites ? 16 : 8) << (uint8_t)_state.EnableDoubleSpriteSize;
-			row.Pixels.reserve(row.Width);
-			for(int x = 0; x < row.Width; x++) {
+			row.OffsetX = _state.UseMode4 ? 0 : fetched.CapturedOffsetX;
+			row.Width = (!_state.UseMode4 && _state.UseLargeSprites ? 16 : 8) * horizontalScale; row.Height = (_state.UseLargeSprites ? 16 : 8) << (uint8_t)_state.EnableDoubleSpriteSize;
+			int fetchedWidth = 8 * horizontalScale;
+			row.Pixels.reserve(fetchedWidth);
+			for(int x = 0; x < fetchedWidth; x++) {
 				int color = 0;
-				for(int plane = 0; plane < 4; plane++) { color |= ((fetched.CapturedTileData[plane] >> (7 - x / horizontalScale)) & 1) << plane; }
-				uint16_t rgb = _internalPaletteRam[0x10 + color];
+				if(_state.UseMode4) { for(int plane = 0; plane < 4; plane++) { color |= ((fetched.CapturedTileData[plane] >> (7 - x / horizontalScale)) & 1) << plane; } }
+				else { color = ((fetched.CapturedTileData[0] >> (7 - x / horizontalScale)) & 1) ? fetched.CapturedTileData[1] : 0; }
+				uint16_t rgb = _state.UseMode4 ? _internalPaletteRam[0x10 + color] : _activeSgPalette[color];
 				auto channel = [](int v) { return (v << 3) | (v >> 2); };
 				row.Pixels.push_back(color ? 0xFF000000u | (channel(rgb & 31) << 16) | (channel((rgb >> 5) & 31) << 8) | channel((rgb >> 10) & 31) : 0);
 			}
@@ -1205,6 +1226,8 @@ uint16_t SmsVdp::GetPixelColor()
 					}
 				}
 			} else {
+				int id = _spriteShifters[i].CapturedSprite;
+				if(_metaFrame && !spriteDrawn && id >= 0 && id < 64) { replacementCoverage |= uint64_t(1) << id; }
 				uint8_t sprColor = ((_spriteShifters[i].TileData[0] >> 7) & 0x01);
 				if(!_state.EnableDoubleSpriteSize || ((_spriteShifters[i].SpriteX - xPos) & 0x01)) {
 					_spriteShifters[i].TileData[0] <<= 1;
@@ -1218,6 +1241,7 @@ uint16_t SmsVdp::GetPixelColor()
 						uint8_t spritePalette = _spriteShifters[i].TileData[1];
 						if(spritePalette != 0) {
 							spritePixelColor = spritePalette;
+							visibleSprite = _spriteShifters[i].CapturedSprite;
 							spriteDrawn = true;
 						}
 					}
@@ -1237,10 +1261,10 @@ uint16_t SmsVdp::GetPixelColor()
 		((_bgShifters[3] >> 20) & 0x08);
 
 	bool highPriority = (_bgPriority & 0x800000);
-	if(_metaFrame && _state.UseMode4) {
+	if(_metaFrame) {
 		auto& pixel = _metaFrame->Pixels[(_state.Scanline + GetViewportYOffset()) * 256 + xPos];
-		pixel.BackgroundColor = _internalPaletteRam[((_bgPalette & 0x800000) ? 0x10 : 0) + color];
-		pixel.NativeBackdropColor = _internalPaletteRam[0x10 | _state.BackgroundColorIndex]; pixel.NativeBackdropCaptured = true;
+		pixel.BackgroundColor = _state.UseMode4 ? _internalPaletteRam[((_bgPalette & 0x800000) ? 0x10 : 0) + color] : _activeSgPalette[color == 0 ? _state.BackgroundColorIndex : color];
+		pixel.NativeBackdropColor = _state.UseMode4 ? _internalPaletteRam[0x10 | _state.BackgroundColorIndex] : _activeSgPalette[_state.BackgroundColorIndex]; pixel.NativeBackdropCaptured = true;
 		pixel.BackgroundColorIndex = color;
 		pixel.BackgroundSample = _metaBgSamples[0];
 		pixel.BackgroundOverlayOccludesClasses = highPriority ? 1 : 0;
@@ -1250,7 +1274,7 @@ uint16_t SmsVdp::GetPixelColor()
 		pixel.ExpandedSpriteClassesWithoutBackground = !_disableSprites ? 1 : 0;
 		pixel.ExpandedSpriteOccluder = visibleSprite;
 		pixel.SpriteColorIndex = spritePixelColor;
-		pixel.SpriteColor = _internalPaletteRam[0x10 + spritePixelColor];
+		pixel.SpriteColor = _state.UseMode4 ? _internalPaletteRam[0x10 + spritePixelColor] : _activeSgPalette[spritePixelColor];
 	}
 	if(!spriteDrawn || (highPriority && color != 0) || _disableSprites) {
 		uint8_t paletteOffset = (_bgPalette & 0x800000) ? 0x10 : 0;

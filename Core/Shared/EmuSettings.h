@@ -121,7 +121,7 @@ public:
 	OverscanDimensions GetOverscan();
 	bool IsFastForward();
 	uint32_t GetEmulationSpeed();
-	double GetAspectRatio(ConsoleRegion region, FrameInfo baseFrameSize);
+	double GetAspectRatio(ConsoleRegion region, FrameInfo baseFrameSize, bool ignoreDecorative = false);
 
 	void SetFlag(EmulationFlags flag);
 	void SetFlagState(EmulationFlags flag, bool enabled);

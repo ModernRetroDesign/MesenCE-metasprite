@@ -1,11 +1,942 @@
 # Metasprite workflow completion audit
 
-Decorative widescreen is planned but deferred at the user's request. The proposal
+## Woven pose RAM-condition correction — 2026-10-16
+
+A new LoROM/BG-mode-0 fixture changes both sprite palette colors every vblank
+without changing OAM identity. Distinct green/yellow PNG poses use the same
+origins. Adjacent woven fields must retain different captured poses. The plain
+pose case passed, but enabling a configured byte condition on each group failed
+with flags 5: output used the newest field's byte value for both fields.
+
+The PPU now samples configured replacement addresses before retaining a woven
+field. Woven captures preserve each field's small address/value snapshot. Shared
+metasprite selection uses the candidate's field snapshot for group conditions
+and alternate artwork, and considers both snapshots when choosing output scale.
+Pool reset clears both maps. No memory dump or new user address is introduced.
+
+The twelve-case live OBJ-interlace suite passes in Debug and Release, including the formerly
+failing conditional-pose case. Native Debug and Release checks verify independent alternate
+selection, per-field group conditions, configured snapshot sizes and reset.
+The existing fifteen hires/field probes and cross-system foreground suite pass
+in Debug. Release UI packaging passes and includes the matching native core.
+Background selection still uses the frame snapshot; field-specific background
+condition/camera semantics remain an open audit item.
+
+## Rectangular OBJ-interlace and window verification — 2026-10-16
+
+The focused suite now contains ten live cases. New LoROM/BG-mode-0 fixtures use
+OAM size mode 6 (16x32 sprites), both unmirrored and vertically mirrored. The
+source oracle models independent mirroring of the two 16-row halves, including
+transparent unused tile rows/columns. Full fetched rows must match on both field
+parities. The PNG remains smaller than the rectangular source, checking removal
+outside its canvas as well as shifted origins and alpha.
+
+An OBJ-window fixture masks native X=12..15. Its whole-frame oracle verifies that
+the window clips replacement pixels, including artwork above/below the native
+sprite rectangle, while the remaining canvas and disable restoration work.
+All ten cases pass in Debug and Release. Changing poses, screen wrapping and broader effects
+remain open; these checks do not establish complete SNES compatibility.
+
+## Viewer-authored OBJ-interlace pack round trip — 2026-10-16
+
+The hidden Sprite Viewer test now has a `SnesObj` fixture using the two-member
+LoROM/BG-mode-0 interlace ROM. It verifies the actual 512-row viewer snapshot,
+eight-source-row vertical separation, selection, enabled creation, default PNG
+and JSON save, 20x16 group canvas, transparent spacing and source holes. It then
+imports a 22x18 opaque PNG through the real editor, reloads the saved definitions,
+decodes the saved artwork into the runtime packet, and verifies the whole live
+frame against the authored origins and canvas. Reload preserves member offsets.
+
+This passes against Debug and Release native cores, including clean debugger/emulator
+shutdown. It exercises real view models and files without creating a visible
+window; visible desktop interaction remains a separate verification scope. The
+seven existing OBJ-interlace gameplay probes also pass after the shared native
+test-helper refactor.
+
+## OBJ-interlace output-mode and group verification — 2026-10-16
+
+The focused live suite now covers weave, current field, bob and bob blend,
+requiring successful replacement output for both field parities. Whole-frame
+oracles use physical output geometry, including temporal blend and inactive
+current-field rows, rather than deriving expected pixels from captured source Y.
+Distinct red/blue native rows verify capture phase. Additional cases cover a
+two-member group with a vertical source-coordinate offset, and horizontal and
+vertical mirrors. The second member extends beyond the replacement canvas, so
+the whole-frame check also verifies removal outside PNG bounds.
+
+All seven cases pass in Debug and Release. Capture expansion now explicitly retains source
+Y for separate hires subscreen phases as well; the standalone Debug regression
+checks both output phases. Viewer-created group round trips, rectangular sprite
+mirroring, field-changing poses, wrapping, windows and effects remain open.
+
+## Initial live OBJ-interlace integration — 2026-10-16
+
+SNES sprite fetch now emits explicit alternate source rows, full-source Y origins
+and native coverage for OBJ-interlace. Rendered pixels retain their full-source
+screen row. Hires/field submission can carry these captures through the existing
+no-math mapping. Sprite Viewer uses a 512-row source-coordinate preview in this
+mode, retaining full sprite artwork and doubled vertical placement; raw OAM Y
+remains available separately.
+
+The dedicated `--snes-obj-interlace` probe verifies both captured parities and
+whole-frame replacement output with shifted origins, oversized margins, PNG
+holes/partial alpha and disable restoration. Alternating red/blue-row Debug and
+Release probes pass. The 15 existing hires/field cases and cross-system
+foreground regression also pass in Debug. This is initial integration, not full
+compatibility: viewer-created multi-member groups, mirrored/rectangular sprites,
+field-changing poses, wrapping, windows, priorities, color math and all
+deinterlace modes still require broader live coverage. Historical unsupported
+notes below describe the state before this integration.
+
+## SNES explicit field-source artwork mapping — 2026-10-16
+
+SNES pixel state can retain an absolute full-source screen row independently
+of framebuffer Y. Sparse field canvases sample PNG Y and choose member attributes
+using that source row; ordinary canvases keep the existing coordinate path.
+Origin offsets and oversized margins remain in source-artwork units. Captured
+source rows copy with their field sample through expansion, weave and bob.
+Missing source geometry neither draws a sparse replacement nor suppresses its
+native sprite. No persistent packet or memory-condition format changes.
+
+Debug native tests pass both parities, partial/transparent PNG alpha, shifted
+origins, oversized margins and expansion/weave/bob retention. Release passes the
+same checks plus missing-source native fallback. PPU capture and Sprite Viewer
+source-coordinate integration are still required; OBJ-interlace gameplay remains
+disabled and has not been claimed to work.
+
+## Explicit SNES source-row matching — 2026-10-16
+
+Decoded rows and runtime graphics now carry explicit source-row step/phase
+metadata. SNES step-2 captures require all texels in every fetched row, reject
+conflicting fetches, and compare only those source rows with the full saved
+member. Missing rows are unknown, not transparent. Ordinary captures retain
+their all-rows completeness requirement; non-SNES captures cannot opt into the
+step-2 path. Group members must share row phase/step and field identity.
+
+Debug and Release standalone compositor suites pass both-parity matching,
+observed-row mismatch, unknown-row isolation, incomplete/conflicting capture
+rejection and ordinary capture compatibility. This is matching groundwork only:
+the PPU capture guards remain until vertical output mapping, origin alignment
+and field-aware gameplay tests are implemented. OBJ-interlace is not enabled.
+
+## OBJ-interlace capture investigation — 2026-10-16
+
+The remaining SNES OBJ-interlace gap is confirmed in the production capture
+path, not just the test harness: `FetchSpriteTile` excludes decoded rows and
+coverage when `ObjInterlace` is set, and frame submission excludes that mode
+from weave/current-field/bob mapping. Native fetch chooses source row
+`2 * (scanline - spriteY) + oddField` before vertical mirroring. A hardware
+sprite therefore occupies half its source artwork height in each field.
+
+Removing the guards alone is insufficient: `BuildDecodedCandidates` requires
+every source texel to have been observed, while a field only fetches alternate
+rows. Combining fields must preserve each field's OAM identity, content, origin,
+clipping and palette/priority rather than manufacture unobserved rows or mix
+different poses. Output mapping also needs the differing horizontal and vertical
+sprite scales. Required coverage includes alternating row colors, vertical and
+rectangular mirroring, field-changing poses, screen wrapping, PNG-only alpha and
+all supported deinterlace modes before enabling this path.
+
+Editor status text now acknowledges the existing hires/interlaced support and
+states the remaining color-math and OBJ-interlace limitations instead of claiming
+that every SNES replacement requires noninterlaced low-resolution output.
+
+## SNES mixed-member PNG attributes — 2026-10-16
+
+Full-canvas replacement pixels select priority and palette attributes from the
+nearest logical member rectangle, with overlaps and equal distances resolved by
+current OAM rotation. Selection does not consult original sprite transparency.
+Logical coordinates preserve attribute placement through hires expansion and
+shifted artwork origins, including oversized margins.
+
+The Release live foreground regression passes mixed priorities against native
+BG, partial PNG alpha, shifted origin, 2x artwork, member palette color math and
+rotated overlapping members. The Release standalone compositor suite also passes.
+This scoped verification does not close the known SNES OBJ-interlace capture gap
+or establish complete cross-system compatibility.
+
+## SNES lower native OBJ reveal — 2026-10-16
+
+SNES fetched coverage now retains each texel's color index. At render time,
+nonzero lower-object texels receive current CGRAM colors, OAM identity, priority
+code and palette metadata independently of the winning native object. Single
+unoverlapped winners continue using their existing capture fields; extra sample
+storage is limited to additional opaque objects on an enabled OBJ screen.
+Matched originals are excluded and the existing SNES outcome resolver includes
+remaining native objects beneath PNG alpha, preserving OAM arbitration before BG
+priority, main/subscreen windows and palette-dependent color math. Pack matching
+and configured CPU-address reads are unchanged; no packet-format change is needed.
+
+Native samples survive hires expansion and bob/weave copying. Odd woven-field
+IDs receive the same transient +128 tag as other sprite identities, and already
+tagged input is rejected. Hidden math-enabled objects keep hires on the existing
+native fallback when math is unsupported. Frame reuse clears lower-object lists.
+
+Both native compositor suites pass yellow/opaque-black reveal, partial alpha,
+OAM-before-BG blocking, fixed/subscreen math, hires/field propagation and retained
+frame/reset checks. Both live foreground suites verify lower yellow OBJ through
+PNG holes/partial alpha, OBJ-window suppression and palette-5 fixed-blue math.
+The broader 49-case SNES ordering suite passes in Debug and Release. Fifteen
+Release hires/interlace fixtures pass; the full 16-probe runner exits nonzero on
+the known unsupported OBJ-interlace fixture (flags 0). This is an open gap, not a
+passing full-suite result. All 15 supported Debug hires/field fixtures pass with
+OBJ-interlace explicitly excluded by the `--snes-hires-weave` runner.
+Both cores and UI builds pass; Release Mesen.exe is present and its packaged DLL
+hash matches. Native Release retains existing debug-symbol warnings.
+
+Representative ordinary lower-OBJ reveal is implemented. Broader live hires/
+field overlap, OBJ-interlace capture, mixed-priority metasprite members and other
+documented SNES compatibility gaps remain required; the overall goal stays open.
+
+## WonderSwan independent insertion bands and native overlap — 2026-10-16
+
+WonderSwan now enables shared MBGG bands 4–6, preserving its native ordering:
+backdrop/BG0, band 4, low OBJ, band 5, BG1, band 6, high OBJ, final foreground
+overlay. Assigned native BG still supplies scroll/camera coordinates and windows.
+BG0 and BG1 native-priority PNGs remain at their respective native stages. Both
+activation APIs, managed serialization/loading and the editor accept the bands.
+
+WS capture marks its frames and retains both BG stages for sprite-only packs as
+well as background packs. Frames captured before those stages were requested
+retain their original image until complete capture is available. The ordered
+resolver supports all 128 transient OAM IDs and separate inside/outside sprite
+window classes. An opaque earlier low OBJ blocks later high OBJ before BG1 hides
+it; PNG holes and partial alpha resolve the lower native object independently.
+High-priority native sprites are now classified correctly in captured metadata
+(native priority 2 is high). Native PPU drawing/arbitration is unchanged.
+
+Managed serialization and Debug/Release native suites pass, including two-layer
+ordering, PNG alpha, OAM IDs above 63, window classes and incomplete-stage fallback.
+Both live foreground suites pass BG1 on/off, low/high native and replacement OBJ,
+all bands, foreground overlay and partial artwork. A live overlapping low/high
+OBJ test without any BG PNG pack verifies opaque/transparent/partial replacement
+outcomes against BG1. All 21 Debug/Release WS fixtures pass (mono/color, planar/packed,
+scrolling, windows and native BG reveal). Both editor save/apply/reload runs pass.
+Both UI builds pass with zero warnings/errors; Mesen.exe is present and its
+packaged native DLL hash matches.
+Native Release retains the existing debug-symbol link warnings.
+
+Initial independent-priority integration now exists for all requested systems,
+using native priority controls on GBA/SNES and shared insertion bands elsewhere.
+Broader compatibility verification, dynamic palette/mode effects and remaining
+documented native reveal gaps still prevent completion of the overall goal.
+
+## SMS independent PNG insertion bands — 2026-10-15
+
+SMS now enables shared MBGG positions 4–6 plus the existing foreground overlay.
+Managed creation/loading, both native activation APIs and Tilemap Viewer controls
+accept the bands. Hardware layer selection still offers only the one SMS BG.
+Draw slots, CPU conditions, placement, scrolling and camera behavior are retained.
+SMS has no independent behind-BG OBJ flag; its two lower PNG bands can coincide
+relative to native content, while authored PNG order still distinguishes them.
+
+SMS capture identifies its frames and uses the decoded-row ordered resolver.
+Its background-priority masks select each sprite outcome's BG/OBJ placement,
+including high-priority tiles, transparent color-zero tiles and native-priority
+PNG alpha. PNG transparency can reveal lower native OBJ without consulting the
+matched source's alpha. CRAM-dot overrides clear reconstructable-backdrop capture
+so ordered composition retains the original dot pixel. Source VDP fetching,
+collision and native rendering logic remain in place.
+
+Managed serialization and both native suites pass. Native assertions cover tile
+priority on/off, insertion order, lower native reveal, priority PNG alpha and
+unreconstructable-dot fallback. Both live foreground suites pass SMS Mode 4 and
+legacy Graphics I band checks with native/replacement sprites and transparent/
+partial artwork. Mode 4 requires and checks a native OBJ hidden by an opaque
+priority tile. All thirteen Debug/Release SMS/legacy fixtures pass, including graphics
+modes, text BG, large/zoomed sprites, source holes, early-clock/left clipping,
+column masks and scroll locks. Both hidden-editor save/apply/reload runs pass.
+Both UI builds pass with zero warnings/errors. Release Mesen.exe is present and
+the packaged native DLL hash matches. Native Release retains existing debug-symbol
+link warnings.
+
+Live CRAM-write timing, midframe mode/palette changes and broader lower-OBJ overlap
+still require coverage. WonderSwan independent insertion bands remain required;
+this does not complete overall SMS compatibility or the cross-system goal.
+
+## PCE independent PNG insertion bands — 2026-10-15
+
+The supported single-VDC PCE path now enables MBGG insertion bands 4–6 alongside
+native priority and foreground overlay. Existing draw slots, CPU conditions,
+placement, wrapping and camera settings are retained. Pack creation, runtime
+validation, both native activation APIs and the editor accept these positions for
+PCE while keeping unsupported-system and SuperGrafx guards. No packet layout
+change is needed.
+
+PCE frames identify their adapter explicitly. The ordered resolver consumes raw
+decoded sprite slices, including slice offsets, rather than requiring every
+unreplaced sprite to reconstruct a complete candidate. PNG alpha resolves native
+sprite outcomes before the BG insertion stages, preserving opaque hidden-winning
+OBJ blocking and allowing holes/partial alpha to reveal lower objects. Visible
+native winners retain output-time color; other decoded texels use fetched colors.
+PCE capture now forces hardware nonzero colors opaque even for RGB-only palette
+entries; hardware color zero alone remains transparent. This fixes native reveal
+and authoring capture with default/alpha-less palettes. Hardware VDC rendering,
+fetching and collision logic are unchanged.
+
+Managed serialization and Debug/Release native compositor suites pass. Both live
+foreground suites pass with native/replacement PCE front OBJ across all bands and
+opaque/transparent/partial artwork. Debug and Release pass nine HuCard/VDC1 fixtures:
+front/behind opaque BG, hide-original, native PNG priority, wide and hole-wide
+sprites, divider-3/divider-2 holes and horizontal mirroring. Both hidden editor
+runs save/apply/reload the positions and reject GBA/SNES-only packets. UI builds
+pass without warnings/errors; Release Mesen.exe is present and its native dependency
+hash matches. Native Release retains
+existing debug-symbol warnings.
+
+Live lower-OBJ overlap with the new bands, wider mixed-priority member layouts,
+dynamic lower-object palette/grayscale behavior and SuperGrafx remain unverified
+or unsupported. SMS/WonderSwan insertion bands remain required. This is further
+integration progress, not completion of PCE compatibility or the overall goal.
+
+## GB/GBC independent PNG insertion bands — 2026-10-15
+
+GB/GBC now supports the three MBGG insertion bands already used by NES: below
+behind-BG sprites, between those sprites and native tiles, and above native tiles
+but below front sprites. Foreground overlay remains the final stage. Each position
+retains ten authored draw slots, CPU gating, scale, placement and hardware/CPU
+scroll sources. UI enables the shared choices for GB/GBC; managed and native APIs
+continue rejecting them for unsupported systems. The binary field layout is
+unchanged. Earlier NES-only guard descriptions below are superseded by this entry.
+
+The ordered resolver retains native sprite arbitration, PNG alpha and CGB tile
+priority. A priority BG PNG's partial-alpha outcomes pass under the above-tiles
+band while uncovered front OBJ stays above it. CGB master priority disabled still
+allows behind-flagged OBJ above BG. Captured underlays now retain BG color index
+to insert bands correctly when a window is hidden. Bands assigned to BG can use
+the retained BG scroll sample under a visible window. A per-frame GB capture flag
+also handles background-only scenes without fetched sprites.
+
+Managed serialization and Debug/Release native suites pass, including transparent
+and opaque tiles, opaque/transparent/partial replacement outcomes, priority BG PNG
+alpha, CGB master priority, window underlays and empty-sprite frames. Debug/Release
+foreground suites pass with live CGB insertion-band checks. All twelve Debug/Release
+GB/GBC gameplay fixtures pass. Both hidden-editor runs save/apply/reload all
+three positions and rejects GBA/SNES-only packets. UI builds pass with zero
+warnings/errors. Mesen.exe is present and the Release dependency DLL hash matches
+the rebuilt core. Native Release retains the existing debug-symbol link warnings.
+PCE, SMS and WonderSwan independent insertion integration remains required.
+
+## GB native reveal palette timing — 2026-10-15
+
+GB fetched rows now retain an output-color mask and eight output-time RGB555
+colors. Capture populates these while processing each visible pixel, before BG
+priority/OBJ winner checks, so both the winning and lower fetched objects retain
+current palette colors. Recognition still uses the unchanged fetch-time palette
+and graphic. The ordered compositor uses recorded colors when present and falls
+back to the fetched palette for older/synthetic rows without them. This metadata
+is transient native capture, not a pack-format change or CPU memory snapshot.
+
+The Debug/Release native suites pass a differential palette test: fetched blue remains
+the matching graphic while revealed pixels use output red/green and unrecorded
+pixels fall back to blue. A copied retained frame preserves the recorded colors.
+Live CGB assertions verify output samples for both the hidden winning object and
+the lower object. Debug/Release cross-system foreground suites pass, as do all
+twelve Release GB/GBC gameplay fixtures after this change. Both cores build; the
+Release UI package builds with zero warnings/errors and its native DLL hash
+matches. No new pack serialization or additional CPU-memory reads are introduced.
+A live DMG regression now pauses the emulation thread, steps the real PPU and
+sweeps an OBP1 memory-manager write across a hidden lower object's fetched row.
+It requires both old and new output colors in that row while the fetched palette
+remains unchanged. The captured frame is then passed through a transparent upper
+metasprite; all eight revealed pixels must equal their recorded output colors.
+Debug and Release pass this stronger check and the full cross-system foreground suite.
+This establishes the PPU-write/capture/composition path, not a ROM program's CPU
+instruction timing. Broader palette effects and game-specific raster behavior
+remain open. The added regression is test-only; packaged production behavior is
+the palette-capture implementation already built above.
+
+## GB/GBC ordered sprite alpha outcomes — 2026-10-15
+
+Game Boy capture now uses the shared ordered-sprite scene resolver when captured
+backdrop data and sprite or native-mode background definitions are available.
+Opaque OBJ wins sprite arbitration before BG priority is applied, so a winning
+behind-BG object continues to block lower front objects. PNG holes and partial
+alpha resolve lower native objects as separate outcomes. Native fetched rows
+retain horizontal flips, palette data and captured DMG X/OAM or CGB OAM order,
+including incomplete sprites that cannot form recognized groups. Mixed-member
+replacement regions inherit the nearest member rectangle's class/order without
+consulting source alpha. Hidden-window composition uses the retained BG map and
+its own object eligibility and PNG priority. Missing backdrop capture retains the
+existing fallback; unrelated systems retain their previous paths.
+
+Debug/Release native suites pass hidden-OBJ blocking, opaque/transparent/partial
+PNG outcomes, changed sprite order, horizontal flips, PNG priority/hiding and
+hidden-window BG reveal. All twelve existing Debug/Release GB/GBC ROM-only gameplay
+fixtures pass, including banked VRAM, scrolling, windows, source holes, retained
+window underlays and native sprite overlap. A new live CGB test places a winning
+behind-BG object over a later front object against opaque green tiles: opaque PNG
+keeps green, holes reveal blue, and partial alpha produces the expected green/blue
+mix. Debug/Release cross-system foreground checks pass including this test. The
+Release UI rebuild has zero warnings/errors, Mesen.exe is present and the packaged
+native DLL hash matches. The native Release link retains existing debug-symbol
+warnings. Broader DMG/CGB sprite limits,
+midframe attribute/palette changes and broader insertion-band verification
+remain open; this does not complete GB/GBC compatibility or the overall goal.
+
+## NES mixed-member canvas attributes — 2026-10-15
+
+NES replacement canvases now select front/behind-background priority and OAM
+order from the nearest matched member rectangle per destination pixel. Overlapping
+rectangles and equal-distance margins resolve by NES OAM order. Source sprite
+alpha is not used for attribute selection. This replaces the previous whole-canvas
+front-member assignment. A dedicated two-member regression checks opposite BG
+priorities, expanded margins and transparent/partial-alpha PNG pixels. Debug and
+Release native suites pass; an additional Debug assertion verifies an unrelated
+native OBJ ordered between the two group members wins over the later member.
+The Debug/Release core rebuilds and seven existing Release NES live gameplay fixtures pass.
+The Release core link retains the existing LNK4020 debug-symbol warnings.
+A live NROM test now captures two adjacent members with opposite BG priorities,
+recognizes their group by graphics/relative placement, and verifies opaque artwork,
+oversized margins and partial PNG alpha against an opaque native background.
+The live check additionally overlaps the members by four pixels and shifts the
+PNG origin left by two pixels. It verifies the overlap inherits earlier OAM
+priority, the left margin stays behind native BG, and the right member/margin
+remains in front, with opaque and partial-alpha artwork. Debug and Release pass.
+The full foreground suite passes in Debug and Release with these checks. Its OAM
+setup disables rendering before editing the second sprite; writing OAM during
+active rendering did not reliably establish the intended scene. Broader live OAM
+ordering and mapper coverage remain required; the overlap check is representative,
+not an exhaustive test of member layouts.
+The Release UI package rebuild passes with zero warnings/errors; Mesen.exe is
+present and the packaged native core matched that rebuilt DLL. Debug now includes
+the mixed-member production change; a later test-only core rebuild adds the live
+check above and has not yet been repackaged into the Release UI dependency archive.
+
+## Background authoring controls and artwork filenames — 2026-10-15
+
+The hardware-layer selector now lists system-specific names: SNES BG1–BG4,
+GBA BG0–BG3, Game Boy background/window, WonderSwan BG0/background and
+BG1/foreground, and one background for NES, SMS and the supported PCE path.
+These choices describe supported native roles rather than the current video mode.
+Background import and artwork replacement preserve the source filename, reuse
+artwork already in the pack directory, and use short numbered suffixes on external
+filename collisions. Rollback only removes a newly created copy, never reused
+artwork. The Debug UI build passes with no warnings or errors.
+
+The latest Release native compositor suite passes, including NES insertion-band
+alpha/OAM cases. The NES hidden-editor workflow passes with the updated controls
+and filename handling, including targeted assertions for original filenames,
+short collision suffixes and in-pack artwork reuse.
+
+The final Debug and Release NES raster suites pass with the latest scene resolver:
+sprite-zero splits, hardware/reference/CPU cameras, seventeen decorative canvas
+variants, signed player-speed sliding, finite 1024px coverage at camera boundary
+766, full-canvas alpha/origin checks and disable restoration. Smooth-slide tests
+allow up to 128 emulated frames with a bounded host-time watchdog; this is a test
+convergence allowance, not a runtime motion change. Release cross-system foreground
+checks pass, including all NES bands, GBA priorities 0–3 and SNES priorities 1–15.
+The Release UI rebuild passes with zero warnings/errors and Mesen.exe is present.
+
+NES scene reconstruction also applies to ordinary metasprite packs and native-mode
+background PNGs when fetched rows and backdrop capture are available, preserving
+behind-BG OAM blocking and replacement alpha without requiring an independent
+band. Sprite-only reconstruction redraws affected source/canvas row bounds rather
+than the entire viewport. Legacy captures without backdrop data retain the existing
+fallback. Broader mixed-priority NES group and mapper verification remains open.
+
+
+## NES independent PNG insertion bands — 2026-10-15
+
+NES now exposes three insertion positions alongside the final foreground overlay:
+below behind-background sprites; above those sprites but below native tiles; and
+above native tiles but below foreground sprites. Every position retains ten PNG
+draw slots, placement/scrolling/wrapping, CPU camera/raster overrides and CPU
+conditions. Native layer priority remains the default. Native-mode PNGs compose
+before the explicit above-tiles band; the final foreground overlay stays last.
+
+The NES scene resolver evaluates sprite PNG alpha in hardware order, then applies
+the selected band sequence for each outcome. An opaque behind-BG sprite still
+blocks later foreground sprites even when tiles hide its artwork. Transparent or
+partial replacement alpha can reveal lower native sprites. Only replacement PNG
+alpha governs replacement coverage. Captured fetched rows supply native sprites,
+including partial rows that cannot form a recognized group. Winning sprite palette
+and priority class are now retained even when native BG hides the sprite; hardware
+sprite-zero hit/rendering logic is unchanged. Offscreen group tracking stays deferred.
+
+MBGG persists the positions and remains compatible with earlier packets. Managed
+and native APIs reject NES-only bands on other systems. Debug pixel tests cover
+OAM blocking, opaque/partial/transparent artwork, native/replacement overlap,
+hiding tiles, native sprite reveal, clipping, source-alpha holes and 2x cropped
+origin alignment. Packet tests cover all positions, saved order, every truncated
+packet and invalid position rejection. Live NROM checks cover all bands with
+front/behind native and replacement OBJ, opaque tiles and lower OBJ alpha outcomes.
+Hidden NES editor checks save/apply/reload each new band and restore native mode.
+A GBA editor test rejects NES-only packets through standalone and combined native
+APIs. The seven existing NES gameplay/crop/alpha fixtures pass in Debug. Additional
+pixel assertions verify condition mismatch, missing/present CPU camera, and reads
+of exactly the two configured condition/camera addresses. Mixed-priority member
+groups and unusual OAM evaluation ordering still require broader verification.
+Other systems' remaining insertion positions and wider NES mode/mapper coverage
+remain required; this does not complete the overall goal.
+
+
+## Independent SNES PNG hardware priority and native OBJ reveal — 2026-10-15
+
+SNES now offers independent priority 1..15 (higher draws nearer the front), separate
+from the selected BG layer. The source BG supplies captured coordinates, windows,
+main/subscreen eligibility and color-math identity. Native tiles retain their own
+priority. PNG wins a BG priority tie; OBJ wins an equal priority. Equal-priority
+PNGs retain authored draw order. The post-effects foreground option remains separate.
+Composition resolves each eligible screen before native color math/brightness.
+A reusable thread-local entry buffer avoids per-texel allocation/sort scratch.
+
+The live test exposed native OBJ missing after hiding an opaque BG. The staged
+resolver now reselects the captured fetched OBJ color, priority and math identity,
+respecting main/sub OBJ window masks, when it was originally blocked by a BG.
+This fixes that reveal case without treating original sprite alpha as PNG alpha.
+It does not establish complete lower-OBJ overlap reveal or all interlace modes.
+
+MBGF persists the new position/priority; MBGD/MBGE defaults remain compatible.
+UI and native APIs reject SNES-only priority packets on other systems. Managed
+and Debug/Release native tests cover all 15 priorities, OBJ/BG ties, partial/transparent
+alpha, authored order, layer hiding, screen/window eligibility, math identity,
+packet truncation/invalid values and native-object reveal in both native and
+independent priority positions. End-to-end pixel assertions also cover fixed-color
+add/subtract, half, brightness, math windows, subscreen addition and main/sub OBJ
+masks. Hidden SNES authoring
+save/apply/reload/restore and NES rejection tests pass. All 49 broader SNES ordering
+regressions pass in Debug. The Debug/Release live ROM suites
+pass all nine cross-system foreground regressions plus GBA/SNES priority checks.
+Other system insertion bands and wider SNES hardware modes/effects remain required.
+All 49 broader SNES ordering cases pass in Debug and Release. Both live suites
+also pass nine foreground regressions and GBA/SNES independent-priority checks.
+Hidden SNES editor checks pass with both cores; NES rejects SNES-only packets.
+Both UI builds complete with zero warnings/errors. Release Mesen.exe is present
+and its packaged native DLL matches the rebuilt core. The Release native build
+retains the previously documented LNK4020 debug-symbol warnings.
+
+
+## Independent GBA PNG hardware priority — 2026-10-15
+
+GBA backgrounds now offer an independent hardware-priority composition position,
+with priority 0 (highest) through 3 (lowest), separate from source native BG0..BG3.
+The assigned BG still supplies coordinates, window visibility and color-effect
+target identity; native tile artwork keeps its own priority. PNGs become separate
+entries in the GBA layer resolver rather than recoloring/reprioritizing that BG.
+OBJ wins equal priorities; BG ties follow native BG number, with PNG ahead of its
+own native BG and later authored PNGs ahead of earlier PNGs at the same priority.
+PNG alpha participates in selecting the visible main/secondary effect layers.
+Hide original layer remains independent. Foreground overlay remains a separate
+post-effects option. Widescreen scenery orders independent PNGs below foreground.
+
+JSON and MBGE preserve the position/priority; legacy MBGD remains compatible.
+Unsupported-system activation and out-of-range priorities are rejected by managed
+validation. The GBA editor exposes the option; other systems cannot select it.
+
+Managed and Debug/Release native tests cover transport/truncation/invalid values, all four
+priorities, OBJ/BG ties, authored PNG overlap, partial alpha, layer suppression,
+clipped samples and blend-target/window-effect behavior. Hidden GBA editor checks
+save/apply/reload/restore with Debug and Release cores. Native APIs reject a GBA-only packet on NES through both standalone and combined activation. Live Debug/Release ROM tests verify every priority against native
+and replacement OBJ2 plus partial alpha. Other system insertion positions and
+broader native mode/window/effect combinations remain required for completion.
+Both application cores and the Debug/optimized Release UI builds are updated.
+The UI builds have zero warnings/errors; the Release native build retains the
+known LNK4020 debug-symbol warnings. Release Mesen.exe is present, and its packaged
+native DLL matches the rebuilt core. Both cores pass all nine live foreground
+regressions and the added GBA native/replacement priority-switching checks.
+
+
+## Live foreground PNG integration verification — 2026-10-15
+
+Added --foreground ROM-driven coverage for NES NROM horizontal-scroll BG, DMG,
+GBC, GBA mode-0 scrolling BG0, PCE single-VDC enabled BG, SMS Mode 4, SMS legacy
+Graphics I, SNES mode-1 subscreen BG0 and WonderSwan color scrolling backgrounds.
+The test selects a complete hardware sprite that is actually visible with a valid
+assigned BG sample. It verifies opaque foreground artwork above the native sprite,
+partial-alpha artwork above an independently verified magenta metasprite PNG,
+transparent foreground reveal, condition mismatch restoration and disable restore.
+Each setting transition waits for new emulated frames, so unchanged-color checks
+cannot pass against a stale frame. Snapshots contain only the configured address
+and clear after all definitions are removed. PCE assertions account for overscan.
+
+All nine cases pass with both Debug and Release cores (18 live runs total). The Release build retains the previously documented LNK4020 debug-symbol warnings. Test startup requests BG capture explicitly and skips
+the GBA boot screen, matching the synthetic fixture requirements. This verifies
+basic live foreground integration across all seven systems; it does not establish
+all rendering modes/windows/interlace/color math or the remaining priority bands.
+
+
+## Independent foreground PNG position — 2026-10-15
+
+The Tilemap Viewer now offers Native layer priority (default) and Foreground
+overlay as independent composition positions. Foreground artwork is drawn after
+native and replacement sprites, native backgrounds, color effects and brightness.
+It retains the assigned layer's captured coordinates/visibility samples, PNG
+placement, scaling, scrolling, CPU camera, raster override, wrapping and CPU
+conditions. It does not inherit SNES main/subscreen color math or native blending;
+this is an explicit final display overlay. Hide original layer remains independent.
+
+CompositionPosition persists in JSON and MBGD packets, with legacy packets
+remaining native-priority. Packet emission groups native PNGs before foreground
+PNGs and preserves the ten draw slots/stable ties within each position. Decorative
+widescreen margins also sample the foreground artwork when opted in.
+
+Managed persistence and validation plus Debug/Release native pixel tests cover MBGD
+transport, every truncated packet, invalid position rejection, native OBJ overlap,
+shared/GBA/SNES/underlay sample selection, missing sample clipping, CPU gating,
+cropped/scaled CPU-camera artwork and composition above replacement metasprites.
+The other independent priority bands and broad per-system hardware-window,
+interlace/color-math and gameplay verification remain required; this does not
+complete independent priority layers or the overall goal.
+Debug and optimized Release application builds are updated; both UI builds report
+zero warnings/errors. Hidden SmsLegacy editor tests save/apply foreground mode,
+reload its persisted position, then restore native priority with both rebuilt
+cores.
+Hidden editor foreground save/apply/reload/native-position restoration checks also
+pass on NES, GB, GBC, GBA, PCE, SMS, SNES and WonderSwan with the rebuilt Debug core,
+with clean shutdown on every system. These are authoring/native-activation checks,
+not exhaustive on-screen hardware composition tests.
+Debug/Release tests additionally cover independent native-layer suppression under
+transparent/partial foreground PNGs. Wider per-system gameplay coverage is pending.
+
+
+## PNG draw-order controls — 2026-10-15
+
+Each background now saves a DrawOrder slot from 0 through 9. The Tilemap Viewer
+provides a numeric control with a higher-number-draws-above explanation. Native
+layer assignment remains independent; hardware background/sprite priorities still
+apply. Equal slots retain saved PNG order, and existing packs default to slot 0.
+The runtime packet writer sorts references stably without changing editor order
+or requiring a new native packet version. Out-of-range slots are rejected.
+
+Managed persistence/validation tests and Debug/Release native tests verify saved
+slots reach composition, equal-slot stability, partial/transparent overlap,
+condition mismatch restoration and matching GBA/SNES layer adapter output.
+Hidden SmsLegacy background-editor authoring also verifies DrawOrder survives
+Save/apply and pack reload, with clean shutdown using the rebuilt Debug core.
+Independent insertion bands relative to sprites/native backgrounds remain
+unfinished; these within-native-layer ordering controls do not complete that goal.
+Both application native cores were rebuilt. All 13 legacy/Mode 4 SMS renderer
+regressions pass against each rebuilt core. The optimized Release core build
+reports LNK4020 debug-symbol/PDB warnings; runtime checks pass.
+The Debug and optimized Release UI builds complete with zero warnings/errors.
+Release Mesen.exe is present and its packaged native DLL matches the rebuilt core.
+Hidden editor save/reload/shutdown also passes with the rebuilt Release core. This does not
+establish complete cross-system gameplay coverage of independent priority bands.
+
+
+## Overlapping background PNG composition — 2026-10-15
+
+The shared direct-color compositor now blends every matching PNG in saved order,
+with later entries above earlier entries, matching the GBA/SNES adapters. Opaque
+or transparent entries no longer stop evaluation of later artwork. The retained
+background-underlay and behind-background replacement-sprite paths use the same
+order, preserving PNG alpha independently of original sprite texels.
+
+Debug and Release native compositor suites pass, including new pixel assertions
+for overlapping opaque/partial/transparent PNGs, reversed order, and two partial
+PNGs above replacement sprites on both ordinary and revealed background layers.
+This is prerequisite composition work; independent insertion bands, user ordering
+controls and cross-system gameplay verification remain required. Application binaries were subsequently rebuilt with the draw-order controls.
+
+
+## SMS legacy graphics/text replacement integration — 2026-10-15
+
+Extended native replacement capture beyond Mode 4. Legacy Graphics I, Graphics II
+and multicolor now expose fetched sprite graphics, native sprite identities,
+per-pixel replacement eligibility and background samples through the shared
+compositor. Legacy 16x16 sprites combine their fetched left/right halves into one
+hardware sprite; zoom, per-sprite early-clock X shift and source transparency are
+retained. Capture preserves raw fetched pixels before native shifters consume or
+clip them, while native rendering and collision handling continue normally.
+
+Text mode provides 240x192 background sample coordinates inside its eight-pixel
+side borders, with no sprite groups. PNG background replacement, transparent
+hide-original-layer fallback, condition mismatch restoration and exact sparse
+memory capture are checked using a ROM-defined C000 RAM gate. Graphics modes use
+256x192 samples without invented hardware scrolling. Fixed legacy palette colors
+and native backdrop values are captured independently of Mode 4 CRAM colors.
+
+The `--sms-legacy` suite contains eight legacy fixtures (modes 0/1/2/3, 16x16,
+zoomed 16x16, transparent source texels and early-clock left clipping) plus five
+Mode 4 regressions (ordinary, zoom, left clipping, column mask and locked scroll).
+Debug and Release pass all 13 cases. Native/UI builds succeed, and the Release
+package contains the matching native core.
+The hidden `--selection-suite SmsLegacy` passes against Debug and Release cores
+for actual editor model authoring,
+automatic PNG creation/import/export, origin/alternate conditions, background
+settings, stale-save protection and pack loading before CPU execution.
+
+These fixtures use SMS2 hardware. SG-1000/ColecoVision palette/model variants,
+limit-removal extra sprites, mid-frame mode changes and broader overlap/timing
+combinations still need dedicated checks. Hidden authoring checks do not establish
+visible desktop interactions. The cross-system main goal remains active.
+
+## GBA ordinary 4bpp mosaic coverage — 2026-10-15
+
+Added original live fixtures for an ordinary 4bpp OBJ with vertical mosaic and
+for the same asymmetric two-dimensional graphic with both hardware flips and
+combined horizontal/vertical mosaic. Both use OBJ palette bank 3 while palette
+zero contains a different color, verifying palette selection in the capture path.
+The oracle independently checks unsampled recognition pixels and native displayed
+pixels. It also checks full-canvas PNG alpha, origin alignment, oversized margins
+and original-pixel restoration after disabling replacements.
+
+The existing vertical-mosaic capture correction handles these cases without
+another renderer change. Updated native first-pixel assertions to account for
+the flipped graphic's blue corner instead of assuming every unmirrored fixture
+starts red. All 37 GBA suite cases pass in Debug and Release; native and UI builds succeed,
+and the Release package contains the matching native core.
+Other mosaic sizes, independent single-axis flip combinations and broader
+window/effect interactions remain outside this specific coverage. Replacement
+PNGs continue to use their authored pixels rather than hardware mosaic filtering.
+
+## GBA affine vertical mosaic capture — 2026-10-15
+
+Fixed recognition capture for vertically mosaicked OBJ graphics. The native
+renderer keeps using its hardware-sampled row; the capture path independently
+reads the underlying graphic row using the affine matrix (or ordinary flip
+coordinates). Captured group identities no longer contain repeated display rows.
+The extra reads only run with capture active and do not alter native arbitration,
+retained lower-OBJ samples, mosaic counters or display output.
+
+Two original live fixtures use a quarter-turn enlarged asymmetric 8bpp OBJ:
+vertical groups of four and combined horizontal pairs/vertical groups of four.
+They verify all captured/native pixels, shifted full-canvas replacement, opaque,
+transparent and partial-alpha PNG samples, and disable restoration. All 35 GBA
+affine-suite cases pass in Debug and Release. Replacement artwork remains at its
+authored resolution; this does not add mosaic filtering of PNGs. Ordinary 4bpp and combined flips now have the live coverage recorded above;
+other mosaic sizes and broader effect combinations still need dedicated coverage.
+The main cross-system goal remains active.
+
+## Current audio progress — 2026-10-15
+
+Initial music and sound replacement integration is implemented for **NES,
+GB/GBC, GBA, PCE, SMS/Game Gear, SNES and WS/WSC**. The shared Audio Replacement
+Editor supports imported assets, event-triggered music/effects, optional RAM
+conditions, music looping/fades, per-track volume and whole-native-output mute.
+SMS/GG and WS/WSC have separate memory/I/O triggers; SNES has independent main
+CPU/SPC trigger and condition-source selection. Packs load before CPU execution.
+
+WonderSwan completion adds 20-bit linear memory, 16-bit I/O ports, segmented and
+wrapped address handling, native aligned/split word events and operation-type
+preservation for split DMA writes. Generated monochrome/Color V30 fixtures and
+editor lifecycle checks pass in Debug and Release. The complete audio regression
+suite passes for all seven systems. Debug/Release native and UI builds succeed,
+and the updated Release executable is present with the matching native DLL.
+
+Real-game tests and valid OGG/audio-device listening remain **deferred by user
+request**. Broader special hardware/mapper/audio-driver coverage, global SFX volume,
+same-effect overlap, fades/crossfades, disk streaming, precise sample scheduling,
+state/rewind playback positions and advanced synchronization remain unfinished.
+See [music-replacement.md](music-replacement.md) for exact current capabilities
+and fixture scope. This completes the initial audio system rollout, **not the
+main metasprite/background goal**. Existing renderer gaps and deferred PNG work
+remain as recorded later in this audit. The slowdown issue stays resolved; 3D
+model replacements stay cancelled.
+
+## Historical progress
+
+2026-10-14 music first stage: dedicated Debug → Audio Replacement Editor, NES
+post-commit CPU-write triggers plus optional RAM conditions, OGG Vorbis/PCM 16-bit
+WAV playback, looping, volumes, fades and whole-native-output mute. Packs are
+separate at HdPacks/Audio/Nes/<SHA1>/music.json and load before CPU execution.
+Native/editor checks pass for generated PCM and NROM/mapper-0 fixtures, including
+event/context selection, repeated writes, playback controls, rollback, stale saves,
+and pre-execution loading. Sound effects, other console/audio-CPU trigger sources,
+exact saved playback positions and fully streamed assets remain future work. Valid
+OGG files and real audio-device audition are not yet verified by these fixtures.
+Full implementation notes are in docs/music-replacement.md. This does not mark the
+main metasprite/background goal complete.
+Final Debug/Release music checks passed, including automatic loading before CPU
+execution and independent native/music volume/disable restoration. The write hook
+uses a compiled address mask so unrelated NES writes avoid rule processing. An
+early Release test-harness stall was avoided by loading its direct memory-write
+fixture without a CPU thread; the separate editor/running-ROM checks still run.
+
+2026-10-14 pack-only boundary settings: removed Video Options camera background
+ID, camera limits, RAM boundary conditions/toggle, slide speed and release delay,
+along with global/game-profile persistence, native interop fields and renderer
+fallback. Removed the copy-video-positioning-to-PNG button/action. Gameplay
+position remains in Video Options, along with enable, ratio, margins, brightness
+and fade. Existing active PNG positioning continues to take priority; Automatic
+without a controlling pack definition stays centred. Pack positioning metadata
+and editor controls remain unchanged. Old profiles ignore obsolete fields and
+omit them on subsequent saves. Live NES NROM and GBA/SNES fixtures passed with
+pack-owned limits/flags, including Automatic-without-pack centred fallback.
+This supersedes older compatibility-fallback/copy-button instructions below.
+Profile/editor checks also passed: the four-choice Gameplay position selector
+remains bound, obsolete profile fields are dropped safely, native presentation
+interop matches, and PNG authoring retains pack-owned boundary/motion metadata.
+The rendered Video Options layout was inspected. Debug/Release UI and core builds
+completed successfully; the Release executable and matching core dependency were
+verified.
+
+2026-10-14 finite-PNG coverage: Automatic placement now constrains the stored
+window position to the active controller PNG's horizontal coverage, before the
+configured camera/RAM boundary triggers. This applies to non-wrapping CPU-camera
+backgrounds and accounts for artwork scale, origin, output scale, crop, scroll
+multiplier and captured horizontal pixel scale. Coverage overrides speed/delay
+when needed; signed reversal remains available within the covered range. Wrapping
+PNGs and manual positioning retain their behavior. An image too narrow or badly
+placed to cover the output is not stretched or wrapped automatically.
+Native tests pass for a 1024px PNG, camera stop 766, approach from both directions,
+zero/reverse player speed, 1x/2x/3x output, crop and origin offsets. The live NES
+NROM fixture also verifies finite PNG coverage before the boundary trigger while
+preserving every gameplay pixel. The user's pack is on another system and has
+not been tested locally.
+
+2026-10-14 direction correction: signed player X RAM speed now retains direction
+while a boundary remains active. Positive moves right, negative moves left, with
+the window constrained between its normal position and the active edge. Turning
+around no longer requires a camera/flag transition. Unsigned sources keep their
+target-directed behavior. On boundary release, speed magnitude returns the window
+toward normal. Missing/zero speed still stops movement. This supersedes the
+absolute-only direction description below; existing pack data requires no change.
+Native regression tests pass for forty-pixel walk-away/return trips at both edges,
+normal/edge clamps, stopped/missing speed, unsigned fallback and redraw stability.
+The live NES NROM CPU-limit fixture passes with negative speed at the left edge,
+positive at the right edge, and zero speed stopped, including 2x output.
+
+2026-10-14 player X RAM slide speed: optional per-PNG CPU address, signed/unsigned
+8-bit or 16-bit LE/BE format, conversion multiplier and cap. Automatic camera
+limits/RAM flags still determine the target; absolute X speed determines motion
+toward it, including returning home. Zero/unavailable speed freezes motion.
+Only the selected active controller's one/two bytes are captured on the emulation
+thread, deduplicated against existing samples. Native output scaling preserves
+the native-pixel speed. MBGC adds source metadata; MBGA/MBGB remain compatible
+and default to fixed speed. Native tests cover six formats, signed extrema,
+acceleration, cap, zero/missing values, redraw stability, packet rejection and
+legacy defaults. The NES NROM test ROM verifies actual $18/$E8 motion at 2x and
+zero-speed stopping with CPU edge limits. This is horizontal sliding only.
+
+2026-10-14 fractional sliding and release delay: slide speed now supports fractional
+native pixels per emulated frame, accumulated before integer output placement.
+Per-PNG settings and the legacy Video/profile fallback expose a release delay
+(0–600 consecutive inactive frames, default 0/off). Brief inactive readings keep
+the last edge target; a renewed match resets the timer. An opposite edge takes
+effect immediately. Missing/conflicting checks, inactive controllers and scene
+changes do not retain an old edge. Numeric camera limits also support the delay.
+MBGB transports milli-pixel speeds and delay; MBGA integer speeds still load.
+Native tests cover accumulation, flicker, timer/redraw stability, missing/conflict
+fallback and legacy packet compatibility. Release NES NROM and eight GBA/SNES
+live widescreen fixtures passed, as did profile persistence/native interop checks.
+
+2026-10-14 sliding-window verification: reran Release live GBA/SNES widescreen
+fixtures and extended the NES NROM sprite-0 raster fixture with per-PNG RAM
+left/right/both/neither cases. The right-edge case uses nonzero slide speed;
+each case compares every native viewport pixel at its expected output offset.
+CPU-limit and RAM-boundary cases passed. This verifies the native renderer,
+not a full visible UI setup or the user's currently failing pack. PNG positioning
+overrides Video settings; new PNG imports default to Centre. Automatic mode,
+margin extension and saved/applied edits are required for boundary tracking.
+
+2026-10-14 per-PNG positioning: moved the primary gameplay position, slide speed,
+camera limits and RAM boundary rules into background definitions. New imports
+have centred per-PNG defaults; existing packs retain global/profile fallback.
+The Tilemap Viewer edits and saves these fields and can copy saved video values.
+Scene activation conditions choose the first active margin PNG with an override;
+changing the controller resets slide history. Only its extra flag bytes are read.
+MBGA adds bounded positioning metadata; older packet versions remain compatible.
+Managed/native transfer and truncation checks, actual NES editor persistence/copy
+workflow, and Debug GBA/SNES per-scene cases passed. This supersedes older notes
+that place all positioning settings only in Video/game profiles.
+Release per-scene cases also passed across eight GBA/SNES fixtures, alongside
+the existing RAM-flag and large-canvas checks. Debug/Release native suites and
+UI/native builds passed; the Release executable/native dependency copy were
+verified. Full visible desktop and remaining filter/mode coverage are still pending.
+
+2026-10-14 RAM boundary flags: implemented eight optional CPU-memory conditions
+per edge, all six comparison operators and masks, profile/global persistence and
+Automatic positioning in place of camera limits. Both/neither/missing checks use
+normal placement; empty edges are inactive. The selected active margin PNG gates
+positioning, including hardware-scroll PNGs. Only configured bytes are captured
+on the emulation thread and deduplicated against existing camera/group bytes.
+Native tests, profile/editor and managed/native configuration-layout checks passed.
+Rendered UI was inspected, with horizontal overflow prevented. Older pending
+entries for optional boundary flags are superseded. Wider mode/filter coverage
+and full visible desktop verification remain pending; the main goal is incomplete.
+Debug/Release native suites and eight GBA/SNES live fixtures passed, including
+five RAM-flag variants each (80 flag checks across both configurations), alongside
+the existing presentation/large-canvas checks. Profile validation and native
+interop checks passed; Debug/Release UI/native builds passed and the Release
+executable/current native dependency copy were verified.
+
+2026-10-14 fade correction: replaced the outer-edge black fade with the requested
+brightness transition outward from gameplay: 100% at the adjacent margin pixel,
+linear transition over the fade width to the selected side brightness, then a
+constant side level. No blur; native gameplay is unchanged. Zero width is uniform
+dimming, 100% side brightness stays full throughout, and the transition follows
+the moving viewport. Existing profile fields remain compatible. Older outer-edge
+fade descriptions below are superseded by this correction.
+Validation passed: Debug/Release native tests (0%, 37%, 100%, unchanged native
+pixels), 112 dedicated GBA/SNES live presentation/canvas checks across both
+configurations, and the Release NES NROM widescreen/sprite-0 fixture. Debug and
+Release UI/native builds passed; the Release executable is present.
+
+2026-10-14 large-canvas continuation: patterned 256/512/1024-pixel replacement
+backgrounds passed live GBA tiled/affine/bitmap and SNES LoROM mode 0/1/7 checks,
+including CPU X=1014 wrapping and signed FF:F6=-10. Eight fixtures run seven
+presentation/canvas checks each; 56 passed in Debug and 56 in Release. Native
+viewport pixels stay identical across widening and restore on disable. Only the
+three configured memory bytes are captured. Automatic viewport history now resets
+for zero/invalid margin canvases and decoder stop, with native regression coverage.
+Debug/Release native tests and UI/native builds passed. This supersedes the older
+48-check count below. Optional boundary flags, remaining filters/hires/interlace
+modes and full visible desktop verification remain pending.
+
+2026-10-14 profile/validation continuation: per-game widescreen profiles now save
+separately by CPU/system and ROM SHA1 under the configured game-settings folder.
+Video settings offer preview, Save for this game, Remove game profile and Use as
+global defaults. Loading/stopping/switching games applies/clears profiles; unrelated
+video fields and global defaults remain independent. Actual editor tests passed
+for save/load/remove, stale-game rejection, invalid-write retention and isolation.
+Dedicated GBA tiled/affine/bitmap and SNES LoROM modes 0/1/7 live fixtures passed
+all 24 widescreen variants in both Debug and Release (48 checks). Actual settings
+UI construction/render and brightness-spinbox binding tests passed; the rendered
+layout was inspected and clipped fade/slide labels received line breaks.
+Older pending entries below are superseded for profiles and these live fixtures.
+Optional CPU boundary flags, broader filters/modes and full visible desktop
+verification remain pending. The overall metasprite goal is not complete.
+
+2026-10-14 continuation: added custom asymmetric margin widths, outer-edge fade,
+and automatic gameplay positioning at explicit signed CPU-camera limits for a
+selected active PNG background ID. Zero slide speed is instant; positive speeds
+advance per emulated frame, with stable redraws and reset/rewind fallback.
+Native tests and the live NROM fixture cover the new controls. Per-game
+presentation profiles, optional CPU boundary flags and visible desktop checks
+remain pending. The older pending lists below are superseded for these controls.
+Verification: Debug/Release native suites passed; nine live NROM widescreen
+variants passed in both configurations. The full Debug gameplay regression suite
+passed, including 59 live asymmetric-canvas checks across NES, GB/GBC, SMS, PCE
+and WS. GBA/SNES dedicated live widescreen checks remain pending (their existing
+gameplay regressions passed; margin sampling has native adapter tests).
+The actual video-config serializer round-tripped the new settings. Debug/Release
+UI and native builds passed, and the Release executable/native dependency copy
+were verified. No visible desktop verification is claimed.
+
+2026-10-14: Decorative widescreen resumed. Initial shared canvas and settings are
+implemented: 16:9/21:9/custom ratio, centre/left/right viewport placement,
+0–100% side-brightness numeric input with 1% arrows, and per-background PNG
+margin opt-in (MBG9; old packets default off). Native gameplay pixels remain
+unchanged; margins use matching PNGs with existing scroll/camera/alpha rules.
+Managed/native checks and a live NES NROM sprite-0 split fixture cover ratios,
+placement, arbitrary brightness, opt-in, signed CPU camera and disabling.
+Cross-system live/visible verification, custom side widths, edge fade, automatic
+camera-boundary sliding and per-game presentation settings remain pending.
+Debug/Release native compositor suites and live NROM widescreen checks passed;
+the hidden NES editor save/reload suite passed and exited cleanly. Debug UI and
+Release UI/native builds succeeded; the Release executable is present. Hidden
+checks do not replace visible desktop verification.
+This does not complete the overall metasprite goal.
+
+The previously planned write-event plus RAM-context selection is now implemented
+across the requested systems. Context-only changes do not trigger playback. See
+the current audio progress above; real-game listening remains deferred.
+
+The approved shared music/SFX editor, write-event rules, whole-native-output mute,
+music looping and overlap/retrigger policy are now implemented. Native/music and
+per-track volumes are present; a separate global effect volume remains planned.
+Command addresses still require pack-author knowledge of the game/driver. Audio
+packs remain separate from PNG packs.
+
+Decorative widescreen was originally deferred; its initial implementation is
+recorded above. The remaining proposal
 includes aspect-ratio/custom-width controls, per-PNG margin extension, side
-brightness/edge fade, and optional gameplay-viewport sliding at configured CPU
+brightness through a 0–100% numeric box with up/down arrows and 1% steps,
+optional edge fade, and optional gameplay-viewport sliding at configured CPU
 camera boundaries. It adds scenery outside the native viewport without expanding
-game logic. Implementation and verification are deferred and do not block the
-current goal.
+game logic. Remaining implementation and verification are still pending.
 
 Future goal addition: per-PNG background Normal alpha/Add/Subtract blend modes
 across all supported systems, optional opacity/strength, PNG-alpha preservation,
@@ -124,14 +1055,14 @@ not establish completion of the full objective.
 | Click/numeric origins, scale and pose alignment | Default/alternate canvas events, numeric controls, persisted origin and pose-family tests | Verified; clicks now always enabled |
 | Content/relative-layout recognition rather than hardware indices | Shared managed matcher and native decoded candidates; reordered-index and incomplete-group checks | Verified in fixture coverage |
 | Replacement PNG alpha governs artwork | Exact 256-alpha-value PNG round trip; shared/GBA/SNES crossing-canvas regression with opaque/transparent/partial-alpha front PNGs in both pack orders | Full-canvas paths verified by native fixtures; unreplaced lower sprite reveal remains to verify |
-| Full PNG canvas replaces HDnes-style additions | Shared complete-canvas compositor, native 1x/2x/3x and alternate checks; Debug/Release whole-frame NES NROM, GB/GBC ROM-only, single-VDC PCE, SMS Mode 4, two GBA cases, three SNES lowres plus nine no-math hires cases and 17 WS color/monochrome gameplay checks; synthetic ordering/background gating | Implemented for these fixture scopes; PCE SuperGrafx/PNG priority transitions, broader WS combinations, broader GBA effects/transforms and SNES hires color math/interlace remain unfinished |
+| Full PNG canvas replaces HDnes-style additions | Shared complete-canvas compositor, native 1x/2x/3x and alternate checks; Debug/Release whole-frame NES NROM, GB/GBC ROM-only, single-VDC PCE, SMS Mode 4 and legacy graphics/text, two GBA cases, three SNES lowres plus nine no-math hires cases and 17 WS color/monochrome gameplay checks; synthetic ordering/background gating | Implemented for these fixture scopes; PCE SuperGrafx/PNG priority transitions, broader WS combinations, broader GBA effects/transforms and SNES hires color math/interlace remain unfinished |
 | PNG dimensions need not divide evenly by scale | All eight hidden viewer configurations import/persist 17x19 default/alternate PNGs at scale 2; native final-corner and packet checks; complete PNG alpha round trip | Verified for authoring/loading and tested renderer scope; background wrap canvas validation remains separate |
 | System-specific clipping, visibility and priority | Native fixtures listed in metasprite-replacement.md | Verified for tested modes; broader scope incomplete below |
 | Background PNG export/import/placement/scrolling/composition | All eight authoring suites and native gameplay fixtures | Verified for tested hardware modes; resize repair and failed replacement save covered |
 | User-defined background scroll speed per axis | Persisted X/Y multipliers, MBG4 transport, native offset/wrap sampling; managed/native tests, live WS half/reverse rate fixtures and hidden SNES save/reload | Implemented; broader transformed/raster/rollover gameplay coverage pending |
 | NES background PNG ignores raster scroll changes | Per-layer toggle/reference scanline, MBG5 transport, uncropped-frame reference preparation; native split/crop/fallback tests, live NROM sprite-0-hit fixture and hidden NES authoring | Implemented; broader game-specific split coverage remains unverified |
-| Independent PNG background priority layers across all seven systems | Added to goal by user on 2026-10-13; four HDnes-style bands with ten ordered slots each, with system-specific layer/priority mapping | Required; implementation and verification pending |
-| Per-replacement Hide original layer toggle | UI/JSON/MBG6; shared/GBA/SNES suppression; native alpha/reveal/gating checks, live PCE, 21 WS and 9 GB/GBC Debug/Release cases, hidden GBA authoring | Implemented for tested scopes; live overlapping sprites under hidden GB windows, SNES lower OBJ and broader native capture/effect coverage remain incomplete |
+| Independent PNG background priority layers across all seven systems | Added to goal by user on 2026-10-13; four HDnes-style bands with ten ordered slots each, with system-specific layer/priority mapping | Initial integration implemented: NES/GB/GBC/PCE/SMS/WS insertion bands, native ordering, final foreground overlay and independent GBA/SNES hardware priorities; broader cross-system verification remains pending |
+| Per-replacement Hide original layer toggle | UI/JSON/MBG6; shared/GBA/SNES suppression; native alpha/reveal/gating checks, live PCE, 21 WS and 9 GB/GBC Debug/Release cases, hidden GBA authoring; ordinary SNES lower-OBJ reveal now has live window/math checks | Implemented for tested scopes; live overlapping sprites under hidden GB windows, broader SNES field/lower-OBJ effects and other native capture coverage remain incomplete |
 | Alternate artwork and required background CPU checks | Packet filtering, masked condition authoring, live SNES WRAM transitions | Verified; draft alternates remain inactive and backgrounds require configured checks |
 | CPU operators ==, !=, >, <, >=, <= | Shared managed/native unsigned masked comparisons, JSON/editor round trips, MSP4/MBG3 transport and invalid-operator rejection | Implemented for groups, alternates and backgrounds; native Debug/Release tests pass, with live WonderSwan activation coverage |
 | Read only configured CPU addresses | CompileMemoryAddresses and CaptureMemorySnapshot iterate only compiled condition addresses; native snapshots tested with one/two configured bytes | Verified; no full-memory snapshot path is used for replacement conditions |
@@ -156,7 +1087,8 @@ hide-layer native/replacement sprite reveal, partial PNG alpha, condition mismat
 restoration and toggle-off overlay behavior. Optimized Release UI compilation
 passes with no warnings/errors and Mesen.exe is present alongside the updated
 core. This artifact includes the hide-layer work within its verified scopes;
-GB window underlay, SNES lower OBJ and other listed rendering gaps remain open.
+Broader GB window overlap, SNES field/lower-OBJ effects and other listed rendering
+gaps remain open; ordinary SNES lower-OBJ reveal is covered by the entry above.
 
 Hide-original-layer preparation now captures the native backdrop separately from
 the visible tile color in NES, GB/GBC, PCE, SMS and WonderSwan frames. This is
@@ -459,8 +1391,8 @@ two-pixel OBJ mosaic case also passes: the captured transformed pattern retains
 its x=5 boundary while native displayed pairs move it to x=6, checked separately.
 Recognition, PNG alpha, shifted full canvas and native mosaic restoration pass.
 The replacement PNG is rendered at its authored resolution; this test does not
-establish hardware mosaic processing of replacement artwork. Vertical mosaic and
-broader mosaic/effect combinations still need dedicated
+establish hardware mosaic processing of replacement artwork. Vertical affine mosaic now has the representative live coverage recorded above;
+other mosaic sizes and broader mosaic/effect combinations still need dedicated
 live checks.
 
 GBA ordinary unreplaced lower-OBJ reveal is now implemented. While capture is

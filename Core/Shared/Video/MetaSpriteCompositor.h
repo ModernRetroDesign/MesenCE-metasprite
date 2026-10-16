@@ -18,6 +18,7 @@ struct MetaSpriteGraphic
 	uint8_t SnesPriorityCode = 0xFF, SnesPalette = 0;
 	uint16_t SnesFetchOrder = 0;
 	uint8_t SnesField = 0;
+	uint8_t SnesRowStep = 1, SnesRowPhase = 0;
 	int GetExpansionOrder() const { return ExpansionOrder >= 0 ? ExpansionOrder : HardwareSprite; }
 };
 
@@ -173,6 +174,55 @@ public:
 	static SnesResolvedScreen ComposeSnesBackgroundScreen(const SnesPreparedScreen& screen, const MetaBackgroundView& backgrounds,
 		bool mainScreen, int x, int y, int sx, int sy, int scale, bool objectVisible, uint32_t objectColor, uint8_t objectPriority, bool objectMath)
 	{
+		if(backgrounds.HasSnesIndependentPriority()) {
+			struct Entry { const MetaSnesBackgroundLayer* Source; const MetaBackgroundReplacement* Artwork; uint32_t Color; uint8_t Priority; };
+			// Main/subscreen resolution is synchronous and nonrecursive. Reuse
+			// per-thread storage rather than allocate it for every output texel.
+			thread_local std::vector<Entry> entries; entries.clear(); entries.reserve(screen.Count + backgrounds.Layers.size());
+			for(int i = 0; i < screen.Count; i++) {
+				const auto& prepared = screen.Layers[i]; const auto& layer = *prepared.Source;
+				if(!(mainScreen ? layer.Main : layer.Sub)) { continue; }
+				entries.push_back({&layer, nullptr, prepared.Color, layer.Priority});
+			}
+			// Add authored layers after native layers, so PNG wins a BG tie.
+			// Stable sorting retains saved draw order among equal-priority PNGs.
+			for(const auto& background : backgrounds) {
+				if(background.CompositionPosition != 3) { continue; }
+				for(int i = 0; i < screen.Count; i++) {
+					const auto& layer = *screen.Layers[i].Source;
+					if(layer.Sample.Layer != background.Layer || !(mainScreen ? layer.Main : layer.Sub)) { continue; }
+					entries.push_back({&layer, &background, 0, (uint8_t)background.SnesPriority}); break;
+				}
+			}
+			auto* data = entries.data();
+			for(size_t i = 1; i < entries.size(); i++) {
+				auto entry = data[i]; size_t position = i;
+				while(position && data[position - 1].Priority > entry.Priority) { data[position] = data[position - 1]; position--; }
+				data[position] = entry;
+			}
+			SnesResolvedScreen result {screen.Backdrop, 0, screen.BackdropMath}; bool objectDrawn = false;
+			for(size_t index = 0; index < entries.size(); index++) {
+				const auto& entry = data[index];
+				if(objectVisible && !objectDrawn && objectPriority < entry.Priority) { result = {objectColor, objectPriority, objectMath}; objectDrawn = true; }
+				const auto& layer = *entry.Source;
+				if(entry.Artwork) {
+					uint32_t artwork;
+					if(backgrounds.Sample(*entry.Artwork, layer.Sample, x, y, sx, sy, scale, artwork, true) && (artwork >> 24)) {
+						result = {CompositeAlpha(artwork, result.Color, artwork >> 24), entry.Priority, layer.Math};
+					}
+				} else {
+					bool opaque = layer.Opaque && !backgrounds.HidesNativeLayer(layer.Sample.Layer);
+					uint32_t color = opaque ? entry.Color : result.Color;
+					for(const auto& background : backgrounds) {
+						uint32_t artwork;
+						if(backgrounds.Sample(background, layer.Sample, x, y, sx, sy, scale, artwork) && (artwork >> 24)) { color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true; }
+					}
+					if(opaque) { result = {color, entry.Priority, layer.Math}; }
+				}
+			}
+			if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath}; }
+			return result;
+		}
 		// Retain enabled layers even at transparent native texels. PNG alpha overlays
 		// its own native layer, then layer priority determines OBJ/BG occlusion.
 		// Each alpha outcome supplies an opaque OBJ color here. Lower BG layers
@@ -251,7 +301,7 @@ public:
 		}
 		struct Layer { int Index, Priority; uint32_t Color; bool SemiTransparent; bool Artwork = false; };
 		std::vector<Layer> storage;
-		storage.reserve(objects ? objects->size() + 5 : 6);
+		storage.reserve((objects ? objects->size() + 5 : 6) + backgrounds.Layers.size());
 		if(objects) {
 			for(const auto& object : *objects) { storage.push_back({4, object.Priority, object.Color, object.SemiTransparent, !object.Native}); }
 		} else if(overrideObject || pixel.GbaObjectSprite >= 0) {
@@ -260,6 +310,14 @@ public:
 		}
 		for(int i = 0; i < 4; i++) {
 			if(!pixel.GbaBackgroundSamples[i].Valid) { continue; }
+			// Insert independent PNGs as separate layers. Reversing saved order
+			// puts higher authored slots first at a hardware-priority tie.
+			const auto* backgroundData = backgrounds.Layers.data();
+			for(size_t entry = backgrounds.Layers.size(); entry > 0; --entry) {
+				const auto& background = *backgroundData[entry - 1]; uint32_t artwork;
+				if(background.CompositionPosition != 2 || !backgrounds.Sample(background, pixel.GbaBackgroundSamples[i], x, y, sx, sy, scale, artwork, true)) { continue; }
+				storage.push_back({i, background.GbaPriority, artwork, false, true});
+			}
 			uint32_t color = pixel.GbaBackgroundLayers[i].Opaque && !backgrounds.HidesNativeLayer(i) ? Rgb555(pixel.GbaBackgroundLayers[i].Color) : 0;
 			bool artworkUsed = false;
 			for(const auto& background : backgrounds) {
@@ -341,6 +399,9 @@ public:
 		std::vector<bool> invalid;
 		for(const auto& row : frame.DecodedRows) {
 			if(row.Sprite < 0 || row.Width < 1 || row.Width > 128 || row.Height < 1 || row.Height > 128
+				|| (row.SnesRowStep != 1 && row.SnesRowStep != 2) || row.SnesRowPhase >= row.SnesRowStep
+				|| (row.SnesRowStep == 2 && (!frame.SnesColorEffects || row.SnesPriorityCode > 3 || row.Height < 2))
+				|| row.Row % row.SnesRowStep != row.SnesRowPhase
 				|| row.Row < 0 || row.Row >= row.Height || row.OffsetX < 0 || row.OffsetX >= row.Width
 				|| row.Pixels.empty() || row.Pixels.size() > (size_t)(row.Width - row.OffsetX)) { continue; }
 			auto found = std::find_if(result.begin(), result.end(), [&](const auto& item) { return item.HardwareSprite == row.Sprite; });
@@ -354,10 +415,12 @@ public:
 				found->SnesPriorityCode = row.SnesPriorityCode;
 				found->SnesPalette = row.SnesPalette;
 				found->SnesField = row.SnesField;
+				found->SnesRowStep = row.SnesRowStep; found->SnesRowPhase = row.SnesRowPhase;
 			}
 			found->SnesFetchOrder = std::max(found->SnesFetchOrder, row.SnesFetchOrder);
 			size_t index = found - result.begin();
-			if(found->X != row.X || found->Y != row.Y || found->Width != row.Width || found->Height != row.Height) { invalid[index] = true; continue; }
+			if(found->X != row.X || found->Y != row.Y || found->Width != row.Width || found->Height != row.Height
+				|| found->SnesRowStep != row.SnesRowStep || found->SnesRowPhase != row.SnesRowPhase) { invalid[index] = true; continue; }
 			size_t offset = row.Row * row.Width + row.OffsetX;
 			for(size_t x = 0; x < row.Pixels.size(); x++) {
 				if(observed[index][offset + x] && found->Pixels[offset + x] != row.Pixels[x]) { invalid[index] = true; }
@@ -367,12 +430,36 @@ public:
 		}
 		std::vector<MetaSpriteGraphic> complete;
 		for(size_t i = 0; i < result.size(); i++) {
-			if(!invalid[i] && std::all_of(observed[i].begin(), observed[i].end(), [](bool value) { return value; })) { complete.push_back(std::move(result[i])); }
+			bool completeRows = !invalid[i];
+			for(int y = result[i].SnesRowPhase; completeRows && y < result[i].Height; y += result[i].SnesRowStep) {
+				for(int x = 0; x < result[i].Width; x++) { if(!observed[i][y * result[i].Width + x]) { completeRows = false; break; } }
+			}
+			if(completeRows) { complete.push_back(std::move(result[i])); }
 		}
 		return complete;
 	}
 
+	// Compare only explicitly captured source rows. PNG alpha is unrelated to
+	// this content recognition; saved members always contain the full artwork.
+	static bool MatchesGraphic(const MetaSpriteGraphic& candidate, const MetaSpriteGraphic& member)
+	{
+		if(candidate.Width != member.Width || candidate.Height != member.Height || candidate.Width < 1 || candidate.Height < 1
+			|| candidate.Pixels.size() != (size_t)candidate.Width * candidate.Height || member.Pixels.size() != candidate.Pixels.size()
+			|| (candidate.SnesRowStep != 1 && candidate.SnesRowStep != 2) || candidate.SnesRowPhase >= candidate.SnesRowStep
+			|| (candidate.SnesRowStep == 2 && candidate.Height < 2)) { return false; }
+		if(candidate.SnesRowStep == 1) { return candidate.Pixels == member.Pixels; }
+		for(int y = candidate.SnesRowPhase; y < candidate.Height; y += candidate.SnesRowStep) {
+			for(int x = 0; x < candidate.Width; x++) { if(candidate.Pixels[y * candidate.Width + x] != member.Pixels[y * candidate.Width + x]) { return false; } }
+		}
+		return true;
+	}
+
 	uint32_t GetOutputScale() const { return _outputScale; }
+	std::shared_ptr<const std::vector<MetaBackgroundReplacement>> GetBackgroundLayers()
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		return _backgroundLayers;
+	}
 	static std::vector<MetaSpriteGraphic> BuildNesCandidates(const MetaSpriteFrame& frame, const std::function<uint32_t(uint16_t)>& nativeColor)
 	{
 		if(!nativeColor) { return {}; }
@@ -491,6 +578,35 @@ public:
 			bool cameraValid = !layer.UseCpuCamera || !layer.FollowScroll || (layer.CameraX.Decode(frame.MemorySnapshot, cameraX) && layer.CameraY.Decode(frame.MemorySnapshot, cameraY));
 			if(layer.IsValid() && cameraValid && MetaMemoryCondition::Matches(layer.MemoryConditions, frame.MemorySnapshot)) { _activeBackgrounds.Layers.push_back(&layer); }
 		} }
+		bool applyForegroundBackgrounds = std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 1; });
+		bool wsNeedsStages = frame.WsCapture && ((groups && !groups->empty())
+			|| std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; }));
+		// Assets can activate after this frame's capture began. Wait for complete
+		// BG stages rather than partially hiding/drawing a pack during that frame.
+		if(wsNeedsStages && frame.BackgroundUnderlays.size() != frame.Pixels.size()) { return original; }
+		bool applyOrderedSpriteScene = backgroundColor && !frame.GbaColorEffects && !frame.SnesColorEffects
+			&& (!frame.WsCapture || frame.BackgroundUnderlays.size() == frame.Pixels.size())
+			&& (std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition >= 4; })
+				|| (!frame.NesRows.empty() && std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.NativeBackdropCaptured; })
+					&& ((groups && !groups->empty()) || std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0; }))));
+		bool gameboyScene = backgroundColor && (frame.GameboyCapture || !frame.Rows.empty()) && frame.NesRows.empty() && frame.DecodedRows.empty()
+			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.NativeBackdropCaptured; })
+			&& ((groups && !groups->empty()) || std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; }));
+		// Select an OBJ before deciding whether BG hides that OBJ.
+		applyOrderedSpriteScene |= gameboyScene;
+		bool pceScene = backgroundColor && frame.PceCapture
+			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.NativeBackdropCaptured; })
+			&& ((groups && !groups->empty()) || std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; }));
+		applyOrderedSpriteScene |= pceScene;
+		bool smsScene = backgroundColor && frame.SmsCapture
+			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.NativeBackdropCaptured; })
+			&& ((groups && !groups->empty()) || std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; }));
+		applyOrderedSpriteScene |= smsScene;
+		bool wsScene = backgroundColor && frame.WsCapture && frame.BackgroundUnderlays.size() == frame.Pixels.size()
+			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.NativeBackdropCaptured; })
+			&& ((groups && !groups->empty()) || std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; }));
+		applyOrderedSpriteScene |= wsScene;
+		bool decodedScene = pceScene || smsScene || wsScene;
 		bool applyBackgrounds = !_activeBackgrounds.Layers.empty() && backgroundColor && !frame.GbaColorEffects && !frame.SnesColorEffects
 			&& frame.Pixels.size() == (size_t)frame.Width * frame.Height
 			&& std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.BackgroundSample.Valid; });
@@ -510,17 +626,21 @@ public:
 		}
 		if(!original || frame.SpriteCoordinateScale < 1 || frame.SpriteCoordinateScale > 2 || cropLeft < 0 || cropTop < 0 || width + cropLeft > frame.Width || height + cropTop > frame.Height
 			|| frame.Pixels.size() != static_cast<uint64_t>(frame.Width) * frame.Height
-			|| ((!groups || groups->empty()) && !applyBackgrounds && !applyGbaBackgrounds && !applySnesBackgrounds)) { return original; }
+			|| ((!groups || groups->empty()) && !applyBackgrounds && !applyGbaBackgrounds && !applySnesBackgrounds && !applyForegroundBackgrounds && !applyOrderedSpriteScene)) { return original; }
 		if(!groups) { groups = std::make_shared<const std::vector<MetaSpriteReplacement>>(); }
 		auto candidates = !frame.NesRows.empty() ? BuildNesCandidates(frame, backgroundColor)
 			: frame.DecodedRows.empty() ? BuildGameboyCandidates(frame) : BuildDecodedCandidates(frame);
 		for(const auto& group : *groups) {
-			if(MetaMemoryCondition::Matches(group.MemoryConditions, frame.MemorySnapshot)) {
-				auto artwork = group.SelectArtwork(frame.MemorySnapshot);
-				_outputScale = std::max(_outputScale, (uint32_t)((std::clamp(artwork.ArtworkScale, 1, 10) + frame.SpriteCoordinateScale - 1) / frame.SpriteCoordinateScale));
-			}
+			auto includeScale = [&](const MetaMemorySnapshot& snapshot) {
+				if(MetaMemoryCondition::Matches(group.MemoryConditions, snapshot)) {
+					auto artwork = group.SelectArtwork(snapshot);
+					_outputScale = std::max(_outputScale, (uint32_t)((std::clamp(artwork.ArtworkScale, 1, 10) + frame.SpriteCoordinateScale - 1) / frame.SpriteCoordinateScale));
+				}
+			};
+			includeScale(frame.MemorySnapshot);
+			if(frame.SnesFieldMemoryCaptured) { includeScale(frame.SnesFieldMemory[0]); includeScale(frame.SnesFieldMemory[1]); }
 		}
-		if(applyBackgrounds || applyGbaBackgrounds || applySnesBackgrounds) { for(const auto& layer : _activeBackgrounds) { if(layer.IsValid()) { _outputScale = std::max(_outputScale, (uint32_t)layer.Scale); } } }
+		if(applyBackgrounds || applyGbaBackgrounds || applySnesBackgrounds || applyForegroundBackgrounds || applyOrderedSpriteScene) { for(const auto& layer : _activeBackgrounds) { if(layer.IsValid()) { _outputScale = std::max(_outputScale, (uint32_t)layer.Scale); } } }
 		uint32_t outputWidth = width * _outputScale;
 		_output.resize((size_t)outputWidth * height * _outputScale);
 		bool stagedEffects = frame.GbaColorEffects || frame.SnesColorEffects;
@@ -550,7 +670,7 @@ public:
 			}
 		}
 		std::vector<uint32_t> generatedFallback;
-		if(applyBackgrounds) {
+		if(applyBackgrounds && !applyOrderedSpriteScene) {
 			const MetaSpriteFrame* backgroundFrame = &frame;
 			std::unique_ptr<MetaSpriteFrame> croppedBackground;
 			if(cropLeft || cropTop || width != frame.Width || height != frame.Height) {
@@ -584,13 +704,19 @@ public:
 		std::vector<SnesCanvas> snesCanvases;
 		bool hasCanvasDestinations = std::any_of(frame.Pixels.begin(), frame.Pixels.end(), [](const auto& pixel) { return pixel.ExpandedSpriteClasses != 0 || pixel.ExpandedSpriteClassesWithoutBackground != 0; });
 		for(const auto& group : *groups) {
-			if(!MetaMemoryCondition::Matches(group.MemoryConditions, frame.MemorySnapshot)) { continue; }
-			auto artwork = group.SelectArtwork(frame.MemorySnapshot);
-			if(group.Members.empty() || artwork.ArtworkScale < 1 || artwork.ArtworkWidth < 1 || artwork.ArtworkHeight < 1
-				|| artwork.Artwork.size() != (size_t)artwork.ArtworkWidth * artwork.ArtworkHeight) { continue; }
+			if(group.Members.empty()) { continue; }
+			if(!MetaMemoryCondition::Matches(group.MemoryConditions,frame.MemorySnapshot)
+				&& (!frame.SnesFieldMemoryCaptured || (!MetaMemoryCondition::Matches(group.MemoryConditions,frame.SnesFieldMemory[0])
+					&& !MetaMemoryCondition::Matches(group.MemoryConditions,frame.SnesFieldMemory[1])))) { continue; }
 			const auto& anchor = group.Members[0];
 			for(size_t i = 0; i < candidates.size(); i++) {
-				if(consumed[i] || candidates[i].Width != anchor.Width || candidates[i].Height != anchor.Height || candidates[i].Pixels != anchor.Pixels) { continue; }
+				if(consumed[i] || !MatchesGraphic(candidates[i], anchor)) { continue; }
+				uint8_t field=candidates[i].SnesField;
+				const auto& snapshot=frame.SnesFieldMemoryCaptured && field>=1 && field<=2 ? frame.SnesFieldMemory[field-1] : frame.MemorySnapshot;
+				if(!MetaMemoryCondition::Matches(group.MemoryConditions,snapshot)) { continue; }
+				auto artwork=group.SelectArtwork(snapshot);
+				if(artwork.ArtworkScale<1 || artwork.ArtworkWidth<1 || artwork.ArtworkHeight<1
+					|| artwork.Artwork.size()!=(size_t)artwork.ArtworkWidth*artwork.ArtworkHeight) { continue; }
 				int left = candidates[i].X - anchor.X, top = candidates[i].Y - anchor.Y;
 				matched.clear();
 				matched.push_back(i);
@@ -599,7 +725,9 @@ public:
 					for(size_t j = 0; j < candidates.size(); j++) {
 						const auto& candidate = candidates[j];
 						if(candidate.X == left + member.X && candidate.Y == top + member.Y && candidate.Width == member.Width && candidate.Height == member.Height
-							&& candidate.SnesField == candidates[i].SnesField && !consumed[j] && candidate.Pixels == member.Pixels && std::find(matched.begin(), matched.end(), j) == matched.end()) { matched.push_back(j); break; }
+							&& candidate.SnesField == candidates[i].SnesField && candidate.SnesRowStep == candidates[i].SnesRowStep
+							&& candidate.SnesRowPhase == candidates[i].SnesRowPhase && !consumed[j] && MatchesGraphic(candidate, member)
+							&& std::find(matched.begin(), matched.end(), j) == matched.end()) { matched.push_back(j); break; }
 					}
 					if(matched.size() != m + 1) { break; }
 				}
@@ -637,6 +765,7 @@ public:
 				if(fullCanvas) {
 					expansions.push_back({artwork, artworkLeft, artworkTop, candidates[front].GetExpansionOrder(), candidates[front].ExpansionClass, matched});
 				}
+				if(applyOrderedSpriteScene) { continue; }
 				// Include both artwork and fetched members: a smaller/shifted PNG
 				// must still remove original pixels outside its own canvas.
 				int64_t boundLeft = artworkLeft, boundTop = artworkTop;
@@ -752,7 +881,7 @@ public:
 						for(const auto& layer : _activeBackgrounds) {
 							uint32_t color;
 							if(layer.HideOriginalLayer && layer.Layer >= 0 && layer.Layer < 4 && pixel.GbaBackgroundSamples[layer.Layer].Valid) { changed = true; break; }
-							if(layer.Layer < 4 && layer.Layer >= 0 && _activeBackgrounds.Sample(layer, pixel.GbaBackgroundSamples[layer.Layer], x / _outputScale + cropLeft, y / _outputScale + cropTop, x % _outputScale, y % _outputScale, _outputScale, color) && (color >> 24)) { changed = true; break; }
+							if(layer.Layer < 4 && layer.Layer >= 0 && _activeBackgrounds.Sample(layer, pixel.GbaBackgroundSamples[layer.Layer], x / _outputScale + cropLeft, y / _outputScale + cropTop, x % _outputScale, y % _outputScale, _outputScale, color, layer.CompositionPosition == 2) && (color >> 24)) { changed = true; break; }
 						}
 						if(changed) {
 							uint16_t state = gbaObjectState[offset];
@@ -784,10 +913,23 @@ public:
 									uint8_t mainPriority = !removeMain && snesMainCoverage[offset] ? snesMainCoverage[offset]->Priority : backgrounds->MainPriority;
 									uint8_t subPriority = !removeSub && snesSubCoverage[offset] ? snesSubCoverage[offset]->Priority : backgrounds->SubPriority;
 									int px = x / _outputScale + cropLeft, py = y / _outputScale + cropTop;
+									bool mainObject = !mainBackground, subObject = !subBackground;
+									bool mainMath = state.SnesMathEnabled;
+									// Native BG occlusion does not discard the fetched OBJ. Reselect
+									// it when hiding/reprioritizing artwork, retaining OBJ windows.
+									if(pixel.SnesObjectSprite >= 0 && pixel.SnesObjectPriorityCode <= 3) {
+										if(mainBackground && pixel.VisibleSprite < 0 && pixel.SnesObjectsMain) {
+											mainObject = true; main = Rgb555(pixel.SnesObjectColor); mainPriority = pixel.SnesObjectPriorities[pixel.SnesObjectPriorityCode];
+											mainMath = pixel.SnesObjectMath && pixel.SnesObjectPalette > 3;
+										}
+										if(subBackground && pixel.SecondarySprite < 0 && pixel.SnesObjectsSub) {
+											subObject = true; secondary = Rgb555(pixel.SnesObjectColor); subPriority = pixel.SnesObjectPriorities[pixel.SnesObjectPriorityCode];
+										}
+									}
 									auto resolvedMain = ComposeSnesBackgroundScreen(snesBackgroundRow[x / _outputScale], _activeBackgrounds, true, px, py, x % _outputScale, y % _outputScale,
-										_outputScale, !mainBackground, main, mainPriority, state.SnesMathEnabled);
+										_outputScale, mainObject, main, mainPriority, mainMath);
 									auto resolvedSub = ComposeSnesBackgroundScreen(snesBackgroundRow[x / _outputScale], _activeBackgrounds, false, px, py, x % _outputScale, y % _outputScale,
-										_outputScale, !subBackground, secondary, subPriority, false);
+										_outputScale, subObject, secondary, subPriority, false);
 									main = resolvedMain.Color; secondary = resolvedSub.Color;
 									state.SnesMathEnabled = resolvedMain.Math && pixel.SnesWindowMathAllowed;
 									state.SnesUseSubscreen = pixel.SnesAddSubscreen && resolvedSub.Priority > 0;
@@ -896,28 +1038,58 @@ public:
 				const auto& pixel = framePixels[py * frame.Width + px];
 				if(!pixel.SnesFallbackCaptured) { continue; }
 				bool replacedNative = pixel.SnesObjectSprite >= 0 && std::any_of(candidates.begin(), candidates.end(), [&](const auto& candidate) {
-					return candidate.HardwareSprite == pixel.SnesObjectSprite && candidate.SnesPriorityCode <= 3 && consumed[&candidate - candidates.data()];
+					return candidate.HardwareSprite == pixel.SnesObjectSprite && candidate.SnesPriorityCode <= 3
+						&& (candidate.SnesRowStep == 1 || pixel.SnesObjectSourceY >= 0) && consumed[&candidate - candidates.data()];
 				});
 				objects.clear(); bool changed = replacedNative;
 				auto objectOrder = [&](int id) { return (uint16_t)(128 - ((id - pixel.SnesFirstObject + 128) & 127)); };
 				for(const auto& canvas : snesCanvases) {
 					uint8_t field = candidates[canvas.Members.front()].SnesField;
 					if(field && field != pixel.SnesField) { continue; }
+					bool sourceRows = candidates[canvas.Members.front()].SnesRowStep == 2;
+					if(sourceRows && pixel.SnesObjectSourceY < 0) { continue; }
 					const auto& image = canvas.Image;
 					int64_t relativeX = (int64_t)px * _outputScale + x % _outputScale - (int64_t)canvas.Left * frame.SpriteCoordinateScale * _outputScale;
 					int64_t relativeY = ((int64_t)py + pixel.SnesOutputSampleOffsetY) * _outputScale + y % _outputScale - ((int64_t)canvas.Top * frame.SpriteCoordinateScale + frame.SnesOutputOffsetY) * _outputScale;
+					if(sourceRows) { relativeY = ((int64_t)pixel.SnesObjectSourceY - canvas.Top) * frame.SpriteCoordinateScale * _outputScale + (int64_t)(y % _outputScale) * 2; }
 					if(relativeX < 0 || relativeY < 0) { continue; }
 					int64_t ax = relativeX * image.ArtworkScale / (_outputScale * frame.SpriteCoordinateScale);
 					int64_t ay = relativeY * image.ArtworkScale / (_outputScale * frame.SpriteCoordinateScale);
 					if(ax >= image.ArtworkWidth || ay >= image.ArtworkHeight) { continue; }
-					size_t front = *std::max_element(canvas.Members.begin(), canvas.Members.end(), [&](size_t a, size_t b) { return objectOrder(candidates[a].HardwareSprite) < objectOrder(candidates[b].HardwareSprite); });
+					// Choose attributes by logical member rectangles, independently of
+					// artwork/source alpha and physical hires/bob sampling phases.
+					auto logical = [&](int64_t value) { return value / frame.SpriteCoordinateScale - (value % frame.SpriteCoordinateScale < 0 ? 1 : 0); };
+					int64_t logicalX = logical(px), logicalY = logical((int64_t)py + pixel.SnesOutputSampleOffsetY - frame.SnesOutputOffsetY);
+					if(sourceRows) { logicalY = pixel.SnesObjectSourceY; }
+					auto distance = [&](size_t index) {
+						const auto& member = candidates[index];
+						int64_t dx = std::max({(int64_t)member.X - logicalX, logicalX - member.X - member.Width + 1, int64_t(0)});
+						int64_t dy = std::max({(int64_t)member.Y - logicalY, logicalY - member.Y - member.Height + 1, int64_t(0)});
+						return dx * dx + dy * dy;
+					};
+					size_t front = *std::min_element(canvas.Members.begin(), canvas.Members.end(), [&](size_t a, size_t b) {
+						int64_t da = distance(a), db = distance(b);
+						return da != db ? da < db : objectOrder(candidates[a].HardwareSprite) > objectOrder(candidates[b].HardwareSprite);
+					});
 					const auto& member = candidates[front];
 					if(member.SnesPriorityCode > 3) { continue; }
 					objects.push_back({image.Artwork[ay * image.ArtworkWidth + ax], objectOrder(member.HardwareSprite), pixel.SnesObjectPriorities[member.SnesPriorityCode], pixel.SnesObjectMath && member.SnesPalette > 3});
 					changed = true;
 				}
 				if(!changed) { continue; }
-				if(pixel.SnesObjectSprite >= 0 && !replacedNative && pixel.SnesObjectPriorityCode <= 3) {
+				bool sampledWinner = false;
+				if(pixel.SnesNativeObjects.begin() != pixel.SnesNativeObjects.end()) {
+					for(const auto& native : pixel.SnesNativeObjects) {
+						if(native.Sprite < 0 || native.PriorityCode > 3 || native.Palette > 7) { continue; }
+						sampledWinner |= native.Sprite == pixel.SnesObjectSprite;
+						bool replaced = std::any_of(candidates.begin(), candidates.end(), [&](const auto& candidate) {
+							return candidate.HardwareSprite == native.Sprite && candidate.SnesPriorityCode <= 3
+								&& (candidate.SnesRowStep == 1 || pixel.SnesObjectSourceY >= 0) && consumed[&candidate - candidates.data()];
+						});
+						if(!replaced) { objects.push_back({Rgb555(native.Color), objectOrder(native.Sprite), pixel.SnesObjectPriorities[native.PriorityCode], pixel.SnesObjectMath && native.Palette > 3}); }
+					}
+				}
+				if(!sampledWinner && pixel.SnesObjectSprite >= 0 && !replacedNative && pixel.SnesObjectPriorityCode <= 3) {
 					objects.push_back({Rgb555(pixel.SnesObjectColor), objectOrder(pixel.SnesObjectSprite), pixel.SnesObjectPriorities[pixel.SnesObjectPriorityCode], pixel.SnesObjectMath && pixel.SnesObjectPalette > 3});
 				}
 				std::stable_sort(objects.begin(), objects.end(), [](const auto& a, const auto& b) { return a.Order > b.Order; });
@@ -963,7 +1135,7 @@ public:
 		// Source alpha must not select the winner between replacement canvases.
 		// Only unreplaced hardware sprites retain their captured occlusion.
 		std::vector<int> replacedOrders;
-		if(!expansions.empty() || (applyBackgrounds && _activeBackgrounds.HiddenNativeLayers)) {
+		if(!applyOrderedSpriteScene && (!expansions.empty() || (applyBackgrounds && _activeBackgrounds.HiddenNativeLayers))) {
 			for(size_t index = 0; index < candidates.size(); index++) {
 				const auto& candidate = candidates[index];
 				if(consumed[index] || !candidate.ExpansionClass) { continue; }
@@ -981,6 +1153,7 @@ public:
 		for(size_t index = 0; index < expansions.size(); index++) { expansionOrder.push_back(index); }
 		std::stable_sort(expansionOrder.begin(), expansionOrder.end(), [&](size_t a, size_t b) { return expansions[a].Order > expansions[b].Order; });
 		for(size_t index : expansionOrder) {
+			if(applyOrderedSpriteScene) { continue; }
 			const auto& expansion = expansions[index];
 			const auto& image = expansion.Image;
 			int64_t physicalLeft = (int64_t)expansion.Left * frame.SpriteCoordinateScale;
@@ -1019,7 +1192,6 @@ public:
 								if(!_activeBackgrounds.Sample(layer, lower.Sample, px, py, sx, sy, _outputScale, artwork)) { continue; }
 								uint32_t alpha = color >> 24;
 								color = (CompositeAlpha(artwork, color | 0xFF000000, artwork >> 24) & 0xFFFFFF) | (alpha << 24);
-								break;
 							}
 						}
 					}
@@ -1032,13 +1204,206 @@ public:
 							if(!_activeBackgrounds.Sample(layer, pixel.BackgroundSample, px, py, sx, sy, _outputScale, artwork)) { continue; }
 							uint32_t alpha = color >> 24;
 							color = (CompositeAlpha(artwork, color | 0xFF000000, artwork >> 24) & 0xFFFFFF) | (alpha << 24);
-							break; // Match direct-color background replacement precedence.
+							// Compose every matching PNG in the same order as the background pass.
 						}
 					}
 					size_t offset = (size_t)(y * _outputScale + sy) * outputWidth + x * _outputScale + sx;
 					outputPixels[offset] = CompositeAlpha(color, outputPixels[offset], color >> 24);
 				} }
 			} }
+		}
+		if(applyOrderedSpriteScene) {
+			// Resolve hardware-order sprite alpha outcomes before inserting BG bands.
+			// An opaque behind-BG sprite still blocks a later foreground sprite.
+			std::vector<std::vector<const MetaSpriteRow*>> rows(frame.Height);
+			for(const auto& row : gameboyScene ? frame.Rows : frame.NesRows) { if(row.Scanline < frame.Height && row.Sprite < (gameboyScene ? 40 : 64)) { rows[row.Scanline].push_back(&row); } }
+			std::vector<std::vector<const MetaSpriteDecodedRow*>> decodedRows(decodedScene ? frame.Height : 0);
+			if(decodedScene) { for(const auto& row : frame.DecodedRows) {
+				int64_t y = (int64_t)row.Y + row.Row;
+				if(row.Sprite >= 0 && row.Sprite < (wsScene ? 128 : 64) && row.Width > 0 && row.Width <= 128 && row.Height > 0 && row.Height <= 128 && row.Row >= 0 && row.Row < row.Height && y >= 0 && y < frame.Height && row.OffsetX >= 0 && row.OffsetX < row.Width && row.Pixels.size() <= (size_t)(row.Width - row.OffsetX)) { decodedRows[(size_t)y].push_back(&row); }
+			} }
+			bool fullFrame = std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 0 || layer->CompositionPosition >= 4; });
+			struct Draw { int Order; const MetaSpriteRow* Native; const ExpandedArtwork* Replacement; uint8_t Class = 0; const MetaSpriteDecodedRow* Decoded = nullptr; };
+			std::vector<Draw> draws; draws.reserve(64 + expansions.size());
+			for(uint32_t y = 0; y < height; y++) {
+				int py = (int)y + cropTop; draws.clear();
+				int firstX = fullFrame ? 0 : (int)width, lastX = fullFrame ? (int)width : 0;
+				auto include = [&](int64_t left, int64_t right) { firstX = std::min(firstX, (int)std::clamp<int64_t>(left - cropLeft, 0, width)); lastX = std::max(lastX, (int)std::clamp<int64_t>(right - cropLeft, 0, width)); };
+				for(const auto* row : rows[py]) {
+					include(row->X, row->X + 8); // Source rectangles still need clearing for a shifted/smaller PNG.
+					int order = gameboyScene && row->ExpansionOrder >= 0 ? row->ExpansionOrder : row->Sprite;
+					if(!std::binary_search(replacedOrders.begin(), replacedOrders.end(), order)) { draws.push_back({order, row, nullptr}); }
+				}
+				if(decodedScene) { for(const auto* row : decodedRows[py]) {
+					include((int64_t)row->X + row->OffsetX, (int64_t)row->X + row->OffsetX + row->Pixels.size());
+					if(!std::binary_search(replacedOrders.begin(), replacedOrders.end(), row->Sprite)) { draws.push_back({row->Sprite, nullptr, nullptr, row->ExpansionClass, row}); }
+				} }
+				for(const auto& image : expansions) {
+					if(!image.Native && py >= image.Top && (int64_t)(py - image.Top) * image.Image.ArtworkScale < image.Image.ArtworkHeight) {
+						draws.push_back({image.Order, nullptr, &image}); include(image.Left, (int64_t)image.Left + (image.Image.ArtworkWidth + image.Image.ArtworkScale - 1) / image.Image.ArtworkScale);
+					}
+				}
+				std::stable_sort(draws.begin(), draws.end(), [](const auto& a, const auto& b) { return a.Order < b.Order; });
+				const auto* drawData = draws.data();
+				for(int x = firstX; x < lastX; x++) {
+					int px = (int)x + cropLeft; const auto& pixel = framePixels[(size_t)py * frame.Width + px];
+					if(!pixel.NativeBackdropCaptured) { continue; }
+					bool memberOrder = false;
+					for(auto& draw : draws) {
+						if(!draw.Replacement) { continue; }
+						const auto& image = *draw.Replacement;
+						draw.Class = image.Class;
+						if(image.Members.size() < 2) { continue; }
+						// Member rectangles determine attributes, never original texel alpha.
+						// Margins inherit the nearest rectangle; ties use captured OBJ order.
+						auto distance = [&](size_t member) {
+							const auto& candidate = candidates[member];
+							int64_t dx = std::max({(int64_t)candidate.X - px, (int64_t)px - candidate.X - candidate.Width + 1, int64_t(0)});
+							int64_t dy = std::max({(int64_t)candidate.Y - py, (int64_t)py - candidate.Y - candidate.Height + 1, int64_t(0)});
+							return dx * dx + dy * dy;
+						};
+						size_t member = *std::min_element(image.Members.begin(), image.Members.end(), [&](size_t a, size_t b) {
+							int64_t da = distance(a), db = distance(b);
+							return da != db ? da < db : candidates[a].GetExpansionOrder() < candidates[b].GetExpansionOrder();
+						});
+						draw.Order = candidates[member].GetExpansionOrder(); draw.Class = candidates[member].ExpansionClass;
+						memberOrder = true;
+					}
+					if(memberOrder) { std::stable_sort(draws.begin(), draws.end(), [](const auto& a, const auto& b) { return a.Order < b.Order; }); }
+					for(uint32_t sy = 0; sy < _outputScale; sy++) { for(uint32_t sx = 0; sx < _outputScale; sx++) {
+						auto overlay = [&](int position, uint32_t color) {
+							for(const auto& layer : _activeBackgrounds) {
+								uint32_t artwork;
+								if(layer.CompositionPosition != position) { continue; }
+								bool sampled = _activeBackgrounds.Sample(layer, pixel.BackgroundSample, px, py, sx, sy, _outputScale, artwork, true);
+								if(!sampled && (gameboyScene || wsScene) && frame.BackgroundUnderlays.size() == frame.Pixels.size()) { sampled = _activeBackgrounds.Sample(layer, frame.BackgroundUnderlays[(size_t)py * frame.Width + px].Sample, px, py, sx, sy, _outputScale, artwork, true); }
+								if(sampled) { color = CompositeAlpha(artwork, color, artwork >> 24); }
+							} return color;
+						};
+						auto aboveBehind = [&](uint32_t color) {
+							color = overlay(5, color);
+							if(pixel.BackgroundColorIndex && !_activeBackgrounds.HidesNativeLayer(0)) { color = backgroundColor(pixel.BackgroundColor); }
+							return overlay(6, overlay(0, color));
+						};
+						uint32_t empty = aboveBehind(overlay(4, backgroundColor(pixel.NativeBackdropColor)));
+						auto priorityBackgroundOutcome = [&](uint32_t spriteColor, uint8_t spriteClass) {
+							bool hidden = pixel.BackgroundSample.Valid && _activeBackgrounds.HidesNativeLayer(pixel.BackgroundSample.Layer);
+							const auto* lower = hidden && frame.BackgroundUnderlays.size() == frame.Pixels.size() ? &frame.BackgroundUnderlays[(size_t)py * frame.Width + px] : nullptr;
+							bool lowerVisible = lower && lower->Sample.Valid && !_activeBackgrounds.HidesNativeLayer(lower->Sample.Layer);
+							uint8_t eligible = hidden ? (lowerVisible && lower->SpriteEligibilityCaptured ? lower->SpriteEligibleClasses : 3) : pixel.ExpandedSpriteClasses;
+							bool spriteVisible = spriteClass && (eligible & spriteClass);
+							uint32_t nativeColor = backgroundColor(hidden ? lowerVisible ? lower->Color : pixel.NativeBackdropColor : pixel.BackgroundColor);
+							bool opaque = hidden ? lowerVisible && lower->ColorIndex != 0 : pixel.BackgroundSample.Valid && pixel.BackgroundColorIndex != 0;
+							uint8_t mask = hidden ? lowerVisible ? lower->OverlayOccludesClasses : 0 : pixel.BackgroundOverlayOccludesClasses;
+							bool behind = spriteVisible && spriteClass == 2 && mask != 0;
+							uint32_t result = overlay(4, opaque ? backgroundColor(pixel.NativeBackdropColor) : nativeColor);
+							if(behind) { result = spriteColor; }
+							result = overlay(5, result);
+							if(opaque) { result = nativeColor; }
+							auto addPng = [&](const MetaBackgroundSample& sample, uint8_t occludes, bool front) {
+								if(front && !(occludes & spriteClass)) { return; }
+								for(const auto& layer : _activeBackgrounds) { uint32_t artwork; if(_activeBackgrounds.Sample(layer, sample, px, py, sx, sy, _outputScale, artwork)) {
+									// A priority BG PNG can hide an otherwise front OBJ. Resolve
+									// its alpha outcome under band 6, preserving uncovered OBJ.
+									uint32_t color = front ? overlay(6, artwork | 0xFF000000) : artwork;
+									result = CompositeAlpha(color, result, artwork >> 24);
+								} }
+							};
+							if(lower && lower->Sample.Valid) { addPng(lower->Sample, lower->OverlayOccludesClasses, false); }
+							addPng(pixel.BackgroundSample, pixel.BackgroundOverlayOccludesClasses, false);
+							result = overlay(6, result);
+							if(spriteVisible && !behind) {
+								result = spriteColor;
+								if(lower && lower->Sample.Valid) { addPng(lower->Sample, lower->OverlayOccludesClasses, true); }
+								addPng(pixel.BackgroundSample, pixel.BackgroundOverlayOccludesClasses, true);
+							}
+							return result;
+						};
+						if(gameboyScene || smsScene) { empty = priorityBackgroundOutcome(0, 0); }
+						auto wsOutcome = [&](uint32_t spriteColor, uint8_t spriteClass) {
+							const auto& pair = frame.BackgroundUnderlays[(size_t)py * frame.Width + px];
+							uint32_t result = backgroundColor(pixel.NativeBackdropColor);
+							auto nativePng = [&](const MetaBackgroundSample& sample) {
+								for(const auto& layer : _activeBackgrounds) { uint32_t artwork; if(_activeBackgrounds.Sample(layer, sample, px, py, sx, sy, _outputScale, artwork)) { result = CompositeAlpha(artwork, result, artwork >> 24); } }
+							};
+							if(pair.Sample.Valid && !_activeBackgrounds.HidesNativeLayer(pair.Sample.Layer)) { result = backgroundColor(pair.Color); }
+							nativePng(pair.Sample);
+							result = overlay(4, result);
+							if(spriteClass & 10) { result = spriteColor; }
+							result = overlay(5, result);
+							if(pair.ForegroundOpaque && !_activeBackgrounds.HidesNativeLayer(pair.ForegroundSample.Layer)) { result = backgroundColor(pair.ForegroundColor); }
+							nativePng(pair.ForegroundSample);
+							result = overlay(6, result);
+							if(spriteClass & 5) { result = spriteColor; }
+							return result;
+						};
+						if(wsScene) { empty = wsOutcome(0, 0); }
+						double channels[3] = {}, remainder = 1.0;
+						for(size_t d = 0; d < draws.size() && remainder > 0; d++) {
+							const auto& draw = drawData[d]; uint32_t color = 0; uint8_t spriteClass;
+							if(draw.Native) {
+								const auto& row = *draw.Native; int offset = px - row.X;
+								if(offset < 0 || offset >= 8) { continue; }
+								int bit = gameboyScene && (row.Attributes & 0x20) ? offset : 7-offset;
+								int index = ((row.LowByte >> bit) & 1) | (((row.HighByte >> bit) & 1) << 1);
+								if(!index) { continue; }
+								uint16_t nativeColor = gameboyScene && (row.OutputColorMask & (1 << offset)) ? row.OutputColors[offset]
+									: !gameboyScene && pixel.ExpandedSpriteOccluder == row.Sprite ? pixel.SpriteColor : row.Palette[index];
+								color = backgroundColor(nativeColor) | 0xFF000000;
+								spriteClass = row.Attributes & (gameboyScene ? 0x80 : 0x20) ? 2 : 1;
+							} else if(draw.Decoded) {
+								const auto& row = *draw.Decoded;
+								int64_t offset = (int64_t)px - row.X - row.OffsetX;
+								if(offset < 0 || offset >= (int64_t)row.Pixels.size()) { continue; }
+								color = row.Pixels[(size_t)offset];
+								if(!(color >> 24)) { continue; }
+								if(pixel.VisibleSprite == row.Sprite) { color = backgroundColor(pixel.SpriteColor) | 0xFF000000; }
+								spriteClass = row.ExpansionClass;
+							} else {
+								const auto& image = *draw.Replacement;
+								int64_t ax = ((int64_t)(px - image.Left) * _outputScale + sx) * image.Image.ArtworkScale / _outputScale;
+								int64_t ay = ((int64_t)(py - image.Top) * _outputScale + sy) * image.Image.ArtworkScale / _outputScale;
+								if(px < image.Left || ax < 0 || ay < 0 || ax >= image.Image.ArtworkWidth || ay >= image.Image.ArtworkHeight) { continue; }
+								color = image.Image.Artwork[(size_t)ay * image.Image.ArtworkWidth + ax]; spriteClass = draw.Class;
+							}
+							if(!(pixel.ExpandedSpriteClassesWithoutBackground & spriteClass) || !(color >> 24)) { continue; }
+							double weight = remainder * (color >> 24) / 255.0;
+							uint32_t outcome = wsScene ? wsOutcome(color | 0xFF000000, spriteClass) : gameboyScene || smsScene ? priorityBackgroundOutcome(color | 0xFF000000, spriteClass) : spriteClass == 2 ? aboveBehind(color | 0xFF000000) : color | 0xFF000000;
+							for(int c = 0; c < 3; c++) { channels[c] += ((outcome >> (c*8)) & 255) * weight; }
+							remainder *= (255 - (color >> 24)) / 255.0;
+						}
+						uint32_t result = 0xFF000000;
+						for(int c = 0; c < 3; c++) { result |= (uint32_t)std::clamp((int)(channels[c] + ((empty >> (c*8)) & 255) * remainder + 0.5), 0, 255) << (c*8); }
+						outputPixels[((size_t)y * _outputScale + sy) * outputWidth + x * _outputScale + sx] = result;
+					} }
+				}
+			}
+		}
+		if(applyForegroundBackgrounds) {
+			// A display overlay is intentionally outside native priority/color math.
+			// Samples retain the selected layer's coordinates and visibility mask.
+			for(const auto& layer : _activeBackgrounds) {
+				if(layer.CompositionPosition != 1) { continue; }
+				for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+					int px = (int)x + cropLeft, py = (int)y + cropTop;
+					size_t index = (size_t)py * frame.Width + px;
+					const auto& pixel = framePixels[index];
+					const MetaBackgroundSample* source = nullptr;
+					auto consider = [&](const MetaBackgroundSample& sample) { if(!source && sample.Valid && sample.Layer == layer.Layer) { source = &sample; } };
+					consider(pixel.BackgroundSample);
+					for(const auto& sample : pixel.GbaBackgroundSamples) { consider(sample); }
+					if(frame.SnesBackgrounds.size() == frame.Pixels.size()) { for(const auto& bg : frame.SnesBackgrounds[index].Layers) { consider(bg.Sample); } }
+					consider(pixel.SnesSubBackgroundSample);
+					if(frame.BackgroundUnderlays.size() == frame.Pixels.size()) { consider(frame.BackgroundUnderlays[index].Sample); consider(frame.BackgroundUnderlays[index].ForegroundSample); }
+					if(!source) { continue; }
+					for(uint32_t sy = 0; sy < _outputScale; sy++) { for(uint32_t sx = 0; sx < _outputScale; sx++) {
+						uint32_t artwork;
+						if(!_activeBackgrounds.Sample(layer, *source, px, py, sx, sy, _outputScale, artwork, true)) { continue; }
+						size_t offset = ((size_t)y * _outputScale + sy) * outputWidth + x * _outputScale + sx;
+						outputPixels[offset] = CompositeAlpha(artwork, outputPixels[offset], artwork >> 24);
+					} }
+				} }
+			}
 		}
 		return _output.data();
 	}

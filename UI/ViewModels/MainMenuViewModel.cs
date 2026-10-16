@@ -1061,6 +1061,11 @@ namespace Mesen.ViewModels
 					OnClick = () => DebugWindowManager.OpenDebugWindow(() => new TilemapViewerWindow(MainWindow.RomInfo.ConsoleType.GetMainCpuType()))
 				},
 				new ContextMenuAction() {
+					ActionType = ActionType.Custom, CustomText = "Audio Replacement Editor",
+					IsEnabled = () => IsGameRunning && (MainWindow.RomInfo.ConsoleType == ConsoleType.Nes || MainWindow.RomInfo.ConsoleType == ConsoleType.Gameboy || MainWindow.RomInfo.ConsoleType == ConsoleType.Gba || MainWindow.RomInfo.ConsoleType == ConsoleType.PcEngine || MainWindow.RomInfo.ConsoleType == ConsoleType.Sms || MainWindow.RomInfo.ConsoleType == ConsoleType.Snes || MainWindow.RomInfo.ConsoleType == ConsoleType.Ws),
+					OnClick = () => DebugWindowManager.GetOrOpenDebugWindow(() => new MusicReplacementWindow())
+				},
+				new ContextMenuAction() {
 					ActionType = ActionType.OpenTileViewer,
 					Shortcut = () => ConfigManager.Config.Debug.Shortcuts.Get(DebuggerShortcut.OpenTileViewer),
 					IsEnabled = () => IsGameRunning,

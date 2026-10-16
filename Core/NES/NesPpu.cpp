@@ -969,7 +969,12 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 
 			captureReplacementCoverage();
 			if(spriteColor != 0) {
-				if(captured && spriteIndex >= 0 && spriteIndex < _spriteCount) { captured->ExpandedSpriteOccluder = _metaFetchedSpriteIds[spriteIndex]; }
+				if(captured && spriteIndex >= 0 && spriteIndex < _spriteCount) {
+					captured->ExpandedSpriteOccluder = _metaFetchedSpriteIds[spriteIndex];
+					captured->NativeVisibleSpriteClass = _spriteTiles[spriteIndex].BackgroundPriority ? 2 : 1;
+					// Retain the fetched winner's live palette even when native BG hides it.
+					captured->SpriteColor = (_paletteRam[_spriteTiles[spriteIndex].PaletteOffset + spriteColor] & (_mask.Grayscale ? 0x30 : 0x3F)) | _intensifyColorBits;
+				}
 				if(_sprite0Visible && spriteIndex == 0 && spriteColor != 0 && spriteBgColor != 0 && _cycle != 256 && _mask.BackgroundEnabled && !_statusFlags.Sprite0Hit && _cycle > _minimumDrawSpriteStandardCycle) {
 					//"The hit condition is basically sprite zero is in range AND the first sprite output unit is outputting a non-zero pixel AND the background drawing unit is outputting a non-zero pixel."
 					//"Sprite zero hits do not register at x=255" (cycle 256)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Mesen.Debugger.Utilities;
@@ -94,7 +95,7 @@ string path = Path.Combine(directory, "groups.json");
 try {
 	MetaSpritePack pack = new() { RomHash = "test-rom", System = "Gameboy", NextGroupId = 1 };
 	pack.Groups.Add(group);
-	var background = new MetaBackgroundLayer { Id = 1, NativeLayer = 1, ArtworkPath = "background.png", ArtworkWidth = 64, ArtworkHeight = 32, ArtworkScale = 2, X = 3, Y = 5, WrapX = true };
+	var background = new MetaBackgroundLayer { Id = 1, NativeLayer = 1, DrawOrder = 7, ArtworkPath = "background.png", ArtworkWidth = 64, ArtworkHeight = 32, ArtworkScale = 2, X = 3, Y = 5, WrapX = true };
 	pack.BackgroundLayers.Add(background);
 	pack.Save(path);
 	Check(!File.ReadAllText(path).Contains("RuntimeSpriteIndex"), "Transient hardware indices must never enter saved recognition definitions.");
@@ -102,6 +103,7 @@ try {
 	Check(loaded.BackgroundLayers.Count == 1 && loaded.BackgroundLayers[0].ArtworkPath == "background.png" && loaded.BackgroundLayers[0].NativeLayer == 1,
 		"Background layer definitions must persist per game with artwork and hardware layer selection.");
 	Check(loaded.NextBackgroundId == 2, "Older background packs must allocate above existing IDs.");
+	Check(loaded.BackgroundLayers[0].DrawOrder == 7, "PNG draw order must survive a saved pack reload.");
 	loaded.NextBackgroundId = 7;
 	loaded.BackgroundLayers.Clear();
 	loaded.Save(path);
@@ -234,6 +236,88 @@ using(var reader = new BinaryReader(new MemoryStream(conditionalPacket))) {
 Check(MetaMemoryCondition.Matches(runtimeGroup.MemoryConditions, address => address == 0x1234 ? (byte)0xA7 : (byte)3), "Masked expected bits must match native semantics.");
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".conditions", conditionalPacket); }
 var comparisonGroup = new MetaSpriteGroup {Id = 77, Enabled = true, Width = 8, Height = 8, Members = runtimeGroup.Members};
+var orderPack = new MetaSpritePack { BackgroundLayers = new() {
+	new() { Id = 1, Enabled = true, DrawOrder = 9, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}} },
+	new() { Id = 2, Enabled = true, DrawOrder = 0, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}} },
+	new() { Id = 3, Enabled = true, DrawOrder = 0, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}} }
+}};
+var emittedOrder = new List<int>();
+byte[] orderPacket = MetaBackgroundRuntimePacket.Create(orderPack, layer => { emittedOrder.Add(layer.Id); return (1, 1, new[] {layer.Id == 1 ? 0x800000FFu : layer.Id == 2 ? 0xFFFF0000u : 0u}); });
+Check(emittedOrder.SequenceEqual(new[] {2, 3, 1}), "Draw slots must sort stably without changing native layer assignment.");
+Check(orderPack.BackgroundLayers.Select(layer => layer.Id).SequenceEqual(new[] {1, 2, 3}), "Runtime ordering must not reorder saved editor entries.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.order", orderPacket); }
+orderPack.BackgroundLayers[0].CompositionPosition = 1;
+orderPack.BackgroundLayers[0].DrawOrder = 0;
+var compositionReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(orderPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(compositionReloaded.BackgroundLayers[0].CompositionPosition == 1, "Foreground position must survive JSON reload.");
+emittedOrder.Clear();
+byte[] foregroundPacket = MetaBackgroundRuntimePacket.Create(orderPack, layer => { emittedOrder.Add(layer.Id); return (1, 1, new[] {layer.Id == 1 ? 0x800000FFu : layer.Id == 2 ? 0xFFFF0000u : 0u}); });
+Check(emittedOrder.SequenceEqual(new[] {2, 3, 1}), "Foreground position must sort above native PNGs independently of draw slot and saved entry order.");
+Check(BitConverter.ToUInt32(foregroundPacket) == MetaBackgroundRuntimePacket.CompositionMagic, "Foreground position must use explicit MBGD transport.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.foreground", foregroundPacket); }
+orderPack.BackgroundLayers[0].CompositionPosition = 2;
+bool rejectedComposition = false;
+try { MetaBackgroundRuntimePacket.Create(orderPack, _ => (1, 1, new uint[1])); } catch(InvalidDataException) { rejectedComposition = true; }
+Check(rejectedComposition, "Invalid foreground position must be rejected.");
+orderPack.BackgroundLayers[0].CompositionPosition = 0;
+foreach(int invalidOrder in new[] {-1, 10}) {
+	orderPack.BackgroundLayers[0].DrawOrder = invalidOrder;
+	bool rejectedOrder = false;
+	try { MetaBackgroundRuntimePacket.Create(orderPack, _ => (1, 1, new uint[1])); } catch(InvalidDataException) { rejectedOrder = true; }
+	Check(rejectedOrder, "Out-of-range PNG draw slots must be rejected.");
+}
+Check(new MetaBackgroundLayer().DrawOrder == 0, "Legacy PNGs must retain saved ordering by default.");
+var gbaPriorityPack = new MetaSpritePack { System = "Gba", BackgroundLayers = new() {
+	new() { Id = 1, Enabled = true, CompositionPosition = 2, GbaPriority = 3, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}} }
+}};
+var priorityReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(gbaPriorityPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(priorityReloaded.BackgroundLayers[0].CompositionPosition == 2 && priorityReloaded.BackgroundLayers[0].GbaPriority == 3, "Independent GBA priority must persist separately from the source layer.");
+byte[] priorityPacket = MetaBackgroundRuntimePacket.Create(gbaPriorityPack, _ => (1, 1, new[] {0xFF0000FFu}));
+Check(BitConverter.ToUInt32(priorityPacket) == MetaBackgroundRuntimePacket.GbaPriorityMagic, "Independent GBA priority requires MBGE transport.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.gba-priority", priorityPacket); }
+gbaPriorityPack.BackgroundLayers[0].GbaPriority = 4;
+bool rejectedPriority = false; try { MetaBackgroundRuntimePacket.Create(gbaPriorityPack, _ => (1, 1, new uint[1])); } catch(InvalidDataException) { rejectedPriority = true; }
+Check(rejectedPriority, "GBA priorities outside 0..3 must be rejected.");
+var nesBandPack = new MetaSpritePack { System = "Nes", BackgroundLayers = new() };
+foreach(int position in new[] {1, 6, 5, 4}) { nesBandPack.BackgroundLayers.Add(new() {Id = position, Enabled = true, CompositionPosition = position, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}}}); }
+var nesBandOrder = new List<int>();
+byte[] nesBandPacket = MetaBackgroundRuntimePacket.Create(nesBandPack, layer => { nesBandOrder.Add(layer.CompositionPosition); return (1, 1, new[] {0xFFFFFFFFu}); });
+Check(nesBandOrder.SequenceEqual(new[] {4, 5, 6, 1}) && BitConverter.ToUInt32(nesBandPacket) == MetaBackgroundRuntimePacket.NesBandsMagic, "NES bands must serialize in scenery composition order, retaining the final foreground overlay.");
+var nesBandReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(nesBandPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(nesBandReloaded.BackgroundLayers[2].CompositionPosition == 5, "NES insertion positions must persist.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.nes-bands", nesBandPacket); }
+nesBandPack.System = "Gameboy";
+byte[] gbBandPacket = MetaBackgroundRuntimePacket.Create(nesBandPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+Check(BitConverter.ToUInt32(gbBandPacket) == MetaBackgroundRuntimePacket.NesBandsMagic, "GB insertion bands must retain the shared MBGG layout.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.gb-bands", gbBandPacket); }
+nesBandPack.System = "Pce";
+byte[] pceBandPacket = MetaBackgroundRuntimePacket.Create(nesBandPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+Check(BitConverter.ToUInt32(pceBandPacket) == MetaBackgroundRuntimePacket.NesBandsMagic, "PCE insertion bands must retain the shared MBGG layout.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.pce-bands", pceBandPacket); }
+nesBandPack.System = "Sms";
+byte[] smsBandPacket = MetaBackgroundRuntimePacket.Create(nesBandPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+Check(BitConverter.ToUInt32(smsBandPacket) == MetaBackgroundRuntimePacket.NesBandsMagic, "SMS insertion bands must retain the shared MBGG layout.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.sms-bands", smsBandPacket); }
+nesBandPack.System = "Ws";
+byte[] wsBandPacket = MetaBackgroundRuntimePacket.Create(nesBandPack, _ => (1, 1, new[] {0xFFFFFFFFu}));
+Check(BitConverter.ToUInt32(wsBandPacket) == MetaBackgroundRuntimePacket.NesBandsMagic, "WS insertion bands must retain the shared MBGG layout.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.ws-bands", wsBandPacket); }
+nesBandPack.System = "Gba";
+bool rejectedNesBands = false; try { MetaBackgroundRuntimePacket.Create(nesBandPack, _ => (1, 1, new uint[1])); } catch(InvalidDataException) { rejectedNesBands = true; }
+Check(rejectedNesBands, "Sprite insertion bands must not activate in an unsupported system pack.");
+var snesPriorityPack = new MetaSpritePack { System = "Snes", BackgroundLayers = new() {
+	new() {Id = 1, Enabled = true, CompositionPosition = 3, SnesPriority = 12, ArtworkWidth = 1, ArtworkHeight = 1, MemoryConditions = new() {new() {Address = 0, Value = 1}}}
+}};
+var snesPriorityReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(snesPriorityPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(snesPriorityReloaded.BackgroundLayers[0].SnesPriority == 12 && snesPriorityReloaded.BackgroundLayers[0].CompositionPosition == 3, "SNES independent priority must persist.");
+byte[] snesPriorityPacket = MetaBackgroundRuntimePacket.Create(snesPriorityPack, _ => (1, 1, new[] {0xFF0000FFu}));
+Check(BitConverter.ToUInt32(snesPriorityPacket) == MetaBackgroundRuntimePacket.SnesPriorityMagic, "Independent SNES priority requires MBGF transport.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.snes-priority", snesPriorityPacket); }
+foreach(int value in new[] {0, 16}) {
+	snesPriorityPack.BackgroundLayers[0].SnesPriority = value;
+	bool rejectedSnesPriority = false; try { MetaBackgroundRuntimePacket.Create(snesPriorityPack, _ => (1, 1, new uint[1])); } catch(InvalidDataException) { rejectedSnesPriority = true; }
+	Check(rejectedSnesPriority, "SNES hardware priorities must be 1..15.");
+}
 for(int op = 0; op < 6; op++) { comparisonGroup.MemoryConditions.Add(new() {Address = (uint)op, Value = 42, Comparison = (MetaMemoryComparison)op}); }
 comparisonGroup.AlternateArtwork.Add(new() {Path = "comparison.png", MemoryConditions = new() {new() {Address = 6, Value = 0, Comparison = MetaMemoryComparison.NotEqual}}});
 var comparisonPack = new MetaSpritePack {Groups = new() {comparisonGroup}, BackgroundLayers = new() {
@@ -312,6 +396,35 @@ var signedRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Jso
 Check(signedRestored.SavedCamera!.X.SignedPage && !signedRestored.SavedCamera.Y.SignedPage, "Saved camera signed axes must persist independently.");
 if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.camera.signed", signedCameraPacket); }
 Console.WriteLine("PASS: signed FF:F6/FF:FF/00:00 camera decoding and saved-profile/MBG8 persistence.");
+comparisonPack.BackgroundLayers[0].ExtendIntoMargins = true;
+byte[] widescreenPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(widescreenPacket) == MetaBackgroundRuntimePacket.WidescreenMagic, "Decorative extension requires MBG9.");
+var widescreenRestored = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(widescreenRestored.BackgroundLayers[0].ExtendIntoMargins, "Margin extension must survive pack reload.");
+comparisonPack.BackgroundLayers[0].UseWidescreenPosition = true;
+comparisonPack.BackgroundLayers[0].WidescreenPosition = new() { Position = 3, CameraMin = -10, CameraMax = 2048, SlideSpeed = 0.1, ReleaseDelay = 6, UseRamFlags = true, LeftFlags = "$68 == $01", RightFlags = "$68 == $02" };
+byte[] positionPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(positionPacket) == MetaBackgroundRuntimePacket.SmoothPositionMagic, "Smooth PNG positioning requires MBGB.");
+var positionReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+Check(positionReloaded.BackgroundLayers[0].WidescreenPosition.CameraMin == -10 && positionReloaded.BackgroundLayers[0].WidescreenPosition.LeftFlags == "$68 == $01", "Per-PNG scene positioning must persist.");
+Check(positionReloaded.BackgroundLayers[0].WidescreenPosition.SlideSpeed == 0.1 && positionReloaded.BackgroundLayers[0].WidescreenPosition.ReleaseDelay == 6, "Fractional speed and release delay must persist.");
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.position", positionPacket); }
+var ramSpeed = comparisonPack.BackgroundLayers[0].WidescreenPosition.RamSpeed;
+ramSpeed.Enabled = true; ramSpeed.Format = 0; ramSpeed.AddressHex = "$72"; ramSpeed.Multiplier = 0.0625; ramSpeed.Maximum = 2.5;
+byte[] ramSpeedPacket = MetaBackgroundRuntimePacket.Create(comparisonPack, _ => (2, 2, Enumerable.Repeat(0xFFFFFFFFu, 4).ToArray()));
+Check(BitConverter.ToUInt32(ramSpeedPacket) == MetaBackgroundRuntimePacket.RamSpeedMagic, "Player speed requires MBGC.");
+var ramReloaded = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(comparisonPack, MetaSpriteSerializerContext.Default.MetaSpritePack), MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+var restoredSpeed = ramReloaded.BackgroundLayers[0].WidescreenPosition.RamSpeed;
+Check(restoredSpeed.Enabled && restoredSpeed.Format == 0 && restoredSpeed.Address == 0x72 && restoredSpeed.Multiplier == 0.0625 && restoredSpeed.Maximum == 2.5, "RAM speed settings must persist.");
+ramSpeed.AddressHex = "invalid"; bool invalidSpeed = false; try { ramSpeed.Validate(); } catch(InvalidDataException) { invalidSpeed = true; }
+Check(invalidSpeed, "Invalid speed address drafts must not use a stale address."); ramSpeed.AddressHex = "$72";
+ramSpeed.Format = 2; ramSpeed.Address = uint.MaxValue; invalidSpeed = false; try { ramSpeed.Validate(); } catch(InvalidDataException) { invalidSpeed = true; }
+Check(invalidSpeed, "16-bit speed addresses must not overflow."); ramSpeed.Format = 0; ramSpeed.Address = 0x72;
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.ram-speed", ramSpeedPacket); }
+ramSpeed.Enabled = false;
+comparisonPack.BackgroundLayers[0].UseWidescreenPosition = false;
+if(args.Length > 0) { File.WriteAllBytes(args[0] + ".background.widescreen", widescreenPacket); }
+comparisonPack.BackgroundLayers[0].ExtendIntoMargins = false;
 runtimeGroup.MemoryConditions.Clear();
 runtimeGroup.AlternateArtwork.Add(new() { Path = "draft.png" });
 runtimeGroup.AlternateArtwork[0].Validate();
@@ -373,6 +486,9 @@ Console.WriteLine("PASS: all-disabled pack clears runtime definitions without lo
 if(args.Length >= 3 && args[1] == "--snes-hires") {
 	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }
+if(args.Length >= 3 && args[1] == "--snes-obj-interlace") {
+	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), onlyObjInterlace: true);
+}
 if(args.Length >= 3 && args[1] == "--snes-hires-canvas") {
 	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), includeInterlace: false);
 }
@@ -398,8 +514,14 @@ if(args.Length >= 3 && args[1] == "--gameplay-ws") {
 if(args.Length >= 3 && args[1] == "--nes-raster") {
 	GameplayFixture.RunNesRasterSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.nes")));
 }
+if(args.Length >= 3 && args[1] == "--widescreen") {
+	GameplayFixture.RunWidescreenSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
+}
 if(args.Length >= 3 && args[1] == "--pce-priority") {
 	GameplayFixture.RunPcePrioritySuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.pce")));
+}
+if(args.Length >= 3 && args[1] == "--sms-legacy") {
+	GameplayFixture.RunSmsLegacySuite(Path.GetFullPath(args[2]), Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture.sms"));
 }
 if(args.Length >= 3 && args[1] == "--gba-affine") {
 	GameplayFixture.RunGbaAffine(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gba")));
@@ -413,6 +535,9 @@ if(args.Length >= 3 && args[1] == "--gameplay-gb") {
 if(args.Length >= 3 && args[1] == "--gameplay") {
 	GameplayFixture.Run(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 	GameplayFixture.VerifyPackActivation(Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), Path.GetFullPath(args[0]));
+}
+if(args.Length >= 3 && args[1] == "--foreground") {
+	GameplayFixture.RunForegroundSuite(Path.GetFullPath(args[2]));
 }
 if(args.Length >= 3 && args[1] == "--viewer-refresh") {
 	GameplayFixture.RunViewerRefreshSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));

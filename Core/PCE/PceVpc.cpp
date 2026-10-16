@@ -208,6 +208,7 @@ void PceVpc::ProcessScanlineStart(PceVdc* vdc, uint16_t scanline)
 			_currentOutBuffer = _currentOutBuffer == _outBuffer[0] ? _outBuffer[1] : _outBuffer[0];
 			_metaFrame = !_vdc2 && vdc->IsMetaSpriteCaptureEnabled()
 				? _metaFramePool.Acquire(PceConstants::MaxScreenWidth, PceConstants::ScreenHeight) : nullptr;
+			if(_metaFrame) { _metaFrame->PceCapture = true; }
 		}
 
 		//Store clock dividers for each row at the end of the buffer

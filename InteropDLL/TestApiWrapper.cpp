@@ -1,23 +1,35 @@
 #include "Common.h"
 #include "Core/Shared/RecordedRomTest.h"
 #include "Core/Shared/Emulator.h"
+#include "Core/Shared/Video/MetaSpritePacket.h"
+#include "Core/Shared/Audio/MusicReplacement.h"
+#include "Core/Shared/Audio/SoundMixer.h"
+#include "Core/NES/NesMemoryManager.h"
 #include "Core/Shared/EmuSettings.h"
 #include "Core/Shared/MessageManager.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/StringUtilities.h"
 #include "Core/Gameboy/Gameboy.h"
+#include "Core/Gameboy/GbMemoryManager.h"
 #include "Core/Gameboy/GbPpu.h"
 #include "Core/SMS/SmsConsole.h"
+#include "Core/SMS/SmsMemoryManager.h"
 #include "Core/SMS/SmsVdp.h"
 #include "Core/PCE/PceConsole.h"
+#include "Core/PCE/PceMemoryManager.h"
 #include "Core/PCE/PceVdc.h"
 #include "Core/GBA/GbaConsole.h"
+#include "Core/GBA/GbaMemoryManager.h"
 #include "Core/GBA/GbaPpu.h"
 #include "Core/WS/WsConsole.h"
+#include "Core/WS/WsMemoryManager.h"
 #include "Core/WS/WsPpu.h"
 #include "Core/NES/NesConsole.h"
+#include "Core/NES/NesCpu.h"
 #include "Core/NES/BaseNesPpu.h"
 #include "Core/SNES/SnesConsole.h"
+#include "Core/SNES/SnesMemoryManager.h"
+#include "Core/SNES/Spc.h"
 #include "Core/SNES/SnesPpu.h"
 #include "Core/Shared/Video/VideoDecoder.h"
 #include "Core/Shared/Video/VideoRenderer.h"
@@ -30,6 +42,7 @@
 #include "Core/Shared/SaveStateManager.h"
 #include <sstream>
 #include <mutex>
+#include <set>
 #include <iostream>
 
 class MetaSpriteViewerRefreshListener : public INotificationListener
@@ -206,6 +219,181 @@ static bool VerifyExpandedCanvas(Emulator* emu, MetaSpriteTestRenderer& renderer
 	passed &= restored;
 	if(passed) { std::cout << "PASS: live full PNG canvas, origin alignment, margin alpha and screen/priority clipping; expanded=" << expandedPixels << ", blocked=" << blockedPixels << std::endl; }
 	else { std::cerr << "Expanded PNG canvas mismatch" << std::endl; }
+	if(passed) {
+		VideoConfig savedVideo = emu->GetSettings()->GetVideoConfig(), wideVideo = savedVideo;
+		FrameInfo logical = emu->GetVideoDecoder()->GetBaseFrameInfo(true);
+		double ratio = (double)width / std::max(1u, logical.Width);
+		int left = (int)std::round(5 * ratio), right = (int)std::round(9 * ratio);
+		uint32_t wideWidth = (width + left + right + 1) / 2 * 2;
+		wideVideo.DecorativeWidescreen = true; wideVideo.DecorativeCustomWidths = true;
+		wideVideo.DecorativeLeftWidth = 5; wideVideo.DecorativeRightWidth = 9; wideVideo.DecorativeViewportPosition = 0;
+		emu->GetSettings()->SetVideoConfig(wideVideo);
+		bool widened = false;
+		for(int attempt = 0; attempt < 500; attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex);
+				if(renderer.Width == wideWidth && renderer.Height == height) {
+					widened = true;
+					for(uint32_t y = 0; y < height && widened; y++) { for(uint32_t x = 0; x < width; x++) {
+						if(renderer.Pixels[y * wideWidth + x + left] != baseline[y * width + x]) { widened = false; break; }
+					} }
+					if(widened) { break; }
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		emu->GetSettings()->SetVideoConfig(savedVideo);
+		bool nativeRestored = false;
+		for(int attempt = 0; attempt < 500; attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Width == width && renderer.Height == height && renderer.Pixels == baseline) { nativeRestored = true; break; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		passed &= widened && nativeRestored;
+		if(passed) { std::cout << "PASS: live shared widescreen asymmetric canvas preserves every native viewport pixel and restores dimensions." << std::endl; }
+	}
+	return passed;
+}
+
+static bool VerifyDedicatedWidescreen(Emulator* emu, MetaSpriteTestRenderer& renderer, uint32_t width, uint32_t height, int layer = 0, bool negativeCamera = false)
+{
+	auto wait = [&](const std::function<bool()>& predicate) {
+		for(int attempt = 0; attempt < 500; attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(predicate()) { return true; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	};
+	VideoConfig saved = emu->GetSettings()->GetVideoConfig();
+	auto savedLayers = emu->GetVideoDecoder()->HasMetaBackgroundLayers();
+	if(savedLayers) { return false; } // Dedicated fixtures enter with native output restored.
+	vector<uint32_t> native, baseline;
+	uint32_t before;
+	{ std::lock_guard<std::mutex> lock(renderer.Mutex); native = renderer.Pixels; before = renderer.FrameNumber; }
+	MetaBackgroundReplacement bg; bg.Id = 1; bg.Layer = layer; bg.Width = bg.Height = 1;
+	bg.WrapX = bg.WrapY = true; bg.UseCpuCamera = true; bg.ExtendIntoMargins = true;
+	bg.Artwork = {0xFFFFFFFF}; bg.MemoryConditions = {{0, 0, 0}};
+	emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+	bool passed = wait([&]() {
+		if(renderer.Width != width || renderer.Height != height || renderer.FrameNumber <= before + 2 || !renderer.Capture
+			|| renderer.Capture->MemorySnapshot.size() != 1) { return false; }
+		baseline = renderer.Pixels; return true;
+	});
+	for(int variant = 0; variant < 5 && passed; variant++) {
+		VideoConfig cfg = saved; cfg.DecorativeWidescreen = true; cfg.AspectRatio = VideoAspectRatio::NoStretching;
+		cfg.DecorativeCustomWidths = variant == 0; cfg.DecorativeLeftWidth = 5; cfg.DecorativeRightWidth = 9;
+		cfg.DecorativeAspectRatio = 16.0 / 9; cfg.DecorativeSideBrightness = variant == 0 ? 37 : 100;
+		cfg.DecorativeFadeWidth = variant == 0 ? 2 : 0; cfg.DecorativeViewportPosition = variant >= 2 ? 3 : 0;
+		bg.UseWidescreenPosition = variant == 2 || variant == 3; bg.WidescreenPosition = 3;
+		bg.WidescreenCameraMin = variant == 3 ? -100 : 0; bg.WidescreenCameraMax = variant == 3 ? 0 : 100;
+		emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+		emu->GetSettings()->SetVideoConfig(cfg);
+		uint32_t wideWidth = variant == 0 ? width + 14 : (uint32_t)std::ceil(height * 16.0 / 9);
+		uint32_t left = variant == 0 ? 5 : variant == 2 ? 0 : variant == 3 ? wideWidth - width : (wideWidth - width) / 2;
+		passed = wait([&]() {
+			if(renderer.Width != wideWidth || renderer.Height != height) { return false; }
+			for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+				if(renderer.Pixels[y * wideWidth + left + x] != baseline[y * width + x]) { return false; }
+			} }
+			for(uint32_t x = 0; x < wideWidth; x++) {
+				if(x >= left && x < left + width) { continue; }
+				uint32_t fade = variant == 0 ? std::min(x < left ? left - 1 - x : x - (left + width), 2u) : 1;
+				uint32_t divisor = variant == 0 ? 2 : 1;
+				uint32_t level = variant == 0 ? 100 * divisor - (100 - cfg.DecorativeSideBrightness) * fade : cfg.DecorativeSideBrightness;
+				uint32_t shade = (255 * level + 50 * divisor) / (100 * divisor);
+				if(renderer.Pixels[(height / 2) * wideWidth + x] != (0xFF000000 | shade * 0x010101)) { return false; }
+			}
+			return true;
+		});
+		if(!passed) { std::cerr << "Dedicated GBA/SNES widescreen variant failed: " << variant << std::endl; }
+	}
+	bg.UseWidescreenPosition = false; // Remaining presentation uses pack-independent placement.
+	// Patterned canvases expose accidental native-map wrapping and distinguish
+	// every 256-pixel page. Their CPU camera starts at 1014 or signed FF:F6=-10.
+	uint32_t cameraAddress = dynamic_cast<GbaConsole*>(emu->GetConsole().get()) ? 0x02000068 : 0x68;
+	int cameraX = negativeCamera ? -10 : 1014;
+	for(int pngWidth : {256, 512, 1024}) {
+		if(!passed) { break; }
+		emu->GetSettings()->SetVideoConfig(saved);
+		bg.Width = pngWidth; bg.Height = 256; bg.Artwork.resize((size_t)pngWidth * 256);
+		bg.CameraX = {4, cameraAddress, cameraAddress + 1, 256, true};
+		auto texture = [](int x, int y) { return 0xFF000000u | ((uint32_t)(x & 255) << 16) | ((uint32_t)(x >> 8) * 64 << 8) | (y & 255); };
+		for(int y = 0; y < 256; y++) { for(int x = 0; x < pngWidth; x++) { bg.Artwork[(size_t)y * pngWidth + x] = texture(x, y); } }
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex); before = renderer.FrameNumber; }
+		emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+		passed = wait([&]() {
+			if(renderer.Width != width || renderer.Height != height || renderer.FrameNumber <= before + 2 || !renderer.Capture
+				|| renderer.Capture->MemorySnapshot.size() != 3) { return false; }
+			int decoded; if(!bg.CameraX.Decode(renderer.Capture->MemorySnapshot, decoded) || decoded != cameraX) { return false; }
+			baseline = renderer.Pixels; return true;
+		});
+		VideoConfig cfg = saved; cfg.DecorativeWidescreen = true; cfg.DecorativeCustomWidths = true;
+		cfg.DecorativeLeftWidth = 96; cfg.DecorativeRightWidth = 160; cfg.DecorativeViewportPosition = 0;
+		cfg.DecorativeSideBrightness = 100; cfg.DecorativeFadeWidth = 0;
+		emu->GetSettings()->SetVideoConfig(cfg);
+		uint32_t wideWidth = width + 256;
+		passed &= wait([&]() {
+			if(renderer.Width != wideWidth || renderer.Height != height) { return false; }
+			for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+				if(renderer.Pixels[y * wideWidth + x + 96] != baseline[y * width + x]) { return false; }
+			} }
+			for(uint32_t x = 0; x < wideWidth; x++) {
+				if(x >= 96 && x < 96 + width) { continue; }
+				int sourceX = (((int)x - 96 + cameraX) % pngWidth + pngWidth) % pngWidth;
+				if(renderer.Pixels[(height / 2) * wideWidth + x] != texture(sourceX, height / 2)) { return false; }
+			}
+			return true;
+		});
+		if(!passed) { std::cerr << "Patterned widescreen PNG mismatch: width=" << pngWidth << ", camera=" << cameraX << std::endl; }
+	}
+	for(int flagVariant = 0; flagVariant < 5 && passed; flagVariant++) {
+		VideoConfig cfg = saved; cfg.DecorativeWidescreen = true; cfg.DecorativeCustomWidths = true;
+		cfg.DecorativeLeftWidth = 96; cfg.DecorativeRightWidth = 160; cfg.DecorativeViewportPosition = 3;
+		cfg.DecorativeSideBrightness = 100; cfg.DecorativeFadeWidth = 0;
+		bg.UseWidescreenPosition = true; bg.WidescreenPosition = 3; bg.WidescreenUseRamFlags = true;
+		bg.WidescreenLeftFlags = {{flagVariant == 4 ? UINT32_MAX : cameraAddress + 2, (uint8_t)(flagVariant == 1 || flagVariant == 2 ? 2 : 1), 15}, {cameraAddress + 1, 0, 255, 1}};
+		bg.WidescreenRightFlags = {{cameraAddress + 2, (uint8_t)(flagVariant == 0 ? 2 : flagVariant == 2 ? 3 : 1), 15}};
+		emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+		emu->GetSettings()->SetVideoConfig(cfg);
+		uint32_t wideWidth = width + 256, left = flagVariant == 0 ? 0 : flagVariant == 1 ? 256 : 96;
+		passed = wait([&]() {
+			if(renderer.Width != wideWidth || renderer.Height != height || !renderer.Capture || renderer.Capture->MemorySnapshot.size() != 4
+				|| renderer.Capture->MemorySnapshot.count(UINT32_MAX) || !renderer.Capture->MemorySnapshot.count(cameraAddress + 2)) { return false; }
+			for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+				if(renderer.Pixels[y * wideWidth + left + x] != baseline[y * width + x]) { return false; }
+			} }
+			return true;
+		});
+		if(!passed) { std::cerr << "RAM-boundary live variant failed: " << flagVariant << std::endl; }
+	}
+	for(int scene = 0; scene < 5 && passed; scene++) {
+		bg.UseWidescreenPosition = true; bg.WidescreenPosition = 3; bg.WidescreenSlideSpeed = 0;
+		bg.WidescreenCameraMin = scene == 0 ? cameraX : cameraX - 100; bg.WidescreenCameraMax = scene == 0 ? cameraX + 100 : cameraX;
+		bg.WidescreenUseRamFlags = scene >= 2;
+		bg.WidescreenLeftFlags = {{cameraAddress + 2, 1, 255}};
+		bg.WidescreenRightFlags = {{cameraAddress + 2, (uint8_t)(scene == 3 ? 1 : 2), 255}};
+		vector<MetaBackgroundReplacement> layers {bg};
+		if(scene == 4) {
+			layers[0].MemoryConditions = {{UINT32_MAX, 0, 0}};
+			layers.push_back(bg); layers[1].Id = 2; layers[1].WidescreenPosition = 2;
+		}
+		emu->GetVideoDecoder()->SetMetaBackgroundLayers(std::move(layers));
+		VideoConfig cfg = saved; cfg.DecorativeWidescreen = true; cfg.DecorativeCustomWidths = true;
+		cfg.DecorativeLeftWidth = 96; cfg.DecorativeRightWidth = 160;
+		cfg.DecorativeViewportPosition = 0;
+		cfg.DecorativeSideBrightness = 100; cfg.DecorativeFadeWidth = 0;
+		emu->GetSettings()->SetVideoConfig(cfg);
+		uint32_t wideWidth = width + 256, left = scene == 0 || scene == 2 ? 0 : scene == 3 ? 96 : 256;
+		passed = wait([&]() {
+			if(renderer.Width != wideWidth || renderer.Height != height || !renderer.Capture || renderer.Capture->MemorySnapshot.size() != (scene == 2 || scene == 3 ? 4u : 3u)) { return false; }
+			for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+				if(renderer.Pixels[y * wideWidth + x + left] != baseline[y * width + x]) { return false; }
+			} }
+			return true;
+		});
+		if(!passed) { std::cerr << "Per-PNG positioning scene failed: " << scene << std::endl; }
+	}
+	emu->GetSettings()->SetVideoConfig(saved); emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
+	passed &= wait([&]() { return renderer.Width == width && renderer.Height == height && renderer.Pixels == native; });
+	if(passed) { std::cout << "PASS: dedicated GBA/SNES live PNG margins, native viewport preservation, custom widths, fade, brightness, CPU boundaries, 256/512/1024-pixel patterned canvases and restoration; camera=" << cameraX << std::endl; }
 	return passed;
 }
 
@@ -435,6 +623,694 @@ shared_ptr<RecordedRomTest> _recordedRomTest;
 
 extern "C"
 {
+	DllExport bool __stdcall CheckWidescreenPresentationInterop()
+	{
+		if(!_emu) { return false; }
+		const auto& cfg = _emu->GetSettings()->GetVideoConfig();
+		return cfg.DecorativeWidescreen && cfg.DecorativeViewportPosition == 3 && cfg.DecorativeCustomWidths
+			&& cfg.DecorativeLeftWidth == 23 && cfg.DecorativeRightWidth == 71 && cfg.DecorativeSideBrightness == 37 && cfg.DecorativeFadeWidth == 12;
+	}
+	DllExport uint32_t __stdcall RunForegroundOverlayGameplayTest(const char* filename)
+	{
+		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+		emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+		emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+		auto& nesConfig = emu->GetSettings()->GetNesConfig(); nesConfig.RamPowerOnState = RamState::AllZeros; nesConfig.IsFullColorPalette = true; nesConfig.NtscOverscan = {};
+		for(int i = 0; i < 512; i++) { nesConfig.UserPalette[i] = (i & 63) == 1 ? 0xFFFF0000 : (i & 63) == 2 ? 0xFF00FF00 : 0xFF0000FF; }
+		auto& gbConfig = emu->GetSettings()->GetGameboyConfig(); gbConfig.BlendFrames = false; gbConfig.GbcAdjustColors = false; gbConfig.RamPowerOnState = RamState::AllZeros;
+		gbConfig.Model = string(filename).find(".gbc") != string::npos ? GameboyModel::GameboyColor : GameboyModel::Gameboy;
+		auto& gbaConfig = emu->GetSettings()->GetGbaConfig(); gbaConfig.SkipBootScreen = true; gbaConfig.DisableFrameSkipping = true;
+		gbaConfig.BlendFrames = false; gbaConfig.GbaAdjustColors = false; gbaConfig.RamPowerOnState = RamState::AllZeros;
+		emu->GetSettings()->GetPcEngineConfig().DisableFrameSkipping = true;
+		emu->GetSettings()->GetSmsConfig().RamPowerOnState = RamState::AllZeros;
+		auto& snesConfig = emu->GetSettings()->GetSnesConfig(); snesConfig.DisableFrameSkipping = true; snesConfig.RamPowerOnState = RamState::AllZeros; snesConfig.ColorCorrection = SnesColorCorrectionMode::None;
+		auto& wsConfig = emu->GetSettings()->GetWsConfig(); wsConfig.UseBootRom = false; wsConfig.LcdShowIcons = false; wsConfig.BlendFrames = false; wsConfig.LcdAdjustColors = false;
+		MetaSpriteTestRenderer renderer; uint32_t flags = 0;
+		auto wait = [&](const std::function<bool()>& check) { for(int i = 0; i < 500; i++) { { std::lock_guard<std::mutex> lock(renderer.Mutex); if(check()) { return true; } } std::this_thread::sleep_for(std::chrono::milliseconds(10)); } return false; };
+		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			if(auto c = dynamic_cast<NesConsole*>(emu->GetConsole().get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<Gameboy*>(emu->GetConsole().get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<GbaConsole*>(emu->GetConsole().get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<PceConsole*>(emu->GetConsole().get())) { c->GetVdc()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<SmsConsole*>(emu->GetConsole().get())) { c->GetVdp()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<SnesConsole*>(emu->GetConsole().get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c = dynamic_cast<WsConsole*>(emu->GetConsole().get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			// GBA/SNES retain background stages only while a background pack needs them.
+			MetaBackgroundReplacement captureRequest; captureRequest.Id = 1; captureRequest.CompositionPosition = 1;
+			captureRequest.Width = captureRequest.Height = 1; captureRequest.WrapX = captureRequest.WrapY = true; captureRequest.Artwork = {0};
+			emu->GetVideoDecoder()->SetMetaBackgroundLayers({captureRequest});
+			int cropLeft = dynamic_cast<PceConsole*>(emu->GetConsole().get()) ? PceConstants::GetLeftOverscan(4) : 0;
+			MetaSpriteGraphic source; int x = 0, y = 0; uint32_t nativeColor = 0, width = 0, height = 0;
+			if(wait([&]() {
+				if(!renderer.Capture || renderer.FrameNumber < 12) { return false; }
+				const auto& frame = *renderer.Capture;
+				auto candidates = !frame.NesRows.empty() ? MetaSpriteCompositor::BuildNesCandidates(frame, [&](uint16_t c) { return nesConfig.UserPalette[c & 511]; }) : frame.DecodedRows.empty() ? MetaSpriteCompositor::BuildGameboyCandidates(frame) : MetaSpriteCompositor::BuildDecodedCandidates(frame);
+				for(const auto& candidate : candidates) {
+					if(candidate.HardwareSprite != 0) { continue; }
+					int px = candidate.X + candidate.Width / 2, py = candidate.Y + candidate.Height / 2;
+					if(px < cropLeft || px >= (int)renderer.Width + cropLeft || py < 0 || py >= (int)renderer.Height || px >= (int)frame.Width || py >= (int)frame.Height) { continue; }
+					const auto& pixel = frame.Pixels[(size_t)py * frame.Width + px];
+					bool sample = pixel.BackgroundSample.Valid && pixel.BackgroundSample.Layer == 0;
+					sample |= pixel.GbaBackgroundSamples[0].Valid;
+					if(frame.SnesBackgrounds.size() == frame.Pixels.size()) { sample |= frame.SnesBackgrounds[(size_t)py * frame.Width + px].Layers[0].Sample.Valid; }
+					if(frame.BackgroundUnderlays.size() == frame.Pixels.size()) { const auto& lower = frame.BackgroundUnderlays[(size_t)py * frame.Width + px]; sample |= lower.Sample.Valid && lower.Sample.Layer == 0; }
+					if(!sample || pixel.VisibleSprite != candidate.HardwareSprite) { continue; }
+					source = candidate; x = px - cropLeft; y = py; width = renderer.Width; height = renderer.Height; nativeColor = renderer.Pixels[(size_t)y * width + x]; return true;
+				} return false;
+			})) {
+				flags |= 1;
+				MetaBackgroundReplacement bg; bg.Id = 1; bg.CompositionPosition = 1; bg.Width = bg.Height = 1; bg.WrapX = bg.WrapY = true; bg.Artwork = {0xFF00FFFF}; bg.MemoryConditions = {{0, 0, 0}};
+				uint32_t afterFrame = 0;
+				auto mark = [&]() { std::lock_guard<std::mutex> lock(renderer.Mutex); afterFrame = renderer.FrameNumber + 2; };
+				auto shown = [&](uint32_t color) { return renderer.FrameNumber > afterFrame && renderer.Width == width && renderer.Height == height && renderer.Pixels[(size_t)y * width + x] == color; };
+				mark(); emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+				if(wait([&]() { return shown(0xFF00FFFF) && renderer.Capture && renderer.Capture->MemorySnapshot.size() == 1 && renderer.Capture->MemorySnapshot.count(0); })) { flags |= 2; }
+				mark(); emu->GetVideoDecoder()->SetMetaBackgroundLayers({}); if(wait([&]() { return shown(nativeColor); })) { flags |= 4; }
+				MetaSpriteReplacement group; group.Id = 1; group.ArtworkWidth = source.Width; group.ArtworkHeight = source.Height; group.Artwork.assign((size_t)source.Width * source.Height, 0xFFFF00FF);
+				source.X = source.Y = 0; source.HardwareSprite = -1; group.Members = {source};
+				mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+				if(wait([&]() { return shown(0xFFFF00FF); })) {
+					flags |= 8; bg.Artwork = {0x800000FF}; mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+					if(wait([&]() { return shown(0xFF7F00FF); })) { flags |= 16; }
+					bg.Artwork = {0}; mark(); emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg}); if(wait([&]() { return shown(0xFFFF00FF); })) { flags |= 32; }
+					bg.Artwork = {0xFF00FFFF}; bg.MemoryConditions[0].Comparison = 1; mark(); emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg}); if(wait([&]() { return shown(0xFFFF00FF); })) { flags |= 64; }
+				}
+				mark(); emu->GetVideoDecoder()->SetMetaReplacements({}, {}); if(wait([&]() { return shown(nativeColor) && renderer.Capture && renderer.Capture->MemorySnapshot.empty(); })) { flags |= 128; }
+				if(auto nes = dynamic_cast<NesConsole*>(emu->GetConsole().get())) {
+					auto configure = [&](bool behind, bool opaqueBg) {
+						auto lock = emu->AcquireLock(); auto mm = nes->GetMemoryManager();
+						auto write = [&](uint16_t address, uint8_t value) { mm->Write(address, value, MemoryOperationType::Write); nes->GetCpu()->Exec(); };
+						write(0x2001, 0); write(0x2003, 2); write(0x2004, behind ? 0x20 : 0);
+						// A later foreground OBJ with a distinct blue palette shares the position.
+						write(0x2003, 4); for(uint8_t value : {uint8_t(7), uint8_t(1), uint8_t(1), uint8_t(8)}) { write(0x2004, value); }
+						write(0x2003, 0); write(0x2006, 0x3F); write(0x2006, 0x15); write(0x2007, 3);
+						for(uint8_t address : {uint8_t(1), uint8_t(5), uint8_t(9), uint8_t(13)}) { write(0x2006, 0x3F); write(0x2006, address); write(0x2007, 2); }
+						if(opaqueBg) { write(0x2006, 0x20); write(0x2006, 0); for(int tile = 0; tile < 4096; tile++) { write(0x2007, 1); } }
+						write(0x2006, 0x20); write(0x2006, 0); write(0x2005, 253); write(0x2005, 237); write(0x2000, 3); write(0x2001, 0x1E);
+					};
+					bool bandsPassed = true; bg.MemoryConditions[0].Comparison = 0; bg.HideOriginalLayer = false;
+					for(bool behind : {false, true}) {
+						if(!bandsPassed) { break; }
+						configure(behind, false);
+						for(int replacement = 0; replacement < 2; replacement++) { for(int position : {4, 5, 6, 1}) {
+							bg.CompositionPosition = position; bg.Artwork = {0xFF00FFFF}; mark(); emu->GetVideoDecoder()->SetMetaReplacements(replacement ? vector<MetaSpriteReplacement>{group} : vector<MetaSpriteReplacement>{}, {bg});
+							if(!bandsPassed) { break; }
+							bool passed = wait([&]() { return shown(position == 1 || (behind && position >= 5) ? 0xFF00FFFFu : replacement ? 0xFFFF00FFu : nativeColor); });
+							if(!passed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "NES band mismatch: behind=" << behind << " replacement=" << replacement << " position=" << position << " actual=" << std::hex << renderer.Pixels[(size_t)y*renderer.Width+x] << std::dec << std::endl; }
+							bandsPassed &= passed;
+						} }
+					}
+					configure(true, true);
+					for(int position : {4, 5, 6, 1}) {
+						if(!bandsPassed) { break; }
+						bg.CompositionPosition = position; mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+						bandsPassed &= wait([&]() { return shown(position >= 6 || position == 1 ? 0xFF00FFFFu : 0xFF00FF00u); });
+					}
+					bg.CompositionPosition = 4; bg.Artwork = {0}; group.Artwork.assign(group.Artwork.size(), 0x80FF00FF);
+					mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg}); bandsPassed = bandsPassed && wait([&]() { return shown(0xFF00807F); });
+					group.Artwork.assign(group.Artwork.size(), 0); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg}); bandsPassed = bandsPassed && wait([&]() { return shown(0xFF0000FF); });
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+					if(!bandsPassed) { flags |= 1024; } else { std::cout << "PASS: live NES insertion bands with front/behind native and replacement OBJ, opaque tiles, lower native reveal and OAM alpha outcomes.\n"; }
+					// Move the later front OBJ beside the behind-BG member and recognize
+					// the group from actual fetched graphics, including both priorities.
+					{ auto lock = emu->AcquireLock(); auto mm = nes->GetMemoryManager(); auto write = [&](uint16_t address, uint8_t value) { mm->Write(address, value, MemoryOperationType::Write); nes->GetCpu()->Exec(); }; write(0x2001, 0); write(0x2003, 7); write(0x2004, 16); write(0x2003, 0); write(0x2001, 0x1E); }
+					MetaSpriteReplacement mixed; mixed.Id = 2; mixed.ArtworkWidth = 24; mixed.ArtworkHeight = 8; mixed.Artwork.assign(192, 0xFFFF00FF);
+					mark(); bool mixedPassed = wait([&]() {
+						if(renderer.FrameNumber <= afterFrame || !renderer.Capture) { return false; }
+						auto captured = MetaSpriteCompositor::BuildNesCandidates(*renderer.Capture, [&](uint16_t c) { return nesConfig.UserPalette[c & 511]; });
+						mixed.Members.clear();
+						for(const auto& member : captured) { if(member.HardwareSprite == 0 || member.HardwareSprite == 1) { mixed.Members.push_back(member); } }
+						if(mixed.Members.size() != 2 || mixed.Members[1].X - mixed.Members[0].X != 8) { return false; }
+						int left = mixed.Members[0].X, top = mixed.Members[0].Y;
+						for(auto& member : mixed.Members) { member.X -= left; member.Y -= top; member.HardwareSprite = -1; }
+						return true;
+					});
+					if(!mixedPassed) { std::cerr << "NES mixed member capture failed." << std::endl; }
+					if(mixedPassed) {
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed}, {});
+						mixedPassed = wait([&]() { return shown(0xFF00FF00) && renderer.Pixels[(size_t)y*width+x+8] == 0xFFFF00FF && renderer.Pixels[(size_t)y*width+x+16] == 0xFFFF00FF; });
+						if(!mixedPassed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "NES mixed opaque mismatch: " << std::hex << renderer.Pixels[(size_t)y*width+x] << "," << renderer.Pixels[(size_t)y*width+x+8] << "," << renderer.Pixels[(size_t)y*width+x+16] << std::dec << std::endl; }
+						mixed.Artwork.assign(192, 0x80FF00FF); mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed}, {});
+						mixedPassed &= wait([&]() { return shown(0xFF00FF00) && renderer.Pixels[(size_t)y*width+x+8] == 0xFF807F80; });
+						// Overlap the members, shift the artwork left, and retain a right margin.
+						{ auto lock = emu->AcquireLock(); auto mm = nes->GetMemoryManager(); auto write = [&](uint16_t address, uint8_t value) { mm->Write(address, value, MemoryOperationType::Write); nes->GetCpu()->Exec(); }; write(0x2001, 0); write(0x2003, 7); write(0x2004, 12); write(0x2003, 0); write(0x2001, 0x1E); }
+						mixed.Members[1].X = 4; mixed.ArtworkOriginX = 2; mixed.ArtworkWidth = 28; mixed.Artwork.assign(224, 0xFFFF00FF);
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed}, {});
+						bool overlapPassed = wait([&]() { return shown(0xFF00FF00) && renderer.Pixels[(size_t)y*width+x-6] == 0xFF00FF00 && renderer.Pixels[(size_t)y*width+x+4] == 0xFFFF00FF && renderer.Pixels[(size_t)y*width+x+20] == 0xFFFF00FF; });
+						mixed.Artwork.assign(224, 0x80FF00FF); mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed}, {});
+						overlapPassed &= wait([&]() { return shown(0xFF00FF00) && renderer.Pixels[(size_t)y*width+x+4] == 0xFF807F80; });
+						if(!overlapPassed) { std::cerr << "NES overlapping member/origin check failed." << std::endl; }
+						mixedPassed &= overlapPassed;
+					}
+					if(!mixedPassed) { flags |= 1024; } else { std::cout << "PASS: live NES mixed-priority group capture, overlap OAM ties, shifted origin, oversized margins and partial PNG alpha.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+				}
+				if(auto gb = dynamic_cast<Gameboy*>(emu->GetConsole().get()); gb && string(filename).find(".gbc") == string::npos) {
+					// Step the real DMG PPU while the emulation thread is paused. Sweep
+					// an OBP1 write across the fetched row, without editing capture data.
+					bool rasterPassed = false;
+					{ auto lock = emu->AcquireLock(); auto ppu = gb->GetPpu(); auto mm = gb->GetMemoryManager();
+						auto stepUntil = [&](const std::function<bool()>& done) { for(int cycle = 0; cycle < 100000; cycle++) { if(done()) { return true; } ppu->Exec<true>(); } return false; };
+						bool ready = stepUntil([&]() { return ppu->GetScanline() == 144; });
+						if(ready) { mm->Write<MemoryOperationType::Write>(0xFE04, 24); mm->Write<MemoryOperationType::Write>(0xFE05, 16); mm->Write<MemoryOperationType::Write>(0xFE06, 1); mm->Write<MemoryOperationType::Write>(0xFE07, 0x10); }
+						for(int cut = 100; ready && !rasterPassed && cut <= 140; cut += 2) {
+							ready = stepUntil([&]() { return ppu->GetScanline() == 0; });
+							mm->Write<MemoryOperationType::Write>(0xFF49, 0xE4);
+							ready &= stepUntil([&]() { return ppu->GetScanline() == 8 && ppu->GetCycle() >= cut; });
+							mm->Write<MemoryOperationType::Write>(0xFF49, 0xEC);
+							uint32_t target = ppu->GetFrameCount() + 1;
+							ready &= stepUntil([&]() { return ppu->GetFrameCount() >= target; });
+							if(!ready) { break; }
+							ready &= wait([&]() {
+								if(renderer.FrameNumber < target || !renderer.Capture) { return false; }
+								for(const auto& row : renderer.Capture->Rows) {
+									if(row.Sprite != 1 || row.Scanline != 8 || row.OutputColorMask != 0xFF) { continue; }
+									bool before = false, after = false;
+									for(int pixel = 0; pixel < 8; pixel++) { before |= row.OutputColors[pixel] == row.Palette[1]; after |= row.OutputColors[pixel] != row.Palette[1]; }
+									if(before && after) {
+										auto candidates = MetaSpriteCompositor::BuildGameboyCandidates(*renderer.Capture);
+										auto sourceMember = std::find_if(candidates.begin(), candidates.end(), [](const auto& member) { return member.HardwareSprite == 0; });
+										if(sourceMember == candidates.end()) { continue; }
+										MetaSpriteReplacement transparent; transparent.ArtworkWidth = transparent.ArtworkHeight = 8; transparent.Artwork.assign(64, 0);
+										auto member = *sourceMember; member.X = member.Y = 0; member.HardwareSprite = -1; transparent.Members = {member};
+										MetaSpriteCompositor probe; probe.SetGroups({transparent});
+										auto convert = [](uint16_t color) { auto channel = [](int c) { return (c << 3) | (c >> 2); }; return 0xFF000000u | (channel(color & 31) << 16) | (channel((color >> 5) & 31) << 8) | channel((color >> 10) & 31); };
+										auto revealed = probe.Apply(renderer.Pixels.data(), renderer.Width, renderer.Height, *renderer.Capture, 0, 0, convert);
+										rasterPassed = true;
+										for(int pixel = 0; pixel < 8; pixel++) { rasterPassed &= revealed[(size_t)row.Scanline * renderer.Width + row.X + pixel] == convert(row.OutputColors[pixel]); }
+										return true;
+									}
+								} return true;
+							});
+						}
+					}
+					if(!rasterPassed) { flags |= 4096; } else { std::cout << "PASS: live DMG midscanline OBP1 write changes hidden lower-OBJ output samples while fetched matching colors remain intact.\n"; }
+				}
+				if(auto gb = dynamic_cast<Gameboy*>(emu->GetConsole().get()); gb && string(filename).find(".gbc") != string::npos) {
+					{ auto lock = emu->AcquireLock(); auto mm = gb->GetMemoryManager(); auto write = [&](uint16_t address, uint8_t value) { mm->Write<MemoryOperationType::Write>(address, value); };
+						write(0xFF40, 0); write(0xFF4F, 0); for(int tile = 0; tile < 1024; tile++) { write((uint16_t)(0x9800 + tile), 1); }
+						write(0xFE03, 0x80); write(0xFE04, 24); write(0xFE05, 16); write(0xFE06, 1); write(0xFE07, 1);
+						write(0xFF68, 0x82); write(0xFF69, 0xE0); write(0xFF69, 3);
+						write(0xFF6A, 0x8A); write(0xFF6B, 0); write(0xFF6B, 0x7C); write(0xFF40, 0x93);
+					}
+					bool orderedPassed = true;
+					for(uint32_t alpha : {255u, 0u, 128u}) {
+						group.Artwork.assign(group.Artwork.size(), (alpha << 24) | 0xFF00FF);
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
+						uint32_t expected = alpha == 255 ? 0xFF00FF00 : alpha == 0 ? 0xFF0000FF : 0xFF00807F;
+						orderedPassed &= wait([&]() { return shown(expected); });
+					}
+					orderedPassed &= wait([&]() {
+						if(!renderer.Capture) { return false; }
+						bool winning = false, lower = false;
+						for(const auto& row : renderer.Capture->Rows) {
+							int offset = x - row.X;
+							if(row.Scanline != y || offset < 0 || offset >= 8 || !(row.OutputColorMask & (1 << offset))) { continue; }
+							winning |= row.Sprite == 0 && row.OutputColors[offset] == 31;
+							lower |= row.Sprite == 1 && row.OutputColors[offset] == 0x7C00;
+						} return winning && lower;
+					});
+					bg.MemoryConditions[0].Comparison = 0; bg.HideOriginalLayer = false; bg.Artwork = {0xFF00FFFF};
+					for(int position : {4,5,6,1}) {
+						bg.CompositionPosition = position; group.Artwork.assign(group.Artwork.size(),0xFFFF00FF);
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg});
+						orderedPassed &= wait([&]() { return shown(position >= 6 || position == 1 ? 0xFF00FFFFu : 0xFF00FF00u); });
+						group.Artwork.assign(group.Artwork.size(),0); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg});
+						orderedPassed &= wait([&]() { return shown(position == 1 ? 0xFF00FFFFu : 0xFF0000FFu); });
+					}
+					bg.CompositionPosition = 6; group.Artwork.assign(group.Artwork.size(),0x80FF00FF);
+					mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg}); orderedPassed &= wait([&]() { return shown(0xFF0080FF); });
+					if(!orderedPassed) { flags |= 2048; } else { std::cout << "PASS: live CGB ordered OBJ alpha and all background insertion bands with opaque/transparent/partial replacements.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+				}
+				if(dynamic_cast<PceConsole*>(emu->GetConsole().get()) || dynamic_cast<SmsConsole*>(emu->GetConsole().get())) {
+					const char* system = dynamic_cast<PceConsole*>(emu->GetConsole().get()) ? "PCE" : "SMS";
+					int priorityPixel = -1; uint32_t priorityColor = 0;
+					bool smsMode4 = false;
+					if(auto sms = dynamic_cast<SmsConsole*>(emu->GetConsole().get())) {
+						{ auto lock = emu->AcquireLock(); smsMode4 = sms->GetVdp()->GetState().UseMode4; }
+						std::lock_guard<std::mutex> lock(renderer.Mutex);
+						if(renderer.Capture && renderer.Capture->Width == width && renderer.Capture->Height == height) {
+							for(size_t index = 0; index < renderer.Capture->Pixels.size(); index++) { const auto& pixel = renderer.Capture->Pixels[index];
+								if(pixel.NativeBackdropCaptured && pixel.ExpandedSpriteOccluder >= 0 && pixel.BackgroundColorIndex && (pixel.BackgroundOverlayOccludesClasses & 1) && !(pixel.ExpandedSpriteClasses & 1)) { priorityPixel = (int)index; priorityColor = renderer.Pixels[index]; break; }
+							}
+						}
+					}
+					bool pceBandsPassed = !smsMode4 || priorityPixel >= 0;
+					if(!pceBandsPassed) { std::cerr << "SMS Mode 4 fixture did not capture its priority-hidden OBJ." << std::endl; }
+					bg.MemoryConditions[0].Comparison = 0; bg.Artwork = {0xFF00FFFF}; group.Artwork.assign(group.Artwork.size(),0xFFFF00FF);
+					for(int replacement = 0; replacement < 2; replacement++) { for(int position : {4,5,6,1}) {
+						bg.CompositionPosition = position; mark(); emu->GetVideoDecoder()->SetMetaReplacements(replacement ? vector<MetaSpriteReplacement>{group} : vector<MetaSpriteReplacement>{}, {bg});
+						bool passed = wait([&]() { return shown(position == 1 ? 0xFF00FFFFu : replacement ? 0xFFFF00FFu : nativeColor)
+							&& (priorityPixel < 0 || renderer.Pixels[priorityPixel] == (position == 6 || position == 1 ? 0xFF00FFFFu : priorityColor)); });
+						if(!passed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << system << " band mismatch: replacement=" << replacement << " position=" << position << " actual=" << std::hex << renderer.Pixels[(size_t)y*width+x] << " native=" << nativeColor << std::dec << std::endl; }
+						pceBandsPassed &= passed;
+					} }
+					bg.CompositionPosition = 6; group.Artwork.assign(group.Artwork.size(),0); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg}); bool holesPassed = wait([&]() { return shown(0xFF00FFFF); }); pceBandsPassed &= holesPassed;
+					group.Artwork.assign(group.Artwork.size(),0x80FF00FF); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg}); bool partialPassed = wait([&]() { return shown(0xFF807FFF); }); pceBandsPassed &= partialPassed;
+					if(!holesPassed || !partialPassed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << system << " band alpha mismatch: holes=" << holesPassed << " partial=" << partialPassed << " actual=" << std::hex << renderer.Pixels[(size_t)y*width+x] << std::dec << std::endl; }
+					if(!pceBandsPassed) { flags |= 8192; } else { std::cout << "PASS: live " << system << " insertion bands with native/replacement foreground OBJ and transparent/partial PNG alpha.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({},{});
+				}
+				if(auto ws = dynamic_cast<WsConsole*>(emu->GetConsole().get())) {
+					bool wsBandsPassed = true; bg.MemoryConditions[0].Comparison = 0; bg.Artwork = {0xFF00FFFF};
+					for(bool foreground : {false,true}) {
+						{ auto lock = emu->AcquireLock(); auto mm = ws->GetMemoryManager();
+							for(int tile = 0; tile < 1024; tile++) { mm->DebugWrite(0x0800 + tile*2, 0); mm->DebugWrite(0x0801 + tile*2, 2); }
+							mm->DebugWrite(0xFE22, 0xF0); mm->DebugWrite(0xFE23, 0);
+							mm->WritePort<uint8_t>(7, 0x10); mm->WritePort<uint8_t>(0, foreground ? 7 : 5);
+						}
+						for(bool high : {false,true}) {
+							{ auto lock = emu->AcquireLock(); ws->GetMemoryManager()->DebugWrite(0x1001, high ? 0x20 : 0); }
+							group.Artwork.assign(group.Artwork.size(),0xFFFF00FF);
+							for(int replacement = 0; replacement < 2; replacement++) { for(int position : {4,5,6,1}) {
+								bg.CompositionPosition = position; mark(); emu->GetVideoDecoder()->SetMetaReplacements(replacement ? vector<MetaSpriteReplacement>{group} : vector<MetaSpriteReplacement>{}, {bg});
+								uint32_t expected = position == 1 || (!high && position >= 5 && (!foreground || position >= 6)) ? 0xFF00FFFF : !high && foreground ? 0xFF00FF00 : replacement ? 0xFFFF00FF : nativeColor;
+								bool passed = wait([&]() { return shown(expected); });
+								if(!passed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "WS band mismatch: fg=" << foreground << " high=" << high << " replacement=" << replacement << " position=" << position << " actual=" << std::hex << renderer.Pixels[(size_t)y*width+x] << " expected=" << expected << std::dec << std::endl; }
+								wsBandsPassed &= passed;
+							} }
+							bg.CompositionPosition = 6; group.Artwork.assign(group.Artwork.size(),0x80FF00FF); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{bg});
+							wsBandsPassed &= wait([&]() { return shown(high ? 0xFF807FFFu : 0xFF00FFFFu); });
+						}
+						if(!wsBandsPassed) { break; }
+					}
+					if(wsBandsPassed) {
+						{ auto lock = emu->AcquireLock(); auto mm = ws->GetMemoryManager();
+							mm->DebugWrite(0x1001, 0); mm->DebugWrite(0x1004, 0); mm->DebugWrite(0x1005, 0x22); mm->DebugWrite(0x1006, 8); mm->DebugWrite(0x1007, 8);
+							mm->DebugWrite(0xFF22, 15); mm->DebugWrite(0xFF23, 0); mm->WritePort<uint8_t>(6, 2);
+						}
+						for(uint32_t alpha : {255u,0u,128u}) {
+							group.Artwork.assign(group.Artwork.size(),(alpha << 24) | 0xFF00FF); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{});
+							wsBandsPassed &= wait([&]() { return shown(alpha == 255 ? 0xFF00FF00u : alpha == 0 ? 0xFF0000FFu : 0xFF00807Fu); });
+						}
+					}
+					if(!wsBandsPassed) { flags |= 16384; } else { std::cout << "PASS: live WonderSwan BG0/BG1 insertion bands, low/high OBJ, ordered lower native reveal without BG packs and PNG alpha.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({},{});
+				}
+				if(auto gba = dynamic_cast<GbaConsole*>(emu->GetConsole().get())) {
+					// Keep the fixture's native BG0 at priority 3, move OBJ0 to 2.
+					{ auto lock = emu->AcquireLock(); gba->GetMemoryManager()->DebugWrite(0x07000005, 8); }
+					bg.CompositionPosition = 2; bg.Artwork = {0xFF0000FF}; bg.MemoryConditions[0].Comparison = 0;
+					bool priorityPassed = true;
+					for(int replacement = 0; replacement < 2; replacement++) {
+						for(int priority = 0; priority < 4; priority++) {
+							bg.GbaPriority = priority; mark(); emu->GetVideoDecoder()->SetMetaReplacements(replacement ? vector<MetaSpriteReplacement>{group} : vector<MetaSpriteReplacement>{}, {bg});
+							priorityPassed &= wait([&]() { return shown(priority < 2 ? 0xFF0000FFu : replacement ? 0xFFFF00FFu : nativeColor); });
+						}
+					}
+					bg.GbaPriority = 0; bg.Artwork = {0x800000FF}; mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+					priorityPassed &= wait([&]() { return shown(0xFF7F00FF); });
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+					if(!priorityPassed) { flags |= 256; } else { std::cout << "PASS: live GBA independent priorities 0..3 above/below native and replacement OBJ2, priority ties and PNG alpha.\n"; }
+				}
+				if(auto snes = dynamic_cast<SnesConsole*>(emu->GetConsole().get())) {
+					{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); mm->Write(0x00212C, 0x11, MemoryOperationType::Write); mm->Write(0x00212D, 0, MemoryOperationType::Write); mm->Write(0x002131, 0, MemoryOperationType::Write); }
+					bg.CompositionPosition = 3; bg.Artwork = {0xFF0000FF}; bg.MemoryConditions[0].Comparison = 0; bg.HideOriginalLayer = true;
+					bool priorityPassed = true;
+					for(int replacement = 0; replacement < 2; replacement++) {
+						for(int priority = 1; priority <= 15; priority++) {
+							bg.SnesPriority = priority; mark(); emu->GetVideoDecoder()->SetMetaReplacements(replacement ? vector<MetaSpriteReplacement>{group} : vector<MetaSpriteReplacement>{}, {bg});
+							priorityPassed &= wait([&]() { return shown(priority > 2 ? 0xFF0000FFu : replacement ? 0xFFFF00FFu : nativeColor); });
+						}
+					}
+					bg.SnesPriority = 15; bg.Artwork = {0x800000FF}; mark(); emu->GetVideoDecoder()->SetMetaReplacements({group}, {bg});
+					priorityPassed &= wait([&]() { return shown(0xFF7F00FF); });
+					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
+					if(!priorityPassed) { flags |= 512; } else { std::cout << "PASS: live SNES independent priorities 1..15 above/below native and replacement OBJ2, priority ties and PNG alpha.\n"; }
+					{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); auto write = [&](uint32_t address, uint8_t value) { mm->Write(address,value,MemoryOperationType::Write); };
+						write(0x2100,0x80); write(0x2102,2); write(0x2103,0);
+						for(uint8_t value : {uint8_t(8),uint8_t(8),uint8_t(0),uint8_t(2)}) { write(0x2104,value); }
+						write(0x2121,145); write(0x2122,0xFF); write(0x2122,3);
+						write(0x212C,0x10); write(0x212D,0); write(0x2130,0); write(0x2131,0); write(0x2100,15);
+					}
+					bool revealPassed = true;
+					for(uint32_t alpha : {255u,0u,128u}) {
+						group.Artwork.assign(group.Artwork.size(),(alpha << 24) | 0x00FF00); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{});
+						revealPassed &= wait([&]() { return shown(alpha == 255 ? 0xFF00FF00u : alpha == 0 ? 0xFFFFFF00u : 0xFF7FFF00u); });
+					}
+					{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); mm->Write(0x2125,2,MemoryOperationType::Write); mm->Write(0x2126,0,MemoryOperationType::Write); mm->Write(0x2127,31,MemoryOperationType::Write); mm->Write(0x212E,0x10,MemoryOperationType::Write); }
+					mark(); revealPassed &= wait([&]() { return shown(0xFF0000FF); });
+					{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); auto write = [&](uint32_t address, uint8_t value) { mm->Write(address,value,MemoryOperationType::Write); };
+						write(0x2100,0x80); write(0x212E,0); write(0x2102,3); write(0x2103,0); write(0x2104,0); write(0x2104,10);
+						write(0x2121,209); write(0x2122,0xFF); write(0x2122,3); write(0x2132,0x9F); write(0x2131,0x10); write(0x2100,15);
+					}
+					for(uint32_t alpha : {0u,128u}) {
+						group.Artwork.assign(group.Artwork.size(),(alpha << 24) | 0x00FF00); mark(); emu->GetVideoDecoder()->SetMetaReplacements({group},{});
+						revealPassed &= wait([&]() { return shown(alpha == 0 ? 0xFFFFFFFFu : 0xFF7FFF7Fu); });
+					}
+					if(!revealPassed) { flags |= 32768; } else { std::cout << "PASS: live SNES lower native OBJ reveal through PNG holes/partial alpha, OBJ window clipping and palette-dependent fixed-color math.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({},{});
+					{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); auto write = [&](uint32_t address, uint8_t value) { mm->Write(address,value,MemoryOperationType::Write); };
+						write(0x2100,0x80); write(0x2102,1); write(0x2103,0); write(0x2104,0); write(0x2104,0x30);
+						write(0x2102,2); for(uint8_t value : {uint8_t(16),uint8_t(8),uint8_t(0),uint8_t(2)}) { write(0x2104,value); }
+						write(0x2121,5); write(0x2122,31); write(0x2122,0x7C); write(0x212C,0x11); write(0x2131,0); write(0x2100,15);
+					}
+					MetaSpriteReplacement mixed; mixed.Id = 2; mixed.ArtworkWidth = 32; mixed.ArtworkHeight = 8; mixed.ArtworkOriginX = 2; mixed.Artwork.assign(256,0xFF00FF00);
+					mark(); bool mixedPassed = wait([&]() {
+						if(renderer.FrameNumber <= afterFrame || !renderer.Capture) { return false; }
+						auto candidates = MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture); mixed.Members.clear();
+						for(int id : {0,1}) { auto found = std::find_if(candidates.begin(),candidates.end(),[&](const auto& member) { return member.HardwareSprite == id; }); if(found != candidates.end()) { mixed.Members.push_back(*found); } }
+						if(mixed.Members.size() != 2 || mixed.Members[0].SnesPriorityCode != 3 || mixed.Members[1].SnesPriorityCode != 0 || mixed.Members[1].SnesPalette != 1 || mixed.Members[1].X - mixed.Members[0].X != 8) { return false; }
+						int left = mixed.Members[0].X, top = mixed.Members[0].Y;
+						for(auto& member : mixed.Members) { member.X -= left; member.Y -= top; member.HardwareSprite = -1; } return true;
+					});
+					auto checkMixed = [&](const char* name, uint32_t first, uint32_t right, uint32_t margin, uint32_t left, uint32_t scale = 1) {
+						bool passed = wait([&]() { if(renderer.FrameNumber <= afterFrame || renderer.Width != width*scale || renderer.Height != height*scale) { return false; }
+							auto sample = [&](int px) { return renderer.Pixels[(size_t)(y*scale)*renderer.Width+px*scale]; };
+							return sample(x) == first && sample(x+8) == right && sample(x+24) == margin && sample(x-6) == left;
+						});
+						if(!passed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "SNES mixed member mismatch: " << name << " dimensions=" << renderer.Width << "x" << renderer.Height << std::endl; } return passed;
+					};
+					if(mixedPassed) {
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed},{}); mixedPassed &= checkMixed("priority/origin",0xFF00FF00,0xFFFF00FF,0xFFFF00FF,0xFF00FF00);
+						mixed.Artwork.assign(256,0x8000FF00); mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed},{}); mixedPassed &= checkMixed("partial",0xFF7F807F,0xFFFF00FF,0xFFFF00FF,0xFF7F807F);
+						mixed.ArtworkScale = 2; mixed.ArtworkWidth = 64; mixed.ArtworkHeight = 16; mixed.ArtworkOriginX = 4; mixed.Artwork.assign(1024,0x8000FF00);
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed},{}); mixedPassed &= checkMixed("2x",0xFF7F807F,0xFFFF00FF,0xFFFF00FF,0xFF7F807F,2);
+						mixed.ArtworkScale = 1; mixed.ArtworkWidth = 32; mixed.ArtworkHeight = 8; mixed.ArtworkOriginX = 2; mixed.Artwork.assign(256,0xFF00FF00);
+						{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); mm->Write(0x2100,0x80,MemoryOperationType::Write); mm->Write(0x2102,3,MemoryOperationType::Write); mm->Write(0x2103,0,MemoryOperationType::Write); mm->Write(0x2104,0,MemoryOperationType::Write); mm->Write(0x2104,0x3A,MemoryOperationType::Write); mm->Write(0x2131,0x10,MemoryOperationType::Write); mm->Write(0x2100,15,MemoryOperationType::Write); }
+						mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed},{}); mixedPassed &= checkMixed("palette math",0xFF00FF00,0xFF00FFFF,0xFF00FFFF,0xFF00FF00);
+						mixed.Members[1].X = 4;
+						for(int firstObject : {0,1}) {
+							{ auto lock = emu->AcquireLock(); auto mm = snes->GetMemoryManager(); auto write = [&](uint32_t address, uint8_t value) { mm->Write(address,value,MemoryOperationType::Write); };
+								write(0x2100,0x80); write(0x2102,2); write(0x2103,0); for(uint8_t value : {uint8_t(12),uint8_t(8),uint8_t(0),uint8_t(2)}) { write(0x2104,value); }
+								write(0x2131,0); write(0x2102,firstObject ? 2 : 0); write(0x2103,firstObject ? 0x80 : 0); write(0x2100,15);
+							}
+							mark(); emu->GetVideoDecoder()->SetMetaReplacements({mixed},{}); mixedPassed &= checkMixed(firstObject ? "rotated overlap" : "overlap",firstObject ? 0xFFFF00FFu : 0xFF00FF00u,0xFFFF00FF,0xFFFF00FF,0xFF00FF00);
+						}
+					}
+					if(!mixedPassed) { flags |= 65536; } else { std::cout << "PASS: live SNES mixed-member priorities, native BG insertion, shifted origin, 2x partial PNG, palette math and rotated overlap.\n"; }
+					emu->GetVideoDecoder()->SetMetaReplacements({},{});
+				}
+			}
+			if(!flags) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "Foreground capture missing: " << renderer.Width << "x" << renderer.Height << " frame=" << renderer.FrameNumber << " capture=" << (bool)renderer.Capture; if(renderer.Capture) { std::cerr << " rows=" << renderer.Capture->DecodedRows.size() << " dimensions=" << renderer.Capture->Width << "x" << renderer.Capture->Height; if(renderer.Capture->Width > 12 && renderer.Capture->Height > 12) { const auto& p = renderer.Capture->Pixels[12*renderer.Capture->Width+12]; std::cerr << " bg=" << p.BackgroundSample.Valid << " gba=" << p.GbaBackgroundSamples[0].Valid; } } std::cerr << std::endl; }
+			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); return flags;
+	}
+	DllExport uint32_t __stdcall RunSmsLegacyTextBackgroundTest(const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+		emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+		emu->GetSettings()->GetSmsConfig().RamPowerOnState = RamState::AllZeros;
+		MetaSpriteTestRenderer renderer; uint32_t flags = 0;
+		auto wait = [&](std::function<bool()> check) { for(int i = 0; i < 500; i++) { { std::lock_guard<std::mutex> lock(renderer.Mutex); if(check()) { return true; } } std::this_thread::sleep_for(std::chrono::milliseconds(10)); } return false; };
+		if(emu->LoadRom((VirtualFile)filename, VirtualFile())) {
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			auto sms = dynamic_cast<SmsConsole*>(emu->GetConsole().get()); sms->GetVdp()->SetMetaSpriteCapture(true);
+			if(wait([&]() {
+				if(!renderer.Capture || renderer.Width != 256 || renderer.Height != 240 || !renderer.Capture->DecodedRows.empty()) { return false; }
+				for(int y = 24; y < 216; y++) { for(int x = 0; x < 256; x++) {
+					auto& sample = renderer.Capture->Pixels[y*256+x].BackgroundSample;
+					bool interior = x >= 8 && x < 248;
+					if(sample.Valid != interior) { return false; }
+					if(interior && (sample.X != x-8 || sample.Y != y-24 || sample.Layer != 0 || renderer.Pixels[y*256+x] != 0xFFFF0000)) { return false; }
+				} } return true;
+			})) {
+				flags |= 1; MetaBackgroundReplacement bg; bg.Id = 1; bg.Layer = 0; bg.Width = bg.Height = 1; bg.WrapX = bg.WrapY = true; bg.Artwork = {0xFFFFFFFF}; bg.MemoryConditions = {{0xC000,0,0xFF}};
+				emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+				if(wait([&]() {
+					if(renderer.Width != 256 || !renderer.Capture || renderer.Capture->MemorySnapshot.size() != 1 || renderer.Capture->MemorySnapshot.count(0xC000) != 1) { return false; }
+					for(int y = 24; y < 216; y++) { for(int x = 0; x < 256; x++) { if(renderer.Pixels[y*256+x] != (x >= 8 && x < 248 ? 0xFFFFFFFFu : 0xFF0000FFu)) { return false; } } } return true;
+				})) { flags |= 2; }
+				bg.HideOriginalLayer = true; bg.Artwork = {0}; emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+				if(wait([&]() { return renderer.Pixels[32*256+8] == 0xFF0000FF; })) { flags |= 4; }
+				bg.MemoryConditions[0].Value = 1; bg.Artwork = {0xFFFFFFFF}; emu->GetVideoDecoder()->SetMetaBackgroundLayers({bg});
+				if(wait([&]() { return renderer.Pixels[32*256+8] == 0xFFFF0000; })) { flags |= 8; }
+				emu->GetVideoDecoder()->SetMetaBackgroundLayers({});
+				if(wait([&]() { return renderer.Pixels[32*256+8] == 0xFFFF0000 && renderer.Capture && renderer.Capture->MemorySnapshot.empty(); })) { flags |= 16; }
+			}
+			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); return flags;
+	}
+	DllExport uint32_t __stdcall RunWsMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage = 1;
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			bool color = string(filename).find(".wsc") != string::npos;
+			emu->GetSettings()->GetWsConfig().Model = color ? WsModel::Color : WsModel::Monochrome;
+			emu->GetSettings()->GetWsConfig().UseBootRom = false;
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			{
+				auto lock = emu->AcquireLock(); auto ws = dynamic_cast<WsConsole*>(emu->GetConsole().get());
+				if(!ws) { throw std::runtime_error("Expected WS"); }
+				auto check = [](bool v) { if(!v) { throw std::runtime_error("WS audio assertion"); } }; check(ws->IsColorModel() == color);
+				auto mm = ws->GetMemoryManager(); auto music = std::make_shared<MusicReplacement>(packet, length, 0x10FFFF, 0xFFFFF);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				stage = 2; mm->DebugWrite(0x760, 6); mm->DebugWrite(0x653, 0x55); mm->DebugWrite(0x652, 8); check(!music->ActiveTrack());
+				mm->Write<uint8_t>(0, 0x652, 8, MemoryOperationType::DmaWrite); check(!music->ActiveTrack());
+				mm->Write<uint8_t>(0x60, 0x52, 8); check(music->ActiveTrack() == 1); // Segment alias resolves to linear 00652.
+				stage = 3; music->ResetPlayback(); mm->DebugWrite(0x653, 0); mm->Write<uint16_t>(0xFFFF, 0x662, 0x5508); check(music->ActiveTrack() == 1); // 20-bit wrap; complete aligned word context.
+				stage = 4; music->ResetPlayback(); mm->Write<uint16_t>(0, 0x651, 0x08AB, MemoryOperationType::DmaWrite); check(!music->ActiveTrack()); // Split writes must retain operation type.
+				mm->Write<uint16_t>(0, 0x651, 0x08AB); check(music->ActiveTrack() == 1);
+				stage = 5; mm->Write<uint8_t>(0, 0x760, 4); check(music->ActiveTrack() == 1); mm->Write<uint8_t>(0x1000, 0x652, 8); check(music->ActiveTrack() == 2); // Full 20-bit trigger identity.
+				stage = 6; music->ResetPlayback(); mm->Write<uint8_t>(0, 0x80, 0x90); check(!music->ActiveTrack()); mm->WritePort<uint8_t>(0x280, 0x90); check(!music->ActiveTrack());
+				mm->WritePort<uint8_t>(0x80, 0x90); check(music->ActiveTrack() == 2);
+				stage = 7; music->ResetPlayback(); mm->WritePort<uint16_t>(0x80, 0x3412); check(!music->ActiveTrack()); vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000); check(samples[0] == 4000); // High byte of word port write.
+				music->ResetPlayback(); music->Mix(samples.data(), 8, 8000); check(samples[0] == 0);
+			}
+			emu->Stop(false); emu->Release(); return 0;
+		} catch(...) { emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunSnesMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage = 1;
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			{
+				auto lock = emu->AcquireLock(); auto snes = dynamic_cast<SnesConsole*>(emu->GetConsole().get());
+				if(!snes) { throw std::runtime_error("Expected SNES"); }
+				auto check = [](bool v) { if(!v) { throw std::runtime_error("SNES audio assertion"); } };
+				auto mm = snes->GetMemoryManager(); auto spc = snes->GetSpc(); auto music = std::make_shared<MusicReplacement>(packet, length, 0x100FFFF);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				stage = 2; mm->GetMemoryMappings()->DebugWrite(0x7E0760, 6); mm->GetMemoryMappings()->DebugWrite(0x7E0652, 8); check(!music->ActiveTrack());
+				mm->WriteDma(0x7E0652, 8, true); check(!music->ActiveTrack());
+				mm->Write(0x7E0652, 8, MemoryOperationType::Write); check(music->ActiveTrack() == 1);
+				stage = 3; mm->Write(0x000760, 4, MemoryOperationType::Write); check(music->ActiveTrack() == 1); // WRAM mirror.
+				music->ResetPlayback(); mm->Write(0x002140, 8, MemoryOperationType::Write); check(music->ActiveTrack() == 1);
+				stage = 4; music->ResetPlayback(); spc->DebugWrite(0x652, 8); spc->DspWriteRam(0x652, 8); check(!music->ActiveTrack());
+				// Execute original SPC700 code through the real instruction interpreter.
+				spc->Reset(); spc->GetState().PC = 0x1000;
+				vector<uint8_t> program {0xE8,6,0xC5,0x60,7,0xE8,8,0xC5,0x52,6,0xE8,1,0xC5,0x53,6,0x2F,0xFE};
+				for(size_t i = 0; i < program.size(); i++) { spc->DebugWrite((uint16_t)(0x1000 + i), program[i]); }
+				for(int i = 0; i < 1000; i++) { mm->IncrementMasterClockValue(10); } spc->Run(); check(music->ActiveTrack() == 2);
+				stage = 5; music->Command(2); vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000); check(samples[0] == 4000); // SPC trigger, main CPU RAM context, independent effect.
+				music->Command(5); music->Command(3); music->Mix(samples.data(), 8, 8000); check(samples[0] == -4000);
+				stage = 6; uint8_t value; check(!mm->ReadMusicMemory(0x002140, value)); check(mm->ReadMusicMemory(0x1000760, value) && value == 6);
+				music->ResetPlayback(); music->Mix(samples.data(), 8, 8000); check(samples[0] == 0);
+			}
+			emu->Stop(false); emu->Release(); return 0;
+		} catch(...) { emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunSmsMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage = 1;
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			{
+				auto lock = emu->AcquireLock(); auto sms = dynamic_cast<SmsConsole*>(emu->GetConsole().get());
+				if(!sms) { throw std::runtime_error("Expected SMS"); }
+				auto check = [](bool v) { if(!v) { throw std::runtime_error("SMS audio assertion"); } };
+				auto mm = sms->GetMemoryManager(); auto music = std::make_shared<MusicReplacement>(packet, length, 0x100FF, 0xFFFF);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				stage = 2; mm->DebugWrite(0xC760, 6); mm->DebugWrite(0xC652, 8); check(!music->ActiveTrack());
+				mm->Write(0xC652, 8); check(music->ActiveTrack() == 1);
+				stage = 3; mm->Write(0xC760, 4); check(music->ActiveTrack() == 1); mm->Write(0xC652, 8); check(music->ActiveTrack() == 2);
+				stage = 4; music->ResetPlayback(); mm->Write(0x007F, 0x90); check(!music->ActiveTrack()); // Memory and ports cannot collide.
+				mm->WritePort(0x7E, 0x90); check(!music->ActiveTrack()); // Aliased hardware port is a distinct rule address.
+				mm->WritePort(0x7F, 0x90); check(music->ActiveTrack() == 1);
+				stage = 5; music->ResetPlayback(); mm->WritePort(0x7F, 0x91); check(!music->ActiveTrack());
+				vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000); check(samples[0] == 4000); // Effect triggered by port write.
+				stage = 6; mm->Write(0xE760, 6); mm->Write(0xC652, 8); check(music->ActiveTrack() == 1); // RAM mirror visible in context.
+				music->ResetPlayback(); music->Mix(samples.data(), 8, 8000); check(samples[0] == 0);
+				stage = 7; bool rejected = false; try { MusicReplacement narrow(packet, length); } catch(...) { rejected = true; } check(rejected);
+			}
+			emu->Stop(false); emu->Release(); return 0;
+		} catch(...) { emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunPceMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage = 1;
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			{
+				auto lock = emu->AcquireLock(); auto pce = dynamic_cast<PceConsole*>(emu->GetConsole().get());
+				if(!pce) { throw std::runtime_error("Expected PCE"); }
+				auto check = [](bool v) { if(!v) { throw std::runtime_error("PCE audio assertion"); } };
+				auto mm = pce->GetMemoryManager(); auto music = std::make_shared<MusicReplacement>(packet, length);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				mm->SetMprValue(1, 0xFF); mm->SetMprValue(2, 0xF8); mm->SetMprValue(4, 0xF8);
+				stage = 2; mm->DebugWrite(0x2760, 6); mm->DebugWrite(0x2652, 8); check(!music->ActiveTrack());
+				mm->Write(0x2652, 8, MemoryOperationType::DmaWrite); check(!music->ActiveTrack());
+				mm->Write(0x2652, 8, MemoryOperationType::Write); check(music->ActiveTrack() == 1);
+				stage = 3; music->ResetPlayback(); mm->SetMprValue(2, 0); // Current bank now ROM, whose byte does not match post-write RAM context.
+				mm->Write(0x2652, 8, MemoryOperationType::Write); check(!music->ActiveTrack());
+				mm->SetMprValue(2, 0xF8); mm->Write(0x2652, 8, MemoryOperationType::Write); check(music->ActiveTrack() == 1);
+				stage = 4; mm->Write(0x4760, 4, MemoryOperationType::Write); check(music->ActiveTrack() == 1);
+				mm->Write(0x4652, 8, MemoryOperationType::Write); check(music->ActiveTrack() == 2); // Separate logical trigger, same mapped RAM bank.
+				stage = 5; music->ResetPlayback(); mm->Write(0x2653, 1, MemoryOperationType::Write);
+				vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000); check(samples[0] == 4000 && !music->ActiveTrack()); // Missing I/O context must fail even !=.
+				music->ResetPlayback(); music->Mix(samples.data(), 8, 8000); check(samples[0] == 0);
+			}
+			emu->Stop(false); emu->Release(); return 0;
+		} catch(...) { emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunGbaMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage = 1;
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			{
+				auto lock = emu->AcquireLock(); auto gba = dynamic_cast<GbaConsole*>(emu->GetConsole().get());
+				if(!gba) { throw std::runtime_error("Expected GBA"); }
+				auto check = [](bool v) { if(!v) { throw std::runtime_error("GBA audio assertion"); } };
+				auto mm = gba->GetMemoryManager(); auto music = std::make_shared<MusicReplacement>(packet, length, 0x0FFFFFFF);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				stage = 2; mm->DebugWrite(0x02000760, 6); mm->DebugWrite(0x02000653, 0x55); mm->DebugWrite(0x02000652, 8); check(!music->ActiveTrack());
+				mm->Write(GbaAccessMode::Byte | GbaAccessMode::Dma, 0x02000652, 8); check(!music->ActiveTrack());
+				mm->Write(GbaAccessMode::Byte, 0x02000652, 8); check(music->ActiveTrack() == 1);
+				stage = 3; music->ResetPlayback(); mm->DebugWrite(0x02000653, 0);
+				mm->Write(GbaAccessMode::HalfWord, 0x02000653, 0x5508); check(music->ActiveTrack() == 1); // Aligned write; both bytes committed before conditions.
+				stage = 4; music->ResetPlayback(); mm->Write(GbaAccessMode::Byte, 0x03000760, 4); check(!music->ActiveTrack());
+				mm->Write(GbaAccessMode::Byte, 0x03000652, 8); check(music->ActiveTrack() == 2); // Full address identity despite prefilter collision.
+				stage = 5; music->ResetPlayback(); mm->Write(GbaAccessMode::Word, 0x02000657, 0x1234ABCD); check(!music->ActiveTrack());
+				vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000); check(samples[0] == 4000); // High-byte effect trigger plus sibling context.
+				stage = 6; bool rejected = false; try { MusicReplacement narrow(packet, length); } catch(...) { rejected = true; } check(rejected);
+				for(uint32_t cut = 0; cut < length; cut++) { rejected = false; try { MusicReplacement invalid(packet, cut, 0x0FFFFFFF); } catch(...) { rejected = true; } check(rejected); }
+			}
+			emu->Stop(false); emu->Release(); return 0;
+		} catch(...) { emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunGbMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		unique_ptr<Emulator> emu(new Emulator());
+		try {
+			emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			emu->GetSettings()->GetGameboyConfig().Model = string(filename).find(".gbc") != string::npos ? GameboyModel::GameboyColor : GameboyModel::Gameboy;
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return 1; }
+			uint32_t result = 0;
+			{
+				auto lock = emu->AcquireLock(); auto gb = dynamic_cast<Gameboy*>(emu->GetConsole().get());
+				if(!gb) { throw std::runtime_error("Expected standalone Game Boy"); }
+				auto mm = gb->GetMemoryManager(); auto music = std::make_shared<MusicReplacement>(packet, length);
+				emu->GetSoundMixer()->SetReplacementMusic(music);
+				mm->DebugWrite(0xC760, 6); mm->DebugWrite(0xC652, 8);
+				if(music->ActiveTrack()) { result = 2; }
+				mm->Write<MemoryOperationType::DmaWrite>(0xC652, 8);
+				if(music->ActiveTrack()) { result = 3; }
+				mm->ProcessCpuWrite(0xC652, 8);
+				if(music->ActiveTrack() != 1) { result = 4; }
+				vector<int16_t> samples(16, 0); music->Mix(samples.data(), 8, 8000);
+				if(samples[0] != 4000) { result = 5; }
+				mm->ProcessCpuWrite(0xC760, 4);
+				if(music->ActiveTrack() != 1) { result = 6; }
+				mm->ProcessCpuWrite(0xC652, 8);
+				if(music->ActiveTrack() != 2) { result = 7; }
+				music->ResetPlayback(); mm->ProcessCpuWrite(0xC653, 1);
+				if(music->ActiveTrack()) { result = 8; }
+				samples.assign(16, 0); music->Mix(samples.data(), 8, 8000);
+				if(samples[0] != 4000) { result = 9; } // Effect-only event.
+			}
+			emu->Stop(false); emu->Release(); return result;
+		} catch(...) { emu->Stop(false); emu->Release(); return 10; }
+	}
+	DllExport uint32_t __stdcall RunMusicReplacementChecks(const uint8_t* packet, uint32_t length, const char* filename)
+	{
+		uint32_t stage = 1;
+		try {
+			auto check = [](bool value) { if(!value) { throw std::runtime_error("Music assertion"); } };
+			MusicReplacement music(packet, length); check(music.HasTriggers());
+			vector<int16_t> samples(16, 3000); music.Mix(samples.data(), 8, 8000); check(std::all_of(samples.begin(), samples.end(), [](int16_t v) { return v == 0; }));
+			stage = 2; MetaMemorySnapshot memory {{0x652, 8}, {0x760, 6}}; std::set<uint32_t> reads;
+			auto read = [&](uint32_t address, uint8_t& value) { reads.insert(address); auto found = memory.find(address); if(found == memory.end()) { return false; } value = found->second; return true; };
+			music.ProcessWrite(0x760, 6, read); check(music.ActiveTrack() == 0);
+			music.ProcessWrite(0x652, 8, read); check(music.ActiveTrack() == 1 && reads.size() == 2);
+			stage = 3; std::fill(samples.begin(), samples.end(), 0); music.Mix(samples.data(), 8, 8000);
+			for(int i = 0; i < 8; i++) { check(samples[i * 2] == 4000 + i * 10 && samples[i * 2 + 1] == samples[i * 2]); }
+			music.ProcessWrite(0x652, 8, read); music.Mix(samples.data(), 8, 8000); check(samples[0] == 4080); // Continue, no restart.
+			music.Command(0, 1, true); music.Mix(samples.data(), 8, 16000); check(samples[0] == 4000 && samples[2] == 4005 && samples[4] == 4010);
+			stage = 4; memory[0x760] = 4; check(music.ActiveTrack() == 1); music.ProcessWrite(0x652, 8, read); check(music.ActiveTrack() == 2);
+			samples.resize(80); music.Mix(samples.data(), 40, 8000); check(samples[0] == -4000 && samples[64] == -4160 && samples[78] == -4230);
+			stage = 5; music.ProcessWrite(0x653, 1, read); samples.assign(16, 1234); music.Mix(samples.data(), 8, 8000); check(samples[0] == 0 && music.ActiveTrack() == 2);
+			music.ProcessWrite(0x654, 1, read); music.Mix(samples.data(), 8, 8000); check(samples[0] == -4240);
+			music.ProcessWrite(0x655, 1, read); check(music.ActiveTrack() == 0);
+			memory.erase(0x760); music.ProcessWrite(0x652, 8, read); check(music.ActiveTrack() == 0);
+			vector<uint8_t> volumes(packet, packet + length); volumes[8] = 0; volumes[12] = volumes[16] = 50;
+			MusicReplacement mixed(volumes.data(), volumes.size()); samples.assign(16, 3000); mixed.Mix(samples.data(), 8, 8000); check(samples[0] == 1500);
+			mixed.Command(0, 1); samples.assign(16, 3000); mixed.Mix(samples.data(), 8, 8000); check(samples[0] == 3500);
+			volumes[4] = 0; MusicReplacement disabled(volumes.data(), volumes.size()); samples.assign(16, 3000); disabled.Mix(samples.data(), 8, 8000); check(samples[0] == 3000 && !disabled.HasTriggers());
+			stage = 6;
+			for(uint32_t cut = 0; cut < length; cut++) { bool rejected = false; try { MusicReplacement invalid(packet, cut); } catch(...) { rejected = true; } check(rejected); }
+			vector<uint8_t> bad(packet, packet + length); bad.push_back(0); bool rejected = false; try { MusicReplacement invalid(bad.data(), bad.size()); } catch(...) { rejected = true; } check(rejected);
+			stage = 7;
+			vector<uint8_t> fade(packet, packet + length); fade[20] = 1;
+			uint32_t pathLength = (uint32_t)fade[32] | ((uint32_t)fade[33] << 8) | ((uint32_t)fade[34] << 16) | ((uint32_t)fade[35] << 24);
+			fade[36 + pathLength + 16] = 1; MusicReplacement fading(fade.data(), fade.size()); fading.Command(0, 1);
+			samples.assign(32, 0); fading.Mix(samples.data(), 16, 8000); check(samples[0] > 0 && samples[0] < 4000 && samples[30] == 4150);
+			fading.Command(1); fading.Mix(samples.data(), 16, 8000); check(fading.ActiveTrack() == 0 && samples[30] == 0);
+			stage = 9;
+			vector<uint8_t> effects(packet, packet + length);
+			auto word = [&](size_t at) { uint32_t v = 0; for(int j = 0; j < 4; j++) { v |= (uint32_t)effects.at(at + j) << (8 * j); } return v; };
+			auto put = [&](size_t at, uint32_t v) { for(int j = 0; j < 4; j++) { effects.at(at + j) = (uint8_t)(v >> (8 * j)); } };
+			size_t offset = 28;
+			for(uint32_t i = 0; i < word(24); i++) { offset += 28 + word(offset + 4); }
+			size_t ruleCountOffset = offset; uint32_t originalRules = word(offset); offset += 4;
+			vector<vector<uint8_t>> effectRules;
+			for(uint32_t i = 0; i < originalRules; i++) {
+				size_t bytes = 36 + word(offset + 32) * 16;
+				if(i < 2) { effectRules.emplace_back(effects.begin() + offset, effects.begin() + offset + bytes); }
+				offset += bytes;
+			}
+			put(ruleCountOffset, originalRules + 2);
+			for(uint32_t i = 0; i < 2; i++) {
+				size_t start = effects.size(); effects.insert(effects.end(), effectRules[i].begin(), effectRules[i].end());
+				put(start, 1000 + i); put(start + 4, 4); put(start + 12, 1);
+			}
+			MusicReplacement fx(effects.data(), effects.size()); memory[0x760] = 6;
+			fx.ProcessWrite(0x652, 8, read); samples.assign(16, 0); fx.Mix(samples.data(), 8, 8000);
+			check(fx.ActiveTrack() == 1 && samples[0] == 8000); // Same event starts both independently.
+			fx.Command(2); fx.Mix(samples.data(), 8, 8000); check(samples[0] == 4080); // Music pause leaves effects running.
+			check(fx.Command(4, 1, false)); fx.Mix(samples.data(), 8, 8000); check(samples[0] == 4160); // Ignore repeated effect.
+			check(fx.Command(4, 1, true)); fx.Mix(samples.data(), 8, 8000); check(samples[0] == 4000);
+			check(fx.Command(4, 2, true)); fx.Mix(samples.data(), 8, 8000); check(samples[0] == 80); // Two independent effects overlap.
+			fx.Command(5); fx.Mix(samples.data(), 8, 8000); check(samples[0] == 0 && fx.ActiveTrack() == 1);
+			fx.Command(4, 1); samples.assign(160, 0); fx.Mix(samples.data(), 80, 8000); check(samples[0] == 4000 && samples[126] == 4630 && samples[128] == 0); // Effect never loops.
+			fx.Command(4, 1); fx.ResetPlayback(); fx.Mix(samples.data(), 80, 8000); check(samples[0] == 0 && fx.ActiveTrack() == 0);
+			std::cout << "PASS: independent music/effect rules, overlapping effects, per-effect retrigger, one-shot completion, stop and reset." << std::endl;
+			stage = 8;
+			std::cout << "MUSIC: pure playback/packet checks passed; loading live NES fixture." << std::endl;
+			FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+			unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+			// Only exercise committed memory writes here; no running CPU thread is
+			// needed. This avoids racing immediate Pause/Lock against thread startup.
+			if(!emu->LoadRom((VirtualFile)filename, VirtualFile(), false)) { emu->Release(); return stage; }
+			std::cout << "MUSIC: live fixture loaded; pausing for post-write checks." << std::endl;
+			emu->Pause();
+			{
+				auto emuLock = emu->AcquireLock(); auto nes = dynamic_cast<NesConsole*>(emu->GetConsole().get()); check(nes != nullptr);
+				std::cout << "MUSIC: live fixture locked." << std::endl;
+				auto live = std::make_shared<MusicReplacement>(packet, length); emu->GetSoundMixer()->SetReplacementMusic(live);
+				nes->GetMemoryManager()->Write(0x760, 6, MemoryOperationType::Write); nes->GetMemoryManager()->Write(0x652, 8, MemoryOperationType::Write);
+				check(live->ActiveTrack() == 1); // Includes trigger-address context, proving post-commit capture.
+				live->ResetPlayback(); nes->GetMemoryManager()->Write(0x760, 4, MemoryOperationType::Write); check(live->ActiveTrack() == 0);
+				nes->GetMemoryManager()->Write(0x652, 8, MemoryOperationType::Write); check(live->ActiveTrack() == 2);
+				emu->GetSoundMixer()->ResetReplacementMusic(); check(live->ActiveTrack() == 0);
+				emu->GetSoundMixer()->ClearReplacementMusic(); check(!emu->GetSoundMixer()->HasMusicTriggers());
+			}
+			emu->Stop(false); emu->Release();
+			std::cout << "MUSIC: live fixture shutdown completed." << std::endl;
+			std::cout << "PASS: music native mute, write-event/context precedence, post-commit NES writes, continue/restart, resampling, loops, pause/resume/stop, fades, missing bytes and packet rejection." << std::endl;
+			return 0;
+		} catch(...) { return stage; }
+	}
 	DllExport void __stdcall ConfigureMetaSoftwareRendererTest()
 	{
 		// Use the regular software renderer without opening an OS window or audio
@@ -691,7 +1567,7 @@ extern "C"
 		emu->Release(); return flags;
 	}
 
-	DllExport uint32_t __stdcall RunMetaSpriteSnesCaptureTest(const char* filename)
+	static uint32_t RunMetaSpriteSnesCaptureTestImpl(const char* filename, const std::vector<MetaSpriteReplacement>* authored)
 	{
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
 		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
@@ -735,6 +1611,104 @@ extern "C"
 			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
 			if(auto snes = dynamic_cast<SnesConsole*>(emu->GetConsole().get())) {
 				snes->GetPpu()->SetMetaSpriteCapture(true);
+				if(string(filename).find("obj-interlace") != string::npos) {
+					bool horizontalFlip=string(filename).find("hflip")!=string::npos;
+					bool verticalFlip=string(filename).find("vflip")!=string::npos;
+					bool multiMember=string(filename).find("obj-interlace-group")!=string::npos;
+					bool rectangular=string(filename).find("obj-interlace-rect")!=string::npos;
+					bool changingPoses=string(filename).find("obj-interlace-poses")!=string::npos;
+					int sourceWidth=rectangular ? 16 : 8, sourceHeight=rectangular ? 32 : 8;
+					auto sourcePixel = [&](int x,int y) {
+						int sx=horizontalFlip ? sourceWidth-1-x : x;
+						int sy=verticalFlip ? (y<sourceWidth ? sourceWidth-1-y : sourceWidth*3-1-y) : y;
+						return sx>=7 || sy>=8 ? 0u : (sy & 1) ? 0xFF0000FFu : 0xFFFF0000u;
+					};
+					auto waitForField = [&](std::function<bool()> condition) {
+						for(int attempt=0;attempt<500;attempt++) {
+							{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(condition()) { return true; } }
+							std::this_thread::sleep_for(std::chrono::milliseconds(10));
+						} return false;
+					};
+					uint8_t capturedPhases=0;
+					bool captured = waitForField([&]() {
+						if(!renderer.Capture || renderer.Width!=512 || renderer.Height!=478) { return false; }
+						uint8_t phases=0;
+						for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
+							if((graphic.HardwareSprite & 127)!=0 || graphic.X!=8 || graphic.Y!=30 || graphic.Width!=sourceWidth || graphic.Height!=sourceHeight || graphic.SnesRowStep!=2) { continue; }
+							uint32_t first=graphic.Pixels[graphic.SnesRowPhase*sourceWidth];
+							bool secondPose=changingPoses && (first==0xFF00FF00 || first==0xFFFFFFFF);
+							for(int y=graphic.SnesRowPhase;y<sourceHeight;y+=2) { for(int x=0;x<sourceWidth;x++) {
+								uint32_t expected=sourcePixel(x,y);
+								if(secondPose && expected) { expected=expected==0xFFFF0000 ? 0xFF00FF00 : 0xFFFFFFFF; }
+								if(graphic.Pixels[y*sourceWidth+x]!=expected) { return false; }
+							} }
+							phases |= (uint8_t)(1 << graphic.SnesRowPhase);
+						}
+						capturedPhases |= phases; return capturedPhases==3;
+					});
+					if(captured) {
+						flags=1; MetaSpriteReplacement replacement; replacement.Id=1;
+						MetaSpriteGraphic member {0,0,sourceWidth,sourceHeight,-1,std::vector<uint32_t>(sourceWidth*sourceHeight)};
+						for(int y=0;y<sourceHeight;y++) { for(int x=0;x<sourceWidth;x++) { member.Pixels[y*sourceWidth+x]=sourcePixel(x,y); } }
+						replacement.Members={member};
+						if(multiMember) { member.X=12; member.Y=8; replacement.Members.push_back(member); }
+						replacement.ArtworkWidth=replacement.ArtworkHeight=12;
+						replacement.ArtworkOriginX=replacement.ArtworkOriginY=1;
+						replacement.Artwork.assign(144,0xFF00FF00); replacement.Artwork[0]=0; replacement.Artwork[1]=0x8000FF00;
+						if(authored) { replacement=authored->front(); }
+						if(changingPoses) {
+							auto second=replacement; second.Id=2;
+							for(auto& color : second.Members[0].Pixels) { if(color) { color=color==0xFFFF0000 ? 0xFF00FF00 : 0xFFFFFFFF; } }
+							second.Artwork.assign(144,0xFFFFFF00); second.Artwork[0]=0; second.Artwork[1]=0x80FFFF00;
+							if(string(filename).find("poses-conditions")!=string::npos) { replacement.MemoryConditions={{0,0,0xFF}}; second.MemoryConditions={{0,1,0xFF}}; }
+							emu->GetVideoDecoder()->SetMetaSpriteGroups({replacement,second});
+						} else { emu->GetVideoDecoder()->SetMetaSpriteGroups({replacement}); }
+						uint8_t renderedPhases=0;
+						if(waitForField([&]() {
+							if(!renderer.Capture || renderer.Width!=512 || renderer.Height!=478) { return false; }
+							int phase=bobField ? renderer.Capture->SnesOutputOffsetY : 0;
+							if(currentField) { phase=renderer.Capture->Pixels[30*512].SnesFallbackCaptured ? 0 : 1; }
+							int poseByField[2]={-1,-1};
+							if(changingPoses) {
+								for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
+									if((graphic.HardwareSprite & 127)!=0 || graphic.SnesField<1 || graphic.SnesField>2) { continue; }
+									uint32_t first=graphic.Pixels[graphic.SnesRowPhase*graphic.Width];
+									poseByField[graphic.SnesField-1]=(first==0xFF00FF00 || first==0xFFFFFFFF) ? 1 : 0;
+								}
+								if(poseByField[0]<0 || poseByField[1]<0 || poseByField[0]==poseByField[1]) { return false; }
+							}
+							auto expectedPixel = [&](int x,int y,int fieldPhase) {
+								if(y<14 || y>=462 || (currentField && (y & 1)!=fieldPhase)) { return 0xFF000000u; }
+								if(window && x>=24 && x<32) { return 0xFF0000FFu; }
+								int sourceY=bobField ? (fieldPhase ? (y==14 ? 15 : ((y-1)/2)*2+1) : (y/2)*2) : y;
+								if(authored) {
+									int ax=x/2-(8+replacement.OriginX-replacement.ArtworkOriginX);
+									int ay=sourceY-(30+replacement.OriginY-replacement.ArtworkOriginY);
+									if(ax>=0 && ay>=0 && ax<replacement.ArtworkWidth && ay<replacement.ArtworkHeight) {
+										uint32_t color=replacement.Artwork[ay*replacement.ArtworkWidth+ax];
+										return (color>>24)==255 ? color : 0xFF0000FFu;
+									} return 0xFF0000FFu;
+								}
+								if(x>=14 && x<38 && sourceY>=29 && sourceY<41) {
+									if(changingPoses && poseByField[y & 1]==1) { return sourceY==29 && x<16 ? 0xFF0000FFu : sourceY==29 && x<18 ? 0xFF80807Fu : 0xFFFFFF00u; }
+									return sourceY==29 && x<16 ? 0xFF0000FFu : sourceY==29 && x<18 ? 0xFF00807Fu : 0xFF00FF00u;
+								} return 0xFF0000FFu;
+							};
+							for(int y=0;y<478;y++) { for(int x=0;x<512;x++) {
+								uint32_t expected=expectedPixel(x,y,phase);
+								if(bobBlendField) { uint32_t previous=expectedPixel(x,y,1-phase); expected=(((expected ^ previous) & 0xFFFEFEFEu)>>1)+(expected & previous); }
+								if(renderer.Pixels[y*512+x]!=expected) { return false; }
+							} } renderedPhases |= (uint8_t)(1 << phase); return (!currentField && !bobField) || renderedPhases==3;
+						})) { flags|=2; }
+						emu->GetVideoDecoder()->SetMetaReplacements({},{});
+						if(waitForField([&]() {
+							uint32_t native=renderer.Pixels[(verticalFlip ? (rectangular ? 39 : 31) : 30)*512+18];
+							return (native==(bobBlendField ? 0xFF7F007Fu : 0xFFFF0000u) || (changingPoses && native==0xFF00FF00)) && renderer.Pixels[40*512+36]==0xFF0000FF;
+						})) { flags|=4; }
+					}
+					std::cout << "SNES OBJ-interlace field capture/full-canvas replacement probe flags: " << flags << std::endl;
+					emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Release(); return flags;
+				}
 				for(int attempt = 0; attempt < 500; attempt++) {
 					{
 						std::lock_guard<std::mutex> lock(renderer.Mutex);
@@ -943,6 +1917,7 @@ extern "C"
 					} else if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; }
 					emu->GetVideoDecoder()->SetMetaReplacements({}, {});
 					if(waitFor([&]() { return renderer.Width == nativeWidth && renderer.Height == nativeHeight && renderer.Pixels[spriteY * nativeWidth + spriteX] == nativeSpriteColor; })) { flags |= 4; }
+					if(string(filename).find("panorama") != string::npos && !VerifyDedicatedWidescreen(emu.get(), renderer, nativeWidth, nativeHeight, 0, string(filename).find("negative") != string::npos)) { flags |= 128; }
 					if(string(filename).find("frame-timing") != string::npos) {
 						snes->GetPpu()->SetMetaSpriteCapture(false);
 						if(!waitFor([&]() { return !renderer.Capture && renderer.Width == nativeWidth && renderer.Height == nativeHeight; })
@@ -1064,6 +2039,18 @@ extern "C"
 		}
 		emu->Release(); return flags;
 	}
+	DllExport uint32_t __stdcall RunMetaSpriteSnesCaptureTest(const char* filename)
+	{
+		return RunMetaSpriteSnesCaptureTestImpl(filename,nullptr);
+	}
+	DllExport uint32_t __stdcall RunMetaSpriteSnesAuthoredPackTest(const char* filename, const uint8_t* packet, uint32_t length)
+	{
+		try {
+			auto groups=MetaSpritePacket(packet,length).Parse();
+			if(groups.size()!=1 || groups.front().ArtworkScale!=1 || groups.front().Members.size()!=2) { return 0; }
+			return RunMetaSpriteSnesCaptureTestImpl(filename,&groups);
+		} catch(...) { return 0; }
+	}
 	DllExport uint32_t __stdcall RunMetaSpriteNesCaptureTest(const char* filename)
 	{
 		bool rasterFixture = string(filename).find("sprite0-raster") != string::npos;
@@ -1126,9 +2113,12 @@ extern "C"
 					group.Id = 1; group.ArtworkScale = 2; group.ArtworkWidth = group.ArtworkHeight = 16;
 					group.Artwork.assign(256, 0xFF00FF00); group.Artwork[0] = 0;
 					source.X = source.Y = 0; group.Members = {source};
-					auto waitFor = [&](std::function<bool()> condition) {
-						for(int attempt = 0; attempt < 500; attempt++) {
-							{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(condition()) { return true; } }
+					auto waitFor = [&](std::function<bool()> condition, uint32_t frameBudget = 0) {
+						uint32_t firstFrame; { std::lock_guard<std::mutex> lock(renderer.Mutex); firstFrame = renderer.FrameNumber; }
+						// Smooth movement requires emulated frames, independent of host
+						// Debug throughput. Keep a frame limit plus a bounded watchdog.
+						for(int attempt = 0; attempt < (frameBudget ? 6000 : 500); attempt++) {
+							{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(condition()) { return true; } if(frameBudget && renderer.FrameNumber - firstFrame > frameBudget) { return false; } }
 							std::this_thread::sleep_for(std::chrono::milliseconds(10));
 						}
 						return false;
@@ -1201,6 +2191,94 @@ extern "C"
 							})) { flags |= 128; }
 						}
 						if(!(flags & 128)) { std::cout << "PASS: NES NROM sprite-0-hit split remains native; PNG uses gameplay/HUD reference, half-rate tracking or CPU pixel/page camera beyond nametable wrapping." << std::endl; }
+						// Verify the actual decoder/renderer canvas, including native-pixel
+						// preservation, CPU-camera scenery and switching back to native size.
+						vector<uint32_t> nativeViewport;
+						{ std::lock_guard<std::mutex> lock(renderer.Mutex); nativeViewport = renderer.Pixels; }
+						VideoConfig originalVideo = emu->GetSettings()->GetVideoConfig();
+						for(int variant = 0; variant < 17; variant++) {
+							VideoConfig wideVideo = originalVideo;
+							wideVideo.DecorativeWidescreen = true;
+							wideVideo.AspectRatio = VideoAspectRatio::NoStretching;
+							wideVideo.DecorativeAspectRatio = variant == 1 ? 21.0 / 9 : variant == 2 ? 2.0 : 16.0 / 9;
+							wideVideo.DecorativeSideBrightness = variant == 1 ? 37 : variant == 4 ? 0 : 100;
+							wideVideo.DecorativeViewportPosition = variant == 2 ? 1 : variant == 3 ? 2 : 0;
+							wideVideo.DecorativeCustomWidths = variant == 6;
+							wideVideo.DecorativeLeftWidth = 5; wideVideo.DecorativeRightWidth = 9;
+							wideVideo.DecorativeFadeWidth = variant == 6 ? 4 : 0;
+							if(variant >= 7) {
+								raster.WidescreenPosition = 3; raster.WidescreenSlideSpeed = 0;
+								raster.WidescreenCameraMin = variant == 7 ? -10 : -100;
+								raster.WidescreenCameraMax = variant == 7 ? 300 : -10;
+							}
+							raster.ExtendIntoMargins = variant != 5;
+							raster.UseWidescreenPosition = variant >= 7;
+							if(variant >= 9) {
+								// Per-PNG RAM boundaries must override a centred video profile,
+								// including capture of bytes not used by activation/camera.
+								wideVideo.DecorativeViewportPosition = 0;
+								raster.WidescreenPosition = 3; raster.WidescreenUseRamFlags = true;
+								raster.WidescreenSlideSpeed = variant == 10 ? 3 : 0;
+								raster.WidescreenLeftFlags = {{0x60, (uint8_t)(variant == 9 || variant == 11 ? 13 : 12), 255}};
+								raster.WidescreenRightFlags = {{0x60, (uint8_t)(variant == 10 || variant == 11 ? 13 : 12), 255}};
+							}
+							if(variant >= 13) {
+								raster.Id = variant; // Start each source at home, including the zero-speed case.
+								raster.WidescreenRamSpeed.Enabled = true;
+								raster.WidescreenRamSpeed.Address = variant == 13 ? 0x65 : variant == 14 ? 0x64 : 0x66;
+								raster.WidescreenRamSpeed.Multiplier = 0.0625;
+								raster.WidescreenRamSpeed.Maximum = 2;
+								raster.WidescreenUseRamFlags = false; // CPU limits still choose the target.
+								raster.WidescreenCameraMin = variant == 13 ? -10 : -100;
+								raster.WidescreenCameraMax = variant == 13 ? 100 : -10;
+							}
+							if(variant == 16) {
+								// Finite 1024-native-pixel canvas, camera effectively at 766
+								// before its configured trigger. Preserve the baseline pattern.
+								raster.WrapX = raster.WrapY = false; raster.X = -776;
+								raster.Width = 2048; raster.Height = 480; raster.Artwork.resize(2048 * 480);
+								for(int y = 0; y < 480; y++) { for(int x = 0; x < 2048; x++) {
+									raster.Artwork[y * 2048 + x] = 0xFF000000u | (((x - 1552) % 64 + 64) % 64 << 16) | (y % 64 << 8);
+								} }
+								raster.WidescreenCameraMin = -1000; raster.WidescreenCameraMax = 0;
+							}
+							uint32_t speedBefore;
+							{ std::lock_guard<std::mutex> lock(renderer.Mutex); speedBefore = renderer.FrameNumber; }
+							emu->GetVideoDecoder()->SetMetaReplacements({group}, {raster});
+							emu->GetSettings()->SetVideoConfig(wideVideo);
+							int wideWidth = variant == 6 ? 540 : variant == 1 ? 1120 : variant == 2 ? 960 : 854;
+							int left = variant == 16 ? 338 : variant == 6 ? 10 : variant == 2 || variant == 7 || variant == 9 || variant == 13 ? 0 : variant == 3 || variant == 8 || variant == 10 || variant == 14 ? wideWidth - 512 : (wideWidth - 512) / 2;
+							if(!waitFor([&]() {
+								if(renderer.Width != wideWidth || renderer.Height != 480 || nativeViewport.size() != 512 * 480) { return false; }
+								if(variant >= 13 && (!renderer.Capture || renderer.FrameNumber <= speedBefore + 5
+									|| !renderer.Capture->MemorySnapshot.count(raster.WidescreenRamSpeed.Address)
+									|| renderer.Capture->MemorySnapshot.at(raster.WidescreenRamSpeed.Address) != (variant == 13 ? 0xE8 : variant == 14 ? 0x18 : 0))) { return false; }
+								for(int y = 0; y < 480; y++) { for(int x = 0; x < wideWidth; x++) {
+									uint32_t expected;
+									if(x >= left && x < left + 512) { expected = nativeViewport[y * 512 + x - left]; }
+									else if(variant == 5) { expected = 0xFF000000; }
+									else {
+										int relative = x - left;
+										int ax = ((relative - 20) % 64 + 64) % 64, ay = y % 64;
+										int fade = variant == 6 ? std::min(x < left ? left - 1 - x : x - (left + 512), 8) : 1;
+										int denominator = variant == 6 ? 8 : 1;
+										int level = variant == 6 ? 100 * denominator - (100 - wideVideo.DecorativeSideBrightness) * fade : wideVideo.DecorativeSideBrightness;
+										expected = 0xFF000000 | ((ax * level + 50 * denominator) / (100 * denominator) << 16)
+											| ((ay * level + 50 * denominator) / (100 * denominator) << 8);
+									}
+									if(renderer.Pixels[y * wideWidth + x] != expected) { return false; }
+								} }
+								return true;
+							}, variant == 10 || variant == 13 || variant == 14 ? 128 : 0)) {
+								flags |= 128; std::lock_guard<std::mutex> lock(renderer.Mutex); int observedLeft = -1;
+								if(renderer.Height > 18) { for(uint32_t x = 0; x < renderer.Width; x++) { if(renderer.Pixels[18 * renderer.Width + x] == 0xFF00FF00) { observedLeft = (int)x - 16; break; } } }
+								std::cerr << "Decorative widescreen mismatch, NROM variant " << variant << "; left=" << observedLeft << "/" << left << "; frames=" << renderer.FrameNumber - speedBefore << std::endl;
+							}
+						}
+						// Config changes can happen while emulation is running.
+						emu->GetSettings()->SetVideoConfig(originalVideo);
+						if(!waitFor([&]() { return renderer.Width == 512 && renderer.Height == 480 && renderer.Pixels == nativeViewport; })) { flags |= 128; }
+						if(!(flags & 128)) { std::cout << "PASS: live NROM decorative canvas, CPU limits, RAM boundaries, signed player $18/$E8 speed, finite 1024px PNG coverage before trigger at effective camera 766, and restoration." << std::endl; }
 						emu->GetVideoDecoder()->SetMetaReplacements({group}, {});
 						if(!waitFor([&]() { return renderer.Width == 512 && renderer.Pixels[0] == 0xFF0000FF && renderer.Pixels[17 * 512 + 17] == 0xFF00FF00; })) { flags |= 128; }
 					}
@@ -1418,6 +2496,10 @@ extern "C"
 		bool quarterTurnObject = string(filename).find("quarter-turn") != string::npos;
 		bool twoDimensionalObject = string(filename).find("quarter-turn-2d") != string::npos;
 		bool mosaicObject = string(filename).find("object-affine") != string::npos && string(filename).find("mosaic") != string::npos;
+		bool ordinaryMosaic = string(filename).find("object-ordinary-") != string::npos;
+		bool flippedOrdinary = ordinaryMosaic && string(filename).find("flipped") != string::npos;
+		bool verticalAffineMosaic = mosaicObject && string(filename).find("vmosaic") != string::npos;
+		bool horizontalAffineMosaic = mosaicObject && string(filename).find("-vmosaic") == string::npos;
 		bool lowerReveal = string(filename).find("lower-reveal") != string::npos;
 		bool lowerSemi = lowerReveal && string(filename).find("semi") != string::npos;
 		bool lowerMosaic = string(filename).find("lower-reveal-mosaic") != string::npos;
@@ -1465,7 +2547,13 @@ extern "C"
 										// Quarter-turn source Y = floor(6 - x/2); rows 0..3 are also blue.
 										if(twoDimensionalObject && x >= (objectSize == 16 ? 9 : 5)) { expected = 0xFF0000FF; }
 										uint32_t displayed = dark ? (expected == 0xFF0000FF ? 0xFF00007B : 0xFF7B0000) : expected;
-										if(mosaicObject) { displayed = y >= 6 || (x & ~1) >= 5 ? 0xFF0000FF : 0xFFFF0000; }
+										if(mosaicObject) { int sampledX = horizontalAffineMosaic ? (x & ~1) : x; int sampledY = verticalAffineMosaic ? (y & ~3) : y; displayed = sampledY >= 6 || sampledX >= 5 ? 0xFF0000FF : 0xFFFF0000; }
+										if(ordinaryMosaic) {
+											int sourceX = flippedOrdinary ? 7 - x : x, sourceY = flippedOrdinary ? 7 - y : y;
+											expected = sourceX >= 5 || sourceY >= 5 ? 0xFF0000FF : 0xFFFF0000;
+											int displayedX = flippedOrdinary ? 7 - (x & ~1) : x, displayedY = flippedOrdinary ? 7 - (y & ~3) : (y & ~3);
+											displayed = displayedX >= 5 || displayedY >= 5 ? 0xFF0000FF : 0xFFFF0000;
+										}
 										if(renderer.Capture->Pixels[(y + 8) * 240 + x + 8].GbaObjectsEnabled == masked(x)) { expectedGraphic = false; }
 										if(masked(x)) { displayed = 0xFF0000FF; }
 										if(transparentSource || (holes && x == 7)) {
@@ -1478,7 +2566,9 @@ extern "C"
 											bool eligible = std::any_of(hole.GbaCoverage.begin(), hole.GbaCoverage.end(), [](const auto& coverage) { return coverage.Sprite == 0; });
 											if(hole.VisibleSprite != (overlap && !masked(x) && (!backgroundBetween || backgroundTie) ? 1 : -1) || eligible == masked(x)) { expectedGraphic = false; }
 										}
-										if(graphic.Pixels[y * objectSize + x] != expected || renderer.Pixels[(y + 8) * 240 + x + 8] != displayed) { expectedGraphic = false; }
+										if(graphic.Pixels[y * objectSize + x] != expected || renderer.Pixels[(y + 8) * 240 + x + 8] != displayed) {
+											expectedGraphic = false;
+										}
 									}
 									}
 								if(!expectedGraphic) { continue; }
@@ -1504,7 +2594,7 @@ extern "C"
 									if(!valid) { continue; }
 								}
 								const auto& pixel = renderer.Capture->Pixels[8 * 240 + 8];
-									if(pixel.VisibleSprite == (transparentSource ? -1 : 0) && pixel.SpriteColor == (transparentSource || mirrored ? 0x7C00 : 31) && pixel.SecondarySprite == -1
+									if(pixel.VisibleSprite == (transparentSource ? -1 : 0) && pixel.SpriteColor == (transparentSource || mirrored || flippedOrdinary ? 0x7C00 : 31) && pixel.SecondarySprite == -1
 									&& pixel.GbaFallbackCaptured && pixel.GbaFallbackColor == (backgroundBetween ? 0x7C1F : dark ? 0x3C00 : 0x7C00) && pixel.GbaFallbackMainColor == (backgroundBetween ? 0x7C1F : 0x7C00)) { flags |= 1; source = graphic; }
 							}
 						}
@@ -1661,7 +2751,8 @@ extern "C"
 					}
 					if(backgroundCapture || backgroundBetweenPng) { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaReplacements({}, {}); }
 					else { if(!VerifyLiveMemoryConditions(emu.get(), renderer, group)) { flags |= 128; } emu->GetVideoDecoder()->SetMetaSpriteGroups({}); }
-					if(waitFor([&]() { return renderer.Width == 240 && renderer.Height == 160 && renderer.Pixels[8 * 240 + 8] == (dark ? 0xFF7B0000 : transparentSource || mirrored ? 0xFF0000FF : 0xFFFF0000) && (!backgroundBetween || renderer.Pixels[0] == 0xFFFF00FF); })) { flags |= 4; }
+					if(waitFor([&]() { return renderer.Width == 240 && renderer.Height == 160 && renderer.Pixels[8 * 240 + 8] == (dark ? 0xFF7B0000 : transparentSource || mirrored || flippedOrdinary ? 0xFF0000FF : 0xFFFF0000) && (!backgroundBetween || renderer.Pixels[0] == 0xFFFF00FF); })) { flags |= 4; }
+					if(string(filename).find("panorama") != string::npos && !VerifyDedicatedWidescreen(emu.get(), renderer, 240, 160, backgroundLayer, string(filename).find("negative") != string::npos)) { flags |= 128; }
 				}
 			}
 			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
@@ -1842,6 +2933,8 @@ extern "C"
 		cfg.BlendFrames = false;
 		cfg.GbcAdjustColors = false;
 		emu->GetSettings()->GetSmsConfig().RamPowerOnState = RamState::AllZeros;
+		bool legacySmsFixture = string(filename).find("legacy-") != string::npos;
+		bool largeLegacySprite = legacySmsFixture && string(filename).find("large") != string::npos;
 		bool zoomFixture = string(filename).find("zoom") != string::npos;
 		bool sms1Fixture = string(filename).find("sms1") != string::npos;
 		bool leftFixture = string(filename).find("left") != string::npos;
@@ -1869,8 +2962,8 @@ extern "C"
 				int spriteY = sms ? 32 : windowObjectFixture ? 30 : 8;
 				int spriteX = sms && leftFixture ? -4 : sms && maskFixture ? 4 : windowObjectFixture ? 50 : 8;
 				int visibleX = maskFixture ? 8 : std::max(0, spriteX);
-				int spriteWidth = sms && zoomFixture && !sms1Fixture ? 16 : 8;
-				int spriteHeight = sms && zoomFixture ? 16 : 8;
+				int spriteWidth = legacySmsFixture ? (largeLegacySprite ? 16 : 8) * (zoomFixture ? 2 : 1) : sms && zoomFixture && !sms1Fixture ? 16 : 8;
+				int spriteHeight = legacySmsFixture ? spriteWidth : sms && zoomFixture ? 16 : 8;
 				MetaSpriteGraphic source;
 				uint32_t originalBackground = 0;
 				uint32_t retainedBackgroundArgb = 0;
@@ -1994,7 +3087,7 @@ extern "C"
 					})) { flags |= 4; }
 					{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Width == nativeWidth * 2 && renderer.Pixels[0] == originalBackground) { flags |= 8; } }
 					int priorityX = scrolledSmsFixture && !lockedSmsFixture ? 29 : 24, priorityY = spriteY + (scrolledSmsFixture ? 6 : 0);
-					if(sms && waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels[priorityY * 2 * renderer.Width + priorityX * 2] == occludedPixel
+					if(sms && !legacySmsFixture && waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels[priorityY * 2 * renderer.Width + priorityX * 2] == occludedPixel
 						&& occludedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[priorityY * nativeWidth + priorityX].VisibleSprite == -1; })) { flags |= 32; }
 					if(maskFixture && waitFor([&]() { return renderer.Width == nativeWidth * 2 && renderer.Pixels[spriteY * 2 * renderer.Width + 8] == maskedPixel
 						&& maskedPixel != 0xFF00FF00 && renderer.Capture && renderer.Capture->Pixels[spriteY * nativeWidth + 4].VisibleSprite == -1; })) { flags |= 64; }

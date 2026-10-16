@@ -67,7 +67,7 @@
 							<TextBlock Text="{Binding MetaBackgroundPreviewInfo}" TextWrapping="Wrap" />
 							<TextBox PlaceholderText="Background name" Text="{Binding SelectedMetaBackground.Name}" />
 							<TextBlock Text="Hardware layer" />
-							<NumericUpDown Minimum="0" Maximum="7" Value="{Binding SelectedMetaBackground.NativeLayer}" />
+							<ComboBox ItemsSource="{Binding HardwareLayerNames}" SelectedIndex="{Binding SelectedMetaBackground.NativeLayer, Mode=TwoWay}" ToolTip.Tip="The native background associated with this PNG. Available layers depend on the system; the current video mode may disable some layers." />
 							<TextBlock Text="Placement X / Y (native pixels)" />
 							<StackPanel Orientation="Horizontal">
 								<NumericUpDown Width="105" Minimum="-4096" Maximum="4096" Value="{Binding SelectedMetaBackground.X}" />
@@ -125,6 +125,51 @@
 							<CheckBox Content="Wrap vertically" IsChecked="{Binding SelectedMetaBackground.WrapY}" />
 							<CheckBox Content="Enable background in gameplay" IsChecked="{Binding SelectedMetaBackground.Enabled}" />
 							<CheckBox Content="Hide original layer while active" IsChecked="{Binding SelectedMetaBackground.HideOriginalLayer}" />
+							<TextBlock Text="PNG composition position" />
+							<ComboBox SelectedIndex="{Binding SelectedMetaBackground.CompositionPosition}"><ComboBoxItem Content="Native layer priority" /><ComboBoxItem Content="Foreground overlay" /><ComboBoxItem Content="Independent GBA priority" IsEnabled="{Binding IsGba}" /><ComboBoxItem Content="Independent SNES priority" IsEnabled="{Binding IsSnes}" /><ComboBoxItem Content="Below behind-BG sprites" IsEnabled="{Binding SupportsSpriteBands}" /><ComboBoxItem Content="Between behind-BG sprites and tiles" IsEnabled="{Binding SupportsSpriteBands}" /><ComboBoxItem Content="Above tiles, below front sprites" IsEnabled="{Binding SupportsSpriteBands}" /></ComboBox>
+							<TextBlock IsVisible="{Binding SupportsSpriteBands}" Text="Below behind-BG sprites → behind-BG sprites&#10;→ between sprites/tiles → native tiles&#10;→ above tiles → front sprites → foreground overlay.&#10;WonderSwan BG0 is below the first band;&#10;BG1 sits between low- and high-priority sprites.&#10;CGB / SMS tile priority still applies.&#10;SMS has no separate behind-BG sprite flag;&#10;its two lower bands can share a native insertion point.&#10;Each position has its own 0–9 PNG draw order." TextWrapping="Wrap" />
+							<StackPanel IsVisible="{Binding IsSnes}">
+								<TextBlock Text="Independent SNES priority (1–15)" TextWrapping="Wrap" />
+								<NumericUpDown Minimum="1" Maximum="15" Value="{Binding SelectedMetaBackground.SnesPriority}" />
+								<TextBlock Text="Used in Independent SNES priority position.&#10;Higher is closer to the front. Native values vary by PPU mode.&#10;OBJ wins equal priorities; PNG wins native BG ties.&#10;Assigned BG supplies windows, main/subscreen visibility&#10;and color-math participation." TextWrapping="Wrap" />
+							</StackPanel>
+							<StackPanel IsVisible="{Binding IsGba}">
+								<TextBlock Text="Independent GBA priority (0–3)" TextWrapping="Wrap" />
+								<NumericUpDown Minimum="0" Maximum="3" Value="{Binding SelectedMetaBackground.GbaPriority}" />
+								<TextBlock Text="Used in Independent GBA priority position.&#10;0 is highest; 3 is lowest. OBJ wins priority ties.&#10;BG ties follow the assigned native BG number.&#10;PNG draws ahead of its own native BG at a tie.&#10;Layer windows and color-effect targets still apply." TextWrapping="Wrap" />
+							</StackPanel>
+							<TextBlock Text="Foreground draws above backgrounds and sprites.&#10;It uses the assigned layer for coordinates and clipping,&#10;after native color effects and brightness." TextWrapping="Wrap" />
+							<TextBlock Text="PNG draw order within its position (0–9)" TextWrapping="Wrap" />
+							<NumericUpDown Minimum="0" Maximum="9" Value="{Binding SelectedMetaBackground.DrawOrder}" />
+							<TextBlock Text="Higher numbers draw above lower numbers.&#10;Equal numbers use saved PNG order.&#10;Native priorities apply in Native layer position." TextWrapping="Wrap" />
+							<CheckBox Content="Extend this PNG into widescreen margins" IsChecked="{Binding SelectedMetaBackground.ExtendIntoMargins}" />
+							<CheckBox Content="Use gameplay positioning saved with this PNG" IsChecked="{Binding SelectedMetaBackground.UseWidescreenPosition}" />
+							<StackPanel IsVisible="{Binding SelectedMetaBackground.UseWidescreenPosition}">
+								<TextBlock Text="Gameplay position while this PNG is active" TextWrapping="Wrap" />
+								<ComboBox SelectedIndex="{Binding SelectedMetaBackground.WidescreenPosition.Position}"><ComboBoxItem Content="Centre" /><ComboBoxItem Content="Left" /><ComboBoxItem Content="Right" /><ComboBoxItem Content="Automatic" /></ComboBox>
+								<TextBlock Text="Slide pixels/frame (0 = instant)" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.SlideSpeed}" Minimum="0" Maximum="64" Increment="0.1" FormatString="0.###" />
+								<TextBlock Text="Fixed speed: higher is faster; lower nonzero is slower.&#10;Zero is instant only when RAM speed is off." TextWrapping="Wrap" />
+								<CheckBox Content="Use player X RAM speed for sliding" IsChecked="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.Enabled}" />
+								<StackPanel IsVisible="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.Enabled}">
+									<TextBlock Text="Player X speed CPU address (hex)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.AddressHex}" />
+									<TextBlock Text="Speed format" /><ComboBox SelectedIndex="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.Format}"><ComboBoxItem Content="Signed 8-bit" /><ComboBoxItem Content="Unsigned 8-bit" /><ComboBoxItem Content="Signed 16-bit, little endian" /><ComboBoxItem Content="Unsigned 16-bit, little endian" /><ComboBoxItem Content="Signed 16-bit, big endian" /><ComboBoxItem Content="Unsigned 16-bit, big endian" /></ComboBox>
+									<TextBlock Text="Speed multiplier (pixels per RAM unit)" TextWrapping="Wrap" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.Multiplier}" Minimum="0" Maximum="64" Increment="0.001" FormatString="0.######" />
+									<TextBlock Text="Maximum slide pixels/frame" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.RamSpeed.Maximum}" Minimum="0" Maximum="64" Increment="0.1" FormatString="0.###" />
+									<TextBlock Text="Signed speed: positive moves right; negative moves left.&#10;Turning around reverses the slide while the boundary stays active.&#10;Movement is clamped between normal position and that edge.&#10;Speed magnitude × multiplier is capped at maximum.&#10;Zero or missing speed stops sliding. When scrolling resumes,&#10;the window returns toward normal at the RAM speed magnitude.&#10;Unsigned formats always move toward the selected target." TextWrapping="Wrap" />
+								</StackPanel>
+								<TextBlock Text="Boundary release delay (frames; 0 = off)" TextWrapping="Wrap" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.ReleaseDelay}" Minimum="0" Maximum="600" Increment="1" />
+								<TextBlock Text="Inactive checks must stay clear for this many frames.&#10;Opposite edges switch immediately; conflicting or missing checks return to normal." TextWrapping="Wrap" />
+								<TextBlock Text="Camera limits (decimal; left less than right)" TextWrapping="Wrap" />
+								<TextBlock Text="Left limit" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.CameraMin}" Minimum="-16777216" Maximum="16777216" Increment="1" IsEnabled="{Binding !SelectedMetaBackground.WidescreenPosition.UseRamFlags}" />
+								<TextBlock Text="Right limit" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.CameraMax}" Minimum="-16777216" Maximum="16777216" Increment="1" IsEnabled="{Binding !SelectedMetaBackground.WidescreenPosition.UseRamFlags}" />
+								<CheckBox Content="Use RAM boundary flags instead of limits" IsChecked="{Binding SelectedMetaBackground.WidescreenPosition.UseRamFlags}" />
+								<StackPanel IsVisible="{Binding SelectedMetaBackground.WidescreenPosition.UseRamFlags}">
+									<TextBlock Text="Left edge checks (hex; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.LeftFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
+									<TextBlock Text="Right edge checks (hex; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.RightFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
+									<TextBlock Text="ADDRESS OP VALUE / MASK, one per line; max 8 per edge.&#10;Operators: == != &gt; &lt; &gt;= &lt;=. Both/neither/missing returns to normal." TextWrapping="Wrap" />
+								</StackPanel>
+								<TextBlock Text="This PNG's activation conditions select its level/scene.&#10;If several active PNGs define positioning, the first in pack order wins." TextWrapping="Wrap" />
+							</StackPanel>
 							<TextBlock Text="CPU memory conditions&#10;Hex values; all conditions must match" TextWrapping="Wrap" />
 							<TextBox Text="{Binding MemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 == 01 / FF" />
 							<TextBlock Text="One ADDRESS OP VALUE / MASK per line.&#10;Operators: ==, !=, &gt;, &lt;, &gt;=, &lt;=.&#10;Mask defaults to FF and applies to both values before unsigned comparison.&#10;Gameplay replacement requires at least one condition. All conditions must match." TextWrapping="Wrap" />

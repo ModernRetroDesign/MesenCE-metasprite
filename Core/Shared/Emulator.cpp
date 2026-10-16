@@ -338,6 +338,7 @@ void Emulator::Stop(bool sendNotification, bool preventRecentGameSave, bool save
 
 	_movieManager->Stop();
 	_videoDecoder->StopThread();
+	_soundMixer->ClearReplacementMusic();
 	_rewindManager->Reset();
 
 	if(_console) {
@@ -356,6 +357,7 @@ void Emulator::Stop(bool sendNotification, bool preventRecentGameSave, bool save
 void Emulator::Reset()
 {
 	Lock();
+	_soundMixer->ResetReplacementMusic();
 
 	_console->Reset();
 
@@ -525,6 +527,7 @@ bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool 
 	}
 
 	InitConsole(console, originalConsoleMemory, forPowerCycle);
+	_soundMixer->ClearReplacementMusic();
 
 	//Restore pollcounter (used by movies when a power cycle is in the movie)
 	_console->GetControlManager()->SetPollCounter(pollCounter);
@@ -1026,6 +1029,7 @@ DeserializeResult Emulator::Deserialize(istream& in, uint32_t fileFormatVersion,
 		return DeserializeResult::SpecificError;
 	}
 	_videoDecoder->ResetFrameBlendHistory();
+	if(sendNotification) { _soundMixer->ResetReplacementMusic(); }
 
 	if(sendNotification) {
 		_notificationManager->SendNotification(ConsoleNotificationType::StateLoaded);

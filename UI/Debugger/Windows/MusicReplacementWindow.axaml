@@ -1,0 +1,70 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:vm="using:Mesen.Debugger.ViewModels" xmlns:u="using:Mesen.Debugger.Utilities"
+x:Class="Mesen.Debugger.Windows.MusicReplacementWindow" x:DataType="vm:MusicReplacementViewModel" Title="Audio Replacement Editor" Width="860" Height="820" MinWidth="650" MinHeight="500">
+<DockPanel Margin="12">
+<StackPanel DockPanel.Dock="Bottom" Spacing="6" Margin="0 8 0 0"><WrapPanel><Button Content="Save and apply" Click="Save" /><Button Content="Reload saved pack" Click="Reload" /></WrapPanel><TextBlock Text="{Binding Status}" TextWrapping="Wrap" /><TextBlock Text="{Binding PlaybackStatus}" TextWrapping="Wrap" /></StackPanel>
+<TabControl Name="audioTabs">
+<TabItem Header="Music"><ScrollViewer Name="musicScroll" HorizontalScrollBarVisibility="Disabled"><StackPanel Spacing="8" Margin="4">
+<TextBlock Text="{Binding SystemDescription}" TextWrapping="Wrap" />
+<TextBlock Text="OGG Vorbis or PCM 16-bit mono/stereo WAV.&#10;Playback follows emulation. Preview plays while the game runs. Reset/state load clears music and effects until another trigger." TextWrapping="Wrap" />
+<WrapPanel><CheckBox Content="Enable audio pack" IsChecked="{Binding Pack.Enabled}" /><CheckBox Content="Mute all native audio" IsChecked="{Binding Pack.MuteNative}" /></WrapPanel>
+<TextBlock Text="Muting preserves emulated sound hardware. Unmapped original music and effects will be silent. These settings apply to both tabs." TextWrapping="Wrap" />
+<Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto">
+<TextBlock Text="Native volume (%)" /><NumericUpDown Grid.Column="1" Value="{Binding Pack.NativeVolume}" Minimum="0" Maximum="100" Increment="1" />
+<TextBlock Grid.Row="1" Text="Music volume (%)" /><NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Pack.MusicVolume}" Minimum="0" Maximum="100" Increment="1" />
+<TextBlock Grid.Row="2" Text="Music stop fade (ms)" /><NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding Pack.FadeOutMs}" Minimum="0" Maximum="10000" Increment="50" />
+</Grid>
+<StackPanel Spacing="6">
+<ListBox ItemsSource="{Binding Pack.Tracks}" SelectedItem="{Binding SelectedTrack}" Height="120"><ListBox.ItemTemplate><DataTemplate x:DataType="u:ReplacementMusicTrack"><TextBlock Text="{Binding Name}" /></DataTemplate></ListBox.ItemTemplate></ListBox>
+<WrapPanel><Button Content="+ Import" Click="Import" /><Button Content="- Remove" Click="RemoveTrack" /></WrapPanel>
+<StackPanel IsEnabled="{Binding HasTrack}" Spacing="4">
+<Grid ColumnDefinitions="Auto,80,Auto,*"><TextBlock Text="Track ID" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.Id}" IsEnabled="False" /><TextBlock Grid.Column="2" Text="Name" /><TextBox Grid.Column="3" Text="{Binding SelectedTrack.Name}" /></Grid>
+<TextBlock Text="{Binding SelectedTrack.Path}" TextWrapping="Wrap" />
+<Grid ColumnDefinitions="Auto,100"><TextBlock Text="Volume (%)" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.Volume}" Minimum="0" Maximum="100" Increment="1" /></Grid>
+</StackPanel></StackPanel>
+<WrapPanel><Button Content="Preview applied track" Click="Preview" /><Button Content="Stop music" Click="Stop" /><Button Content="Pause music" Click="Pause" /><Button Content="Resume music" Click="Resume" /></WrapPanel>
+<StackPanel Spacing="4" IsEnabled="{Binding HasTrack}"><CheckBox Content="Loop music" IsChecked="{Binding SelectedTrack.Loop}" />
+<TextBlock Text="Loop points are source sample frames; end is exclusive, 0 = file end.&#10;Music starts at frame 0 for the intro, then loops from start." TextWrapping="Wrap" />
+<Grid ColumnDefinitions="Auto,*,Auto,*"><TextBlock Text="Loop start" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.LoopStart}" Minimum="0" Maximum="2147483647" Increment="1" /><TextBlock Grid.Column="2" Text="Loop end" /><NumericUpDown Grid.Column="3" Value="{Binding SelectedTrack.LoopEnd}" Minimum="0" Maximum="2147483647" Increment="1" /></Grid>
+<Grid ColumnDefinitions="Auto,*"><TextBlock Text="Music fade in (ms)" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.FadeInMs}" Minimum="0" Maximum="10000" Increment="50" /></Grid></StackPanel>
+<Separator /><TextBlock Text="Shared write-event rules: first matching music rule and first matching effect rule run independently. All RAM checks must match after the write." TextWrapping="Wrap" />
+<ListBox ItemsSource="{Binding Pack.Rules}" SelectedItem="{Binding SelectedRule}" Height="120"><ListBox.ItemTemplate><DataTemplate x:DataType="u:ReplacementMusicRule"><TextBlock Text="{Binding Name}" /></DataTemplate></ListBox.ItemTemplate></ListBox>
+<WrapPanel><Button Content="+ Music rule" Click="AddRule" /><Button Content="+ Effect rule" Click="AddEffectRule" /><Button Content="- Remove" Click="RemoveRule" /><Button Content="Earlier" Click="Earlier" /><Button Content="Later" Click="Later" /></WrapPanel>
+<StackPanel Spacing="4" IsEnabled="{Binding HasRule}">
+<CheckBox Content="Enable rule" IsChecked="{Binding SelectedRule.Enabled}" /><TextBox Text="{Binding SelectedRule.Name}" />
+<Grid ColumnDefinitions="*,Auto,100"><ComboBox SelectedIndex="{Binding SelectedRule.Action}"><ComboBoxItem Content="Play music" /><ComboBoxItem Content="Stop music" /><ComboBoxItem Content="Pause music" /><ComboBoxItem Content="Resume music" /><ComboBoxItem Content="Play sound effect" /><ComboBoxItem Content="Stop all effects" /></ComboBox><TextBlock Grid.Column="1" Text="Track ID" /><NumericUpDown Grid.Column="2" Value="{Binding SelectedRule.TrackId}" Minimum="0" Maximum="65535" Increment="1" /></Grid>
+<StackPanel IsVisible="{Binding SupportsAlternateTriggers}" Spacing="4"><TextBlock Text="Trigger source" /><ComboBox Name="musicTriggerSource" SelectedIndex="{Binding SelectedRule.TriggerSource}"><ComboBoxItem Content="CPU memory write" /><ComboBoxItem Content="{Binding AlternateTriggerName}" /></ComboBox><TextBlock Text="{Binding TriggerSourceHelp}" TextWrapping="Wrap" /></StackPanel>
+<TextBlock Text="Write trigger (hex ADDRESS OP VALUE / MASK)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedRule.Trigger}" />
+<StackPanel IsVisible="{Binding SupportsSpcTriggers}"><TextBlock Text="RAM condition source" /><ComboBox Name="musicContextSource" SelectedIndex="{Binding SelectedRule.ContextSource}"><ComboBoxItem Content="Main CPU memory" /><ComboBoxItem Content="SPC memory" /></ComboBox></StackPanel>
+<TextBlock Text="Optional RAM checks (hex; one per line)" /><TextBox Text="{Binding SelectedRule.Conditions}" AcceptsReturn="True" MinHeight="65" TextWrapping="Wrap" />
+<CheckBox Content="Restart if this track / effect is already playing" IsChecked="{Binding SelectedRule.Restart}" />
+<TextBlock Text="Operators: == != &gt; &lt; &gt;= &lt;=. Mask defaults to FF.&#10;Context changes alone do not trigger playback. Repeated writes are events.&#10;Addresses are current-system CPU addresses (see Music tab). GBA values remain single bytes." TextWrapping="Wrap" />
+</StackPanel>
+</StackPanel></ScrollViewer></TabItem>
+<TabItem Header="Sound effects"><ScrollViewer Name="effectsScroll" HorizontalScrollBarVisibility="Disabled"><StackPanel Spacing="8" Margin="4">
+<TextBlock Text="Import an effect, add an effect rule, set its write trigger and optional RAM checks, then save and apply. The library and rules are shared with Music." TextWrapping="Wrap" />
+<TextBlock Text="Effects play the whole file once. Music loop points, fades and music volume are ignored. Track volume applies to both uses of an asset. Up to 32 different effects can overlap each other and music. Restart repeats the same effect from the beginning; unchecked ignores repeats until it finishes." TextWrapping="Wrap" />
+<StackPanel Spacing="6">
+<ListBox ItemsSource="{Binding Pack.Tracks}" SelectedItem="{Binding SelectedTrack}" Height="120"><ListBox.ItemTemplate><DataTemplate x:DataType="u:ReplacementMusicTrack"><TextBlock Text="{Binding Name}" /></DataTemplate></ListBox.ItemTemplate></ListBox>
+<WrapPanel><Button Content="+ Import" Click="Import" /><Button Content="- Remove" Click="RemoveTrack" /></WrapPanel>
+<StackPanel IsEnabled="{Binding HasTrack}" Spacing="4">
+<Grid ColumnDefinitions="Auto,80,Auto,*"><TextBlock Text="Track ID" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.Id}" IsEnabled="False" /><TextBlock Grid.Column="2" Text="Name" /><TextBox Grid.Column="3" Text="{Binding SelectedTrack.Name}" /></Grid>
+<TextBlock Text="{Binding SelectedTrack.Path}" TextWrapping="Wrap" />
+<Grid ColumnDefinitions="Auto,100"><TextBlock Text="Volume (%)" /><NumericUpDown Grid.Column="1" Value="{Binding SelectedTrack.Volume}" Minimum="0" Maximum="100" Increment="1" /></Grid>
+</StackPanel></StackPanel>
+<WrapPanel><Button Content="Preview applied effect" Click="PreviewEffect" /><Button Content="Stop all effects" Click="StopEffects" /></WrapPanel>
+<TextBlock Text="Preview requires an enabled Play sound effect rule for this track in the applied pack. Music Stop/Pause/Resume leave effects playing. Emulation pause freezes both; reset or state load clears both. Enable the pack and configure native mute on the Music tab." TextWrapping="Wrap" />
+<Separator /><TextBlock Text="Shared write-event rules: first matching music rule and first matching effect rule run independently. All RAM checks must match after the write." TextWrapping="Wrap" />
+<ListBox ItemsSource="{Binding Pack.Rules}" SelectedItem="{Binding SelectedRule}" Height="120"><ListBox.ItemTemplate><DataTemplate x:DataType="u:ReplacementMusicRule"><TextBlock Text="{Binding Name}" /></DataTemplate></ListBox.ItemTemplate></ListBox>
+<WrapPanel><Button Content="+ Music rule" Click="AddRule" /><Button Content="+ Effect rule" Click="AddEffectRule" /><Button Content="- Remove" Click="RemoveRule" /><Button Content="Earlier" Click="Earlier" /><Button Content="Later" Click="Later" /></WrapPanel>
+<StackPanel Spacing="4" IsEnabled="{Binding HasRule}">
+<CheckBox Content="Enable rule" IsChecked="{Binding SelectedRule.Enabled}" /><TextBox Text="{Binding SelectedRule.Name}" />
+<Grid ColumnDefinitions="*,Auto,100"><ComboBox SelectedIndex="{Binding SelectedRule.Action}"><ComboBoxItem Content="Play music" /><ComboBoxItem Content="Stop music" /><ComboBoxItem Content="Pause music" /><ComboBoxItem Content="Resume music" /><ComboBoxItem Content="Play sound effect" /><ComboBoxItem Content="Stop all effects" /></ComboBox><TextBlock Grid.Column="1" Text="Track ID" /><NumericUpDown Grid.Column="2" Value="{Binding SelectedRule.TrackId}" Minimum="0" Maximum="65535" Increment="1" /></Grid>
+<StackPanel IsVisible="{Binding SupportsAlternateTriggers}" Spacing="4"><TextBlock Text="Trigger source" /><ComboBox Name="effectTriggerSource" SelectedIndex="{Binding SelectedRule.TriggerSource}"><ComboBoxItem Content="CPU memory write" /><ComboBoxItem Content="{Binding AlternateTriggerName}" /></ComboBox><TextBlock Text="{Binding TriggerSourceHelp}" TextWrapping="Wrap" /></StackPanel>
+<TextBlock Text="Write trigger (hex ADDRESS OP VALUE / MASK)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedRule.Trigger}" />
+<StackPanel IsVisible="{Binding SupportsSpcTriggers}"><TextBlock Text="RAM condition source" /><ComboBox Name="effectContextSource" SelectedIndex="{Binding SelectedRule.ContextSource}"><ComboBoxItem Content="Main CPU memory" /><ComboBoxItem Content="SPC memory" /></ComboBox></StackPanel>
+<TextBlock Text="Optional RAM checks (hex; one per line)" /><TextBox Text="{Binding SelectedRule.Conditions}" AcceptsReturn="True" MinHeight="65" TextWrapping="Wrap" />
+<CheckBox Content="Restart if this track / effect is already playing" IsChecked="{Binding SelectedRule.Restart}" />
+<TextBlock Text="Operators: == != &gt; &lt; &gt;= &lt;=. Mask defaults to FF.&#10;Context changes alone do not trigger playback. Repeated writes are events.&#10;Addresses are current-system CPU addresses (see Music tab). GBA values remain single bytes." TextWrapping="Wrap" />
+</StackPanel>
+</StackPanel></ScrollViewer></TabItem>
+</TabControl></DockPanel></Window>

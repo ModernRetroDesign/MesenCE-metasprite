@@ -31,6 +31,9 @@ internal static class MetaSpriteRuntimeLoader
 	{
 		// Use the same activation policy as the packet builder: drafts without checks are inactive.
 		var activeLayers = pack.BackgroundLayers.Where(layer => layer.Enabled && layer.MemoryConditions.Count > 0).ToArray();
+		if(pack.System != CpuType.Gba.ToString() && activeLayers.Any(layer => layer.CompositionPosition == 2)) { throw new InvalidDataException("Independent GBA priority requires a GBA pack."); }
+		if(pack.System != CpuType.Snes.ToString() && activeLayers.Any(layer => layer.CompositionPosition == 3)) { throw new InvalidDataException("Independent SNES priority requires a SNES pack."); }
+		if(pack.System != CpuType.Nes.ToString() && pack.System != CpuType.Gameboy.ToString() && pack.System != CpuType.Pce.ToString() && pack.System != CpuType.Sms.ToString() && pack.System != CpuType.Ws.ToString() && activeLayers.Any(layer => layer.CompositionPosition >= 4)) { throw new InvalidDataException("Sprite insertion bands require a NES, Game Boy, PCE, SMS or WonderSwan pack."); }
 		if(activeLayers.Length > 0 && ((pack.System != CpuType.Gameboy.ToString() && pack.System != CpuType.Sms.ToString() && pack.System != CpuType.Ws.ToString() && pack.System != CpuType.Nes.ToString() && pack.System != CpuType.Pce.ToString() && pack.System != CpuType.Gba.ToString() && pack.System != CpuType.Snes.ToString())
 			|| activeLayers.Any(layer => pack.System == CpuType.Sms.ToString() || pack.System == CpuType.Nes.ToString() || pack.System == CpuType.Pce.ToString() ? layer.NativeLayer != 0 : layer.NativeLayer > (pack.System == CpuType.Gba.ToString() || pack.System == CpuType.Snes.ToString() ? 3 : 1)))) {
 			throw new InvalidDataException("Background gameplay replacement currently supports NES/PCE layer 0, GB/GBC layers 0/1, GBA/SNES layers 0..3, SMS Mode 4 layer 0, and WonderSwan layers 0/1.");
