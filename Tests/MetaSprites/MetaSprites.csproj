@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../UI/Debugger/Utilities/MetaSpritePack.cs" Link="MetaSpritePack.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaPngAnimation.cs" Link="MetaPngAnimation.cs" />
   </ItemGroup>
 </Project>

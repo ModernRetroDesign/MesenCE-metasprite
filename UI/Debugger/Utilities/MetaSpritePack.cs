@@ -91,6 +91,7 @@ public sealed class MetaSpritePack
 		foreach(var layer in pack.BackgroundLayers) { layer.Validate(); }
 		pack.ValidateSavedCamera();
 		foreach(var group in pack.Groups) {
+			if(group.Animation == null) { throw new InvalidDataException("Missing metasprite animation settings."); } group.Animation.Validate();
 			MetaMemoryCondition.ValidateAll(group.MemoryConditions);
 			if(group.AlternateArtwork == null || group.AlternateArtwork.Count > 64) { throw new InvalidDataException("Invalid alternate artwork list."); }
 			foreach(var alternate in group.AlternateArtwork) { alternate.Validate(); }
@@ -186,6 +187,7 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	private int _drawOrder;
 	public int DrawOrder { get => _drawOrder; set { if(_drawOrder != value) { _drawOrder = value; PropertyChanged?.Invoke(this, new(nameof(DrawOrder))); } } }
 	public string ArtworkPath { get; set; } = "";
+	public MetaPngAnimation Animation { get; set; } = new();
 	public int ArtworkWidth { get; set; }
 	public int ArtworkHeight { get; set; }
 	public int ArtworkScale { get => _artworkScale; set { if(_artworkScale != value) { _artworkScale = value; PropertyChanged?.Invoke(this, new(nameof(ArtworkScale))); } } }
@@ -223,6 +225,7 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 		if(Id < 1 || Name == null || ArtworkPath == null || NativeLayer < 0 || NativeLayer > 7) {
 			throw new InvalidDataException("Invalid background layer identity.");
 		}
+		if(Animation == null) { throw new InvalidDataException("Missing background animation settings."); } Animation.Validate();
 		if(DrawOrder < 0 || DrawOrder > 9) { throw new InvalidDataException("Background draw order must be 0 through 9."); }
 		if(CompositionPosition < 0 || CompositionPosition > 6 || GbaPriority < 0 || GbaPriority > 3 || SnesPriority < 1 || SnesPriority > 15) { throw new InvalidDataException("Invalid PNG composition position or hardware priority."); }
 		MetaSpritePlacement.ValidateCanvas(ArtworkWidth, ArtworkHeight, ArtworkScale);
@@ -320,7 +323,9 @@ public static class MetaBackgroundRuntimePacket
 	public const uint GbaPriorityMagic = 0x4547424D; // MBGE adds independent GBA priority
 	public const uint SnesPriorityMagic = 0x4647424D; // MBGF adds independent SNES priority
 	public const uint NesBandsMagic = 0x4747424D; // MBGG insertion bands: NES, GB/GBC, PCE, SMS and WS
-	public static byte[] Create(MetaSpritePack pack, Func<MetaBackgroundLayer, (int Width, int Height, uint[] Pixels)> loadArtwork)
+	public const uint AnimationMagic = 0x4847424D; // MBGH adds background PNG sequences.
+	public static byte[] Create(MetaSpritePack pack, Func<MetaBackgroundLayer, (int Width, int Height, uint[] Pixels)> loadArtwork,
+		Func<MetaPngAnimationFrame,int,(int Width,int Height,uint[] Pixels)>? loadFrame = null)
 	{
 		pack.ValidateSavedCamera();
 		using MemoryStream stream = new();
@@ -342,9 +347,11 @@ public static class MetaBackgroundRuntimePacket
 		bool gbaPriority = layers.Any(layer => layer.CompositionPosition == 2);
 		bool snesPriority = layers.Any(layer => layer.CompositionPosition == 3);
 		bool nesBands = layers.Any(layer => layer.CompositionPosition >= 4);
+		bool animated = layers.Any(layer => layer.Animation.Enabled);
 		if(gbaPriority && pack.System != "Gba") { throw new InvalidDataException("Independent GBA priority requires a GBA pack."); }
 		if(snesPriority && pack.System != "Snes") { throw new InvalidDataException("Independent SNES priority requires a SNES pack."); }
 		if(nesBands && pack.System != "Nes" && pack.System != "Gameboy" && pack.System != "Pce" && pack.System != "Sms" && pack.System != "Ws") { throw new InvalidDataException("Sprite insertion bands require a NES, Game Boy, PCE, SMS or WonderSwan pack."); }
+		nesBands |= animated; composition |= animated; // MBGH retains every MBGG field.
 		snesPriority |= nesBands; // MBGG retains all MBGF fields.
 		gbaPriority |= snesPriority; // MBGF retains all MBGE fields.
 		ramSpeed |= composition;
@@ -356,7 +363,7 @@ public static class MetaBackgroundRuntimePacket
 		rasterScroll |= hideLayer;
 		customScroll |= rasterScroll;
 		comparisons |= customScroll;
-		writer.Write(nesBands ? NesBandsMagic : snesPriority ? SnesPriorityMagic : gbaPriority ? GbaPriorityMagic : composition ? CompositionMagic : ramSpeed ? RamSpeedMagic : position ? SmoothPositionMagic : widescreen ? WidescreenMagic : signedCamera ? SignedCameraMagic : camera ? CameraMagic : hideLayer ? HideLayerMagic : rasterScroll ? RasterMagic : customScroll ? ScrollMagic : comparisons ? ComparisonMagic : conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
+		writer.Write(animated ? AnimationMagic : nesBands ? NesBandsMagic : snesPriority ? SnesPriorityMagic : gbaPriority ? GbaPriorityMagic : composition ? CompositionMagic : ramSpeed ? RamSpeedMagic : position ? SmoothPositionMagic : widescreen ? WidescreenMagic : signedCamera ? SignedCameraMagic : camera ? CameraMagic : hideLayer ? HideLayerMagic : rasterScroll ? RasterMagic : customScroll ? ScrollMagic : comparisons ? ComparisonMagic : conditional ? ConditionalMagic : Magic); writer.Write(layers.Count);
 		foreach(var layer in layers) {
 			layer.Validate();
 			var artwork = loadArtwork(layer);
@@ -394,6 +401,9 @@ public static class MetaBackgroundRuntimePacket
 					if(comparisons) { writer.Write((int)condition.Comparison); }
 				}
 			}
+			if(animated) { MetaSpriteRuntimePacket.WriteAnimation(writer,layer.Animation,layer.ArtworkScale,0,0,loadFrame==null ? null : (frame,scale) => {
+				var image=loadFrame(frame,scale); MetaSpritePlacement.ValidateCanvas(image.Width,image.Height,scale); return image;
+			}); }
 		}
 		return stream.ToArray();
 	}
@@ -423,6 +433,7 @@ public sealed class MetaSpriteGroup : INotifyPropertyChanged
 	public int ReplacementWidth { get; set; }
 	public int ReplacementHeight { get; set; }
 	public string ReplacementPath { get; set; } = "";
+	public MetaPngAnimation Animation { get; set; } = new();
 	public List<MetaSpriteMember> Members { get; set; } = new();
 	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
 	public List<MetaAlternateArtwork> AlternateArtwork { get; set; } = new();
@@ -533,6 +544,7 @@ public sealed class MetaAlternateArtwork : INotifyPropertyChanged
 	public string Name { get => _name; set { if(_name == value) { return; } _name = value; PropertyChanged?.Invoke(this, new(nameof(Name))); } }
 	public override string ToString() => Name.Length > 0 ? Name : System.IO.Path.GetFileName(Path);
 	public string Path { get; set; } = "";
+	public MetaPngAnimation Animation { get; set; } = new();
 	public int Scale { get => _scale; set { if(_scale == value) { return; } _scale = value; PropertyChanged?.Invoke(this, new(nameof(Scale))); } }
 	public int OriginX { get => _originX; set { if(_originX == value) { return; } _originX = value; PropertyChanged?.Invoke(this, new(nameof(OriginX))); } }
 	public int OriginY { get => _originY; set { if(_originY == value) { return; } _originY = value; PropertyChanged?.Invoke(this, new(nameof(OriginY))); } }
@@ -540,6 +552,7 @@ public sealed class MetaAlternateArtwork : INotifyPropertyChanged
 	public void Validate()
 	{
 		if(string.IsNullOrWhiteSpace(Path) || Scale < 1 || Scale > 10 || MemoryConditions == null) { throw new InvalidDataException("Alternate artwork requires a PNG, scale, and a memory condition list."); }
+		if(Animation == null) { throw new InvalidDataException("Missing alternate animation settings."); } Animation.Validate();
 		if(OriginX < -4096 || OriginX > 4096 || OriginY < -4096 || OriginY > 4096) { throw new InvalidDataException("Alternate artwork origin is out of range."); }
 		MetaMemoryCondition.ValidateAll(MemoryConditions);
 	}
@@ -633,18 +646,37 @@ public static class MetaSpriteRuntimePacket
 	public const uint ConditionalMagic = 0x3250534D; // MSP2 adds per-group byte/mask conditions
 	public const uint AlternateMagic = 0x3350534D; // MSP3 adds alternate PNGs
 	public const uint ComparisonMagic = 0x3450534D; // MSP4 adds comparison operators
+	public const uint AnimationMagic = 0x3550534D; // MSP5 adds default/alternate animation sequences.
+	internal static void WriteAnimation(BinaryWriter writer, MetaPngAnimation animation, int scale, int originX, int originY,
+		Func<MetaPngAnimationFrame, int, (int Width, int Height, uint[] Pixels)>? loadFrame)
+	{
+		animation.Validate();
+		if(!animation.Enabled) { writer.Write(0); return; }
+		if(loadFrame == null) { throw new InvalidDataException("Animation PNG loader is required."); }
+		writer.Write(animation.Frames.Count); writer.Write((int)animation.Playback); writer.Write(animation.RestartOnActivation ? 1 : 0);
+		foreach(var frame in animation.Frames) {
+			var image=loadFrame(frame,scale); MetaSpritePlacement.ValidateSpriteCanvas(image.Width,image.Height,scale);
+			if(image.Pixels.Length!=checked(image.Width*image.Height)) { throw new InvalidDataException("Invalid animation PNG pixels."); }
+			if(writer.BaseStream.Length+20L+image.Pixels.LongLength*4>536870912) { throw new InvalidDataException("Animation replacement packet exceeds 512 MiB."); }
+			writer.Write(frame.Duration); writer.Write(frame.OriginX ?? originX); writer.Write(frame.OriginY ?? originY);
+			writer.Write(image.Width); writer.Write(image.Height); foreach(uint pixel in image.Pixels) { writer.Write(pixel); }
+		}
+	}
 	public static byte[] Create(MetaSpritePack pack, Func<MetaSpriteGroup, (int Width, int Height, uint[] Pixels)> loadArtwork,
-		Func<MetaAlternateArtwork, (int Width, int Height, uint[] Pixels)>? loadAlternate = null)
+		Func<MetaAlternateArtwork, (int Width, int Height, uint[] Pixels)>? loadAlternate = null,
+		Func<MetaPngAnimationFrame, int, (int Width, int Height, uint[] Pixels)>? loadFrame = null)
 	{
 		using MemoryStream stream = new();
 		using BinaryWriter writer = new(stream);
 		var groups = pack.Groups.Where(g => g.Enabled).ToList();
+		bool animated = groups.Any(g => g.Animation.Enabled || g.AlternateArtwork.Any(a => a.MemoryConditions.Count>0 && a.Animation.Enabled));
 		bool alternates = groups.Any(g => g.AlternateArtwork.Any(a => a.MemoryConditions.Count > 0));
 		bool comparisons = groups.Any(g => g.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal)
 			|| g.AlternateArtwork.Where(a => a.MemoryConditions.Count > 0).Any(a => a.MemoryConditions.Any(c => c.Comparison != MetaMemoryComparison.Equal)));
+		comparisons |= animated;
 		alternates |= comparisons; // MSP4 retains the alternate-image count even when zero.
 		bool conditional = alternates || groups.Any(g => g.MemoryConditions.Count > 0);
-		writer.Write(comparisons ? ComparisonMagic : alternates ? AlternateMagic : conditional ? ConditionalMagic : Magic);
+		writer.Write(animated ? AnimationMagic : comparisons ? ComparisonMagic : alternates ? AlternateMagic : conditional ? ConditionalMagic : Magic);
 		writer.Write(groups.Count);
 		foreach(var group in groups) {
 			var artwork = loadArtwork(group);
@@ -687,8 +719,10 @@ public static class MetaSpriteRuntimePacket
 						writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask);
 						if(comparisons) { writer.Write((int)condition.Comparison); }
 					}
+					if(animated) { WriteAnimation(writer,alternate.Animation,alternate.Scale,alternate.OriginX,alternate.OriginY,loadFrame); }
 				}
 			}
+			if(animated) { WriteAnimation(writer,group.Animation,group.ReplacementScale,group.ReplacementOriginX,group.ReplacementOriginY,loadFrame); }
 		}
 		return stream.ToArray();
 	}

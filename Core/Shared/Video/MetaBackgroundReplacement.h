@@ -1,5 +1,7 @@
 #pragma once
 #include "MetaSpriteFrame.h"
+#include "MetaPngAnimation.h"
+#include <array>
 #include <vector>
 #include <functional>
 #include <cstddef>
@@ -78,6 +80,7 @@ struct MetaBackgroundReplacement
 	int ScrollReferenceScanline = 32;
 	std::vector<uint32_t> Artwork;
 	std::vector<MetaMemoryCondition> MemoryConditions;
+	MetaPngArtworkAnimation Animation;
 	static int64_t WrapCoordinate(int64_t coordinate, int dimension)
 	{
 		// Power-of-two canvases are common. Unsigned masking also handles
@@ -111,7 +114,7 @@ struct MetaBackgroundReplacement
 	}
 	// The caller must validate the immutable layer before entering its pixel loop.
 	bool SampleValidated(const MetaBackgroundSample& source, int screenX, int screenY,
-		int subX, int subY, int outputScale, uint32_t& color) const
+		int subX, int subY, int outputScale, uint32_t& color, const MetaPngArtworkFrame* image = nullptr) const
 	{
 		color = 0;
 		if(!source.Valid || source.Layer != Layer || outputScale < 1
@@ -121,6 +124,7 @@ struct MetaBackgroundReplacement
 		auto floorDivide = [](int value, int divisor) { return value / divisor - (value % divisor < 0 ? 1 : 0); };
 		int64_t x = static_cast<int64_t>(FollowScroll ? source.X : floorDivide(screenX, source.PixelScaleX)) - X;
 		int64_t y = static_cast<int64_t>(FollowScroll ? source.Y : floorDivide(screenY, source.PixelScaleY)) - Y;
+		if(image) { x += image->OriginX; y += image->OriginY; }
 		auto scaledOffset = [](int offset, int rate) {
 			int64_t value = (int64_t)offset * (rate - 1000);
 			return value / 1000 - (value % 1000 < 0 ? 1 : 0);
@@ -130,13 +134,15 @@ struct MetaBackgroundReplacement
 			if(ScrollSpeedY != 1000 && source.ScrollWrapY > 0) { y += source.ScrollY + WrapCoordinate((int64_t)source.Y - source.ScrollY, source.ScrollWrapY) - source.Y; }
 			x += scaledOffset(source.ScrollX, ScrollSpeedX); y += scaledOffset(source.ScrollY, ScrollSpeedY);
 		}
-		int nativeWidth = Width / Scale, nativeHeight = Height / Scale;
+		int imageWidth = image ? image->Width : Width, imageHeight = image ? image->Height : Height;
+		int nativeWidth = imageWidth / Scale, nativeHeight = imageHeight / Scale;
 		if(WrapX) { x = WrapCoordinate(x, nativeWidth); }
 		if(WrapY) { y = WrapCoordinate(y, nativeHeight); }
 		if(x < 0 || y < 0 || x >= nativeWidth || y >= nativeHeight) { return false; }
 		x = x * Scale + (static_cast<int64_t>(source.PixelOffsetX) * outputScale + subX) * Scale / (source.PixelScaleX * outputScale);
 		y = y * Scale + (static_cast<int64_t>(source.PixelOffsetY) * outputScale + subY) * Scale / (source.PixelScaleY * outputScale);
-		color = Artwork[static_cast<size_t>(y) * Width + static_cast<size_t>(x)];
+		const auto& pixels = image ? *image->Pixels : Artwork;
+		color = pixels[static_cast<size_t>(y) * imageWidth + static_cast<size_t>(x)];
 		return true;
 	}
 };
@@ -147,6 +153,8 @@ struct MetaBackgroundView
 	std::vector<const MetaBackgroundReplacement*> Layers;
 	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> RasterReferences;
 	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> CameraReferences;
+	std::unordered_map<const MetaBackgroundReplacement*, std::array<const MetaPngArtworkFrame*,2>> AnimationFrames;
+	bool WovenAnimation = false;
 	bool RasterPrepared = false;
 	bool SnesIndependentPriority = false;
 	bool HasSnesIndependentPriority() const {
@@ -165,11 +173,17 @@ struct MetaBackgroundView
 	{
 		RasterReferences.clear();
 		CameraReferences.clear();
+		AnimationFrames.clear(); WovenAnimation = frame.SnesFieldMemoryCaptured;
 		RasterPrepared = true;
 		HiddenNativeLayers = 0;
 		SnesIndependentPriority = false;
 		if(frame.Pixels.size() != (uint64_t)frame.Width * frame.Height) { return; }
 		for(const auto* layer : Layers) {
+			if(!layer->Animation.Frames.empty()) {
+				std::array<const MetaPngArtworkFrame*,2> selected;
+				for(int field=0;field<2;field++) { selected[field]=layer->Animation.Select(WovenAnimation ? frame.SnesFieldFrameNumber[field] : frame.FrameNumber, WovenAnimation ? frame.SnesFieldAnimationTiming[field].get() : frame.AnimationTiming.get()); }
+				AnimationFrames.emplace(layer,selected);
+			}
 			SnesIndependentPriority |= layer->CompositionPosition == 3;
 			if(layer->UseCpuCamera && layer->FollowScroll) {
 				MetaBackgroundSample camera;
@@ -188,6 +202,11 @@ struct MetaBackgroundView
 	bool Sample(const MetaBackgroundReplacement& layer, const MetaBackgroundSample& source, int x, int y, int sx, int sy, int scale, uint32_t& color, bool independent = false) const
 	{
 		if(layer.CompositionPosition != 0 && !independent) { color = 0; return false; }
+		const MetaPngArtworkFrame* image=nullptr;
+		if(!layer.Animation.Frames.empty()) {
+			auto selected=AnimationFrames.find(&layer);
+			image=selected==AnimationFrames.end() ? (RasterPrepared ? nullptr : layer.Animation.Select(0)) : selected->second[WovenAnimation ? (y & 1) : 0];
+		}
 		if(layer.UseCpuCamera && layer.FollowScroll) {
 			auto reference = CameraReferences.find(&layer);
 			if(reference == CameraReferences.end() || !reference->second.Valid) { color = 0; return false; }
@@ -197,18 +216,18 @@ struct MetaBackgroundView
 			camera.X = floorDivide(x, std::max(1, (int)source.PixelScaleX)) + camera.ScrollX;
 			camera.Y = floorDivide(y, std::max(1, (int)source.PixelScaleY)) + camera.ScrollY;
 			camera.ScrollWrapX = camera.ScrollWrapY = 0;
-			return layer.SampleValidated(camera, x, y, sx, sy, scale, color);
+			return layer.SampleValidated(camera, x, y, sx, sy, scale, color,image);
 		}
-		if(!layer.IgnoreRasterScroll || !source.NesRasterScroll) { return layer.SampleValidated(source, x, y, sx, sy, scale, color); }
+		if(!layer.IgnoreRasterScroll || !source.NesRasterScroll) { return layer.SampleValidated(source, x, y, sx, sy, scale, color,image); }
 		auto reference = RasterReferences.find(&layer);
-		if(reference == RasterReferences.end()) { return layer.SampleValidated(source, x, y, sx, sy, scale, color); }
+		if(reference == RasterReferences.end()) { return layer.SampleValidated(source, x, y, sx, sy, scale, color,image); }
 		MetaBackgroundSample uniform = source;
 		uniform.ScrollX = reference->second.ScrollX; uniform.ScrollY = reference->second.ScrollY;
 		uniform.ScrollWrapX = reference->second.ScrollWrapX; uniform.ScrollWrapY = reference->second.ScrollWrapY;
 		uniform.X = x + uniform.ScrollX; uniform.Y = y + uniform.ScrollY;
 		if(uniform.ScrollWrapX > 0) { uniform.X = (int)MetaBackgroundReplacement::WrapCoordinate(uniform.X, uniform.ScrollWrapX); }
 		if(uniform.ScrollWrapY > 0) { uniform.Y = (int)MetaBackgroundReplacement::WrapCoordinate(uniform.Y, uniform.ScrollWrapY); }
-		return layer.SampleValidated(uniform, x, y, sx, sy, scale, color);
+		return layer.SampleValidated(uniform, x, y, sx, sy, scale, color,image);
 	}
 	struct Iterator {
 		// The view stays immutable during composition. Pointer iteration avoids

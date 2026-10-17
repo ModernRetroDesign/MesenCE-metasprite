@@ -1,5 +1,179 @@
 # Metasprite replacement development
 
+## Animation clock save states and rewind checkpoints - 2026-10-16
+
+Optional named save-state data now stores activation clocks, keyed by stable
+definition IDs/alternate slots and a content identity computed from the runtime
+packets. Newly parsed matching packs restore their phase. Legacy states, changed
+packets and invalid auxiliary clock records start fresh activation. PNG pixels
+and additional CPU memory are not stored in this section. Reset clears clocks.
+
+Emulator serialization covers explicit saves and full/XOR-compressed rewind
+checkpoints, with and without settings. Reconstructed rewind frames now capture
+configured replacement conditions/timing as they are emulated forward; cached
+reverse pictures bypass the decoder. Internal run-ahead save/restore excludes
+these presentation clocks, and speculative SNES field capture does not advance
+them. Full run-ahead behavior remains a separate live-verification task.
+
+Debug and Release native suites pass state round trips, re-parsed definitions,
+earlier/same-frame loads, legacy/changed/malformed fallback, retained field
+snapshots and speculative isolation. Actual emulator tests pass save/load and
+full/XOR rewind checkpoint restoration for NES, GB/GBC, GBA, PCE, SMS, SNES and
+WonderSwan. The headless suite waits for startup frames before acquiring its
+state-test lock, avoiding a test shutdown/startup race. Hidden editor/saved-PNG
+integration tests pass against both cores. Evidence: Tests/MetaSprites/obj/
+animation-state-{debug,release}.log, animation-state-cross-system-{debug,release}.log
+and animation-state-live-{debug,release}.log.
+
+These checks establish clock persistence and checkpoint handling, not visual
+reverse playback on every system. Broader live animation/rewind/turbo/run-ahead
+coverage, per-instance/visibility activation and bounded animation loading/
+transport remain unfinished.
+
+
+## Condition-based animation restart - 2026-10-16
+
+The animation editor now exposes restart when RAM conditions activate or this
+artwork becomes selected. MSP5/MBGH carry the flag. Emulation-thread clocks
+observe configured-address snapshots, reset on deselection/reactivation and pack
+publication, and publish immutable timing with captured frames. Default and
+alternate artwork share one phase per definition across matching instances.
+Unconditional sequences start when applied; moving offscreen does not restart
+them. Background camera validity participates in activation.
+
+Repeated frames do not advance clocks; skipped frame numbers advance by their
+emulated delta. Counter wrap advances normally. An earlier frame number resets
+activation on rewind/load. SNES retains separate field timing snapshots through
+weave/expand; source frame numbers are assigned before condition capture. Static
+packs avoid allocating timing snapshots. PNG-only alpha and existing priority
+composition remain unchanged.
+
+Managed packet/settings checks and Debug/Release native suites pass, including
+activation/re-entry, failed reads, repeated frames, rewind, counter wrap, origins,
+alpha and woven rendering. Hidden editor tests against both cores verify restart
+checkbox binding, draft isolation and default/alternate/background persistence,
+plus existing saved-PNG playback. Debug/Release UI builds pass with zero warnings
+and errors. Release contains Mesen.exe and the matching core. Evidence is in
+Tests/MetaSprites/obj/animation-activation-*.log.
+
+This does not serialize activation clocks into save states. Forward/same-frame
+state loads, run-ahead semantics, visibility/per-instance activation and broader
+all-system live restart coverage remain unverified or unfinished. Bounded
+animation loading/transport also remains unfinished.
+
+
+## Animation memory sharing - 2026-10-16
+
+Identical decoded animation frames now share immutable native pixel storage
+across default metasprites, conditional alternates and backgrounds loaded together.
+Origins, dimensions and durations remain per frame. Full pixel comparisons
+protect against hash collisions. Definitions retain ownership after parsing and
+share buffers when copied. Static primary artwork is not pooled.
+
+Debug/Release native suites pass, including buffer identity, distinct content,
+retained lifetime, parser sharing, timing, alpha, origins and invalid payloads.
+Both cores build. Hidden saved-PNG/editor integration checks pass against both
+cores. Release UI builds with zero warnings/errors; Mesen.exe and its matching
+native core are present. Evidence: Tests/MetaSprites/obj/animation-sharing-*.log.
+
+Transport still sends each frame and allocates a temporary buffer before sharing.
+The editor estimate remains a conservative sum including repeated frames and a
+packet-size guard. Bounded loading/transport, activation clocks, state/pause/turbo
+semantics and broader system animation verification remain unfinished.
+
+
+## PNG Animation Editor available — 2026-10-16
+
+Use **Edit PNG animation…** in Sprite Viewer for the displayed default/alternate
+PNG, or in Tilemap Viewer for the selected background. The shared window supports
+frame import/removal/navigation/reordering, duration, playback mode, optional
+origin overrides, click-to-set crosshairs, preview and save/apply. Drafts are
+isolated until save; filenames are preserved, in-pack PNGs reused and files
+retained on removal/cancel. Preview uses a three-image downsampled cache and
+shows approximate decoded sequence memory, including repeated frames.
+
+Debug/Release UI builds and hidden window/control tests against both native cores
+pass, including all three owners,
+scaled thumbnail origin clicks, stale-context rejection and failed-save recovery.
+These tests also exercise actual PNG/native playback. Synchronized play-once
+starts with the game. Restart-on-activation, pause/turbo/state semantics, bounded
+native asset handling and broader all-system live coverage are still pending;
+visible desktop interaction/layout has not been verified by the hidden tests.
+
+## Initial background sequence integration — 2026-10-16
+
+MBGH now transports background PNG sequences. Shared sampling caches immutable
+frame references, uses active dimensions/origins for wrap/placement/camera paths,
+and retains each woven field's animation clock. Widescreen sliding coverage
+tracks the active frame's horizontal bounds. Managed and Debug/Release native
+tests pass, including direct-color and GBA/SNES staged output, PNG alpha, hiding,
+RAM gating, camera scrolling and malformed data rejection.
+
+Saved PNG files and settings also pass whole-frame live SNES background-animation
+activation and disable restoration against Debug and Release cores. Existing
+cross-system static foreground checks and UI builds pass; Release packaging
+contains the matching native core. This initial playback uses global
+emulated-frame timing. Editors, restart clocks, pause/turbo/state checks, bounded
+caches and wider all-system live verification remain pending. Background
+conditions/cameras still need a separate per-field semantics audit.
+
+## Initial metasprite PNG sequence playback — 2026-10-16
+
+MSP5 now carries default and conditional-alternate animation frames, inheriting
+owner scale and resolving optional origins. Native composition selects immutable
+artwork by emulated frame number; woven SNES fields retain independent clocks.
+Managed loading decodes repeated paths once per pack application. Static MSP1–4
+packets stay unchanged. Debug/Release standalone checks cover rendering, origins,
+alpha, alternate selection, field clocks and invalid/truncated packets.
+
+Actual saved green/white PNGs and sequence settings pass loader activation and
+whole-frame SNES interlace playback against Debug and Release cores. Existing
+cross-system static foreground checks pass in Debug; UI builds and Release
+packaging pass. This initial path uses synchronized
+timing; restart-on-activation is explicitly rejected until implemented. Background
+animation, editors, activation clocks, pause/turbo/state behavior, bounded caches
+and all-system gameplay checks remain pending. Initial packets are capped at
+512 MiB; native asset sharing and bounded loading still need work.
+
+## Native animation timing engine — 2026-10-16
+
+Managed and native immutable timelines now agree for all three playback modes,
+one/two/three/256-frame sequences, exact duration/cycle boundaries and 64-bit
+ticks. Managed expectations and twelve exported timing-vector combinations pass
+the Debug and Release native compositor suites. Selection performs no artwork
+allocation or copying. Native validation rejects invalid modes, counts and
+durations. Gameplay transport, activation clocks, caching and editor integration
+remain to be implemented.
+
+## PNG animation sequence foundation — 2026-10-16
+
+Animation settings now persist on backgrounds, default metasprite PNGs and
+conditional alternates. The shared model validates frame paths, durations,
+optional origins and playback settings. An immutable timeline selects frames
+using emulated ticks for loop/ping-pong/play-once. Managed timing/persistence tests
+and the Debug UI build pass. Runtime packet creation rejects enabled sequences
+until native playback exists, preserving existing static behavior.
+
+Next work: editor controls, native transport/timing parity, activation clocks,
+shared decoded artwork caching and memory estimates, then all-system live tests.
+The feature is not yet available for gameplay or editor preview.
+
+## Cross-system screen-edge continuity — deferred, updated 2026-10-16
+
+The user expanded the deferred NES offscreen-tracking proposal to all supported
+systems: NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. Preserve available
+offscreen graphics/positions and recognize partial groups from visible anchors
+and relative layout. Maintain offscreen origins, clipping PNGs during rendering
+with native masks, windows and priority preserved. Add limited evidence-based
+tracking where games remove offscreen members, with stale-state safeguards;
+previous position or hardware sprite indices alone must not establish identity.
+
+Verify all four edges, wrapping, entry/exit, missing members, oversized PNGs,
+state/scene changes and native restoration. Use system-specific capture and
+coordinate handling, including NES mapper timing and X wrap, and affine/field
+geometry where applicable. PNG alpha remains the replacement mask. This is a
+planning-scope update; implementation remains deferred until resumed.
+
 ## Woven pose conditions retain field values — 2026-10-16
 
 Live alternating-pose tests exposed newest-field RAM values being applied to
@@ -770,6 +944,36 @@ require a wider compositor canvas, native viewport offsets, appropriate priority
 and clipping, and persistence of per-game settings. The initial canvas/settings
 above are implemented; the remaining proposal is not yet complete.
 
+## Future feature: TrueType text replacement — deferred, 2026-10-16
+
+Approved editor design: a dedicated Text Replacement Editor with character
+mapping, font preview/size/spacing/offset controls, native/custom palette-color
+rules, RAM activation conditions, target layer/dialog region and saved profiles
+for dialogs, menus and other text. A Tilemap Viewer action, "Map selected tiles
+to text...", should open the editor with the selection. Tile Viewer selection
+can also supply character mappings. Implementation remains deferred.
+
+User-approved future work: replace mapped native tilemap text with TrueType font
+glyphs in the game window. Profiles map tile indices or graphics addresses to
+characters, with bank/content context where addresses are reused. Multi-tile
+characters need grouped mappings. Target profiles by native layer and optional
+screen/dialog region, and enable them with user-configured CPU RAM conditions
+(for example, an address equals 2 while a dialog is open). Read only configured
+addresses, consistent with existing replacement conditions.
+
+Provide font selection, size, spacing and position offsets. Support inheriting
+native palette colors, explicit color overrides and per-palette color rules.
+Suppress the matched native text pixels and render cached font glyphs with native
+layer priority, scrolling and clipping preserved. Larger glyphs may extend past
+the source tile bounds, with optional dialog-region clipping.
+
+Start with tile-aligned glyph placement to retain native typing effects and
+spacing; proportional text-run layout is a later extension. Target NES, GB/GBC,
+GBA, PCE, SMS, SNES and WonderSwan through shared profiles and system-specific
+rendering integration. Sprite-based text is a possible later extension.
+This feature is planned/deferred; no implementation has started, and it is not
+an additional completion gate for the active metasprite goal.
+
 ## Future goal: PNG background blend modes
 
 Add per-background Normal alpha, Add and Subtract modes across NES, GB/GBC,
@@ -783,11 +987,13 @@ conditions, clipping and saved definitions. HDnes Alpha/Add/Subtract modes are
 the reference. The user requested recording this as future goal work; no blend
 mode implementation is included yet.
 
-## Possible PNG animation feature — deferred
+## Active goal: PNG animation — added 2026-10-16
 
-The user requested recording this possibility and deferring implementation.
+The user moved PNG animation from deferred future work into the active goal on
+2026-10-16. Implementation and verification are now required for goal completion.
 Background PNGs and metasprite artwork (including CPU-conditioned alternates)
-could each have a sequence of separate PNG frames. Proposed controls include
+will each support a sequence of separate PNG frames across all supported systems.
+Planned controls include
 add/remove/previous/next, duration in emulated frames, loop/ping-pong/play-once,
 shared scale/origin with optional per-frame origins, and synchronized timing
 with an optional restart-on-activation mode. Pausing would freeze animation;
@@ -806,8 +1012,12 @@ and no buffer copies on frame switches; show estimated decoded memory usage.
 Small metasprite sequences could preload; large background sequences may need
 bounded caching and prefetching to prevent stutters. Measure runtime cost before
 claiming an FPS budget, particularly for SNES composition. Sprite-sheet import
-is another possible later extension. This is optional future work, not an active
-implementation requirement or a reason to delay the current workflow.
+is another possible later extension and is not required for the initial animation
+implementation. Verify editor preview, PNG/JSON round trips, frame timing and
+playback modes, pause/turbo, activation/restart behavior, origins/scales,
+conditional alternates, system-specific composition and bounded asset handling.
+Shared sequence, persistence and timing groundwork is implemented; editor and
+native playback integration remain pending.
 
 ## CPU-camera background scrolling
 

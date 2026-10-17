@@ -1831,10 +1831,11 @@ void SnesPpu::SendFrame()
 	bool weaveCapture = _metaFrame && _interlacedFrame && !isRewinding
 		&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Weave;
 	if(weaveCapture) {
+		_metaFrame->FrameNumber = _frameCount;
 		_emu->GetVideoDecoder()->CaptureMetaSpriteMemory(*_metaFrame, [&](uint32_t address,uint8_t& value) {
 			if(address>0xFFFFFF) { return false; }
 			value=_memoryManager->Peek(address); return true;
-		});
+		}, !_emu->IsRunAheadFrame());
 		_metaFrame->FrameNumber = _frameCount;
 		_metaInterlaceFields[_oddFrame ? 1 : 0] = _metaFrame;
 		const auto& previous = _metaInterlaceFields[_oddFrame ? 0 : 1];

@@ -2,6 +2,7 @@ using Mesen.Config;
 using Mesen.Interop;
 using SkiaSharp;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -16,14 +17,22 @@ internal static class MetaSpriteRuntimeLoader
 	public static bool Apply(MetaSpritePack pack, string path)
 	{
 		ValidateBackgroundSupport(pack);
-		byte[] packet = MetaSpriteRuntimePacket.Create(pack, group => LoadArtwork(group, Path.GetDirectoryName(path)!),
-			alternate => LoadPng(Path.Combine(Path.GetDirectoryName(path)!, alternate.Path), alternate.Scale));
+		string directory=Path.GetDirectoryName(path)!;
+		var decoded=new Dictionary<string,(int Width,int Height,uint[] Pixels)>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+		(int Width,int Height,uint[] Pixels) LoadCached(string relative,int scale) {
+			if(string.IsNullOrWhiteSpace(relative)) { throw new InvalidDataException("Replacement artwork requires a PNG."); }
+			string fullPath=Path.GetFullPath(Path.Combine(directory,relative));
+			if(!decoded.TryGetValue(fullPath,out var image)) { image=LoadPng(fullPath,scale); decoded.Add(fullPath,image); }
+			MetaSpritePlacement.ValidateSpriteCanvas(image.Width,image.Height,scale); return image;
+		}
+		byte[] packet = MetaSpriteRuntimePacket.Create(pack, group => LoadCached(group.ReplacementPath,group.ReplacementScale),
+			alternate => LoadCached(alternate.Path,alternate.Scale), (frame,scale) => LoadCached(frame.Path,scale));
 		byte[] backgrounds = MetaBackgroundRuntimePacket.Create(pack, layer => {
 			if(layer.ArtworkPath.Length == 0) { throw new InvalidDataException($"Background {layer.Id} has no PNG."); }
-			var artwork = LoadPng(Path.Combine(Path.GetDirectoryName(path)!, layer.ArtworkPath), layer.ArtworkScale);
+			var artwork = LoadCached(layer.ArtworkPath, layer.ArtworkScale);
 			MetaSpritePlacement.ValidateCanvas(artwork.Width, artwork.Height, layer.ArtworkScale);
 			return artwork;
-		});
+		}, (frame,scale) => LoadCached(frame.Path,scale));
 		return DebugApi.SetMetaReplacements(pack.RomHash, packet, (uint)packet.Length, backgrounds, (uint)backgrounds.Length);
 	}
 
@@ -69,8 +78,10 @@ internal static class MetaSpriteRuntimeLoader
 	{
 		string directory = Path.GetDirectoryName(packPath)!;
 		foreach(var group in pack.Groups) {
+			ValidateAnimationCanvases(group.Animation,directory,group.ReplacementScale,false);
 			if(group.ReplacementPath.Length > 0) { ValidatePngCanvas(Path.Combine(directory, group.ReplacementPath), group.ReplacementScale); }
 			foreach(var alternate in group.AlternateArtwork) {
+				ValidateAnimationCanvases(alternate.Animation,directory,alternate.Scale,false);
 				alternate.Validate(); ValidatePngCanvas(Path.Combine(directory, alternate.Path), alternate.Scale);
 			}
 		}
@@ -78,6 +89,7 @@ internal static class MetaSpriteRuntimeLoader
 	public static void ValidateBackgroundArtworkCanvases(MetaSpritePack pack, string packPath)
 	{
 		foreach(var layer in pack.BackgroundLayers) {
+			ValidateAnimationCanvases(layer.Animation,Path.GetDirectoryName(packPath)!,layer.ArtworkScale,true);
 			if(layer.ArtworkPath.Length == 0) { continue; }
 			string path = Path.Combine(Path.GetDirectoryName(packPath)!, layer.ArtworkPath);
 			using SKCodec codec = SKCodec.Create(path) ?? throw new InvalidDataException($"Could not read PNG '{layer.ArtworkPath}'.");
@@ -85,6 +97,15 @@ internal static class MetaSpriteRuntimeLoader
 			if(codec.Info.Width != layer.ArtworkWidth || codec.Info.Height != layer.ArtworkHeight) {
 				throw new InvalidDataException($"Background {layer.Id:D3} PNG dimensions changed. Import the edited PNG again before saving.");
 			}
+		}
+	}
+	private static void ValidateAnimationCanvases(MetaPngAnimation animation,string directory,int scale,bool background)
+	{
+		animation.Validate(); if(!animation.Enabled) { return; }
+		foreach(var frame in animation.Frames) {
+			using var codec=SKCodec.Create(Path.Combine(directory,frame.Path)) ?? throw new InvalidDataException($"Could not read animation PNG '{frame.Path}'.");
+			if(background) { MetaSpritePlacement.ValidateCanvas(codec.Info.Width,codec.Info.Height,scale); }
+			else { MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width,codec.Info.Height,scale); }
 		}
 	}
 	private static void ValidatePngCanvas(string path, int scale)

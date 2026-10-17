@@ -59,6 +59,7 @@
 							<Button Content="Export selected tilemap PNG" Click="OnExportMetaBackground" />
 							<Button Content="Import background PNG" Click="OnImportMetaBackground" />
 							<Button Content="Replace selected PNG" Click="OnReplaceMetaBackground" ToolTip.Tip="Keep the selected background's placement, scale and CPU conditions while loading new artwork." />
+							<Button Content="Edit PNG animation…" Click="OnEditBackgroundAnimation" />
 							<ComboBox ItemsSource="{Binding MetaBackgrounds}" SelectedItem="{Binding SelectedMetaBackground}" />
 							<Button Content="Remove selected background layer" Click="OnRemoveMetaBackground" />
 							<Border Background="#404040" MaxHeight="200">

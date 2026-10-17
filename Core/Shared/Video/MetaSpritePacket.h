@@ -7,6 +7,8 @@ class MetaSpritePacket
 {
 	const uint8_t* _data;
 	size_t _length, _offset = 0;
+	MetaPngPixelPool _localPool;
+	MetaPngPixelPool* _pixelPool;
 	uint32_t Read()
 	{
 		if(_length - _offset < 4) { throw std::runtime_error("Truncated metasprite packet"); }
@@ -36,13 +38,30 @@ class MetaSpritePacket
 		return pixels;
 	}
 
+	MetaPngArtworkAnimation Animation()
+	{
+		MetaPngArtworkAnimation animation; uint32_t count=Read();
+		if(count==0) { return animation; }
+		if(count>256) { throw std::runtime_error("Too many PNG animation frames"); }
+		uint32_t mode=Read(), restart=Read();
+		if(mode>2 || restart>1) { throw std::runtime_error("Unsupported PNG animation playback settings"); }
+		animation.RestartOnActivation=restart!=0;
+		std::vector<uint32_t> durations;
+		for(uint32_t i=0;i<count;i++) {
+			uint32_t duration=Read(); if(duration<1 || duration>3600000) { throw std::runtime_error("Invalid PNG frame duration"); }
+			durations.push_back(duration); MetaPngArtworkFrame frame;
+			frame.OriginX=Coordinate(); frame.OriginY=Coordinate(); frame.Width=Dimension(8192); frame.Height=Dimension(8192);
+			frame.Pixels=_pixelPool->Intern(Pixels(frame.Width,frame.Height)); animation.Frames.push_back(std::move(frame));
+		}
+		animation.Timeline=MetaPngTimeline((MetaPngPlayback)mode,durations); return animation;
+	}
 public:
-	MetaSpritePacket(const uint8_t* data, size_t length) : _data(data), _length(length) {}
+	MetaSpritePacket(const uint8_t* data, size_t length, MetaPngPixelPool* pool = nullptr) : _data(data), _length(length), _pixelPool(pool ? pool : &_localPool) {}
 	std::vector<MetaSpriteReplacement> Parse()
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t magic = Read();
-		if(magic != 0x3150534D && magic != 0x3250534D && magic != 0x3350534D && magic != 0x3450534D) { throw std::runtime_error("Invalid metasprite packet"); }
+		if(magic != 0x3150534D && magic != 0x3250534D && magic != 0x3350534D && magic != 0x3450534D && magic != 0x3550534D) { throw std::runtime_error("Invalid metasprite packet"); }
 		uint32_t count = Read();
 		if(count > 1024) { throw std::runtime_error("Too many groups"); }
 		std::vector<MetaSpriteReplacement> groups;
@@ -69,13 +88,13 @@ public:
 				if(conditions > 64) { throw std::runtime_error("Too many memory conditions"); }
 				for(uint32_t c = 0; c < conditions; c++) {
 					uint32_t address = Read(), value = Read(), mask = Read();
-					uint32_t comparison = magic == 0x3450534D ? Read() : 0;
+					uint32_t comparison = magic == 0x3450534D || magic == 0x3550534D ? Read() : 0;
 					if(comparison > 5) { throw std::runtime_error("Invalid comparison operator"); }
 					if(value > 255 || mask > 255) { throw std::runtime_error("Invalid memory condition byte"); }
 					group.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 				}
 			}
-			if(magic == 0x3350534D || magic == 0x3450534D) {
+			if(magic == 0x3350534D || magic == 0x3450534D || magic == 0x3550534D) {
 				uint32_t alternates = Read();
 				if(alternates > 64) { throw std::runtime_error("Too many alternate images"); }
 				for(uint32_t a = 0; a < alternates; a++) {
@@ -87,17 +106,24 @@ public:
 					int conditions = Dimension(64);
 					for(int c = 0; c < conditions; c++) {
 						uint32_t address = Read(), value = Read(), mask = Read();
-						uint32_t comparison = magic == 0x3450534D ? Read() : 0;
+						uint32_t comparison = magic == 0x3450534D || magic == 0x3550534D ? Read() : 0;
 						if(comparison > 5) { throw std::runtime_error("Invalid alternate comparison operator"); }
 						if(value > 255 || mask > 255) { throw std::runtime_error("Invalid alternate condition byte"); }
 						alternate.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 					}
+					if(magic == 0x3550534D) { alternate.Animation=Animation(); }
 					group.AlternateArtwork.push_back(std::move(alternate));
 				}
 			}
+			if(magic == 0x3550534D) { group.Animation=Animation(); }
 			groups.push_back(std::move(group));
 		}
 		if(_offset != _length) { throw std::runtime_error("Trailing packet data"); }
+		auto identity=MetaPngPacketIdentity(_data,_length);
+		for(auto& group : groups) {
+			group.Animation.SourceIdentity=identity;
+			for(auto& alternate : group.AlternateArtwork) { alternate.Animation.SourceIdentity=identity; }
+		}
 		return groups;
 	}
 };

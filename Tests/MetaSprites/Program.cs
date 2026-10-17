@@ -11,6 +11,91 @@ static void Check(bool condition, string message)
 
 static MetaSpriteMember Sprite(int x, int y, uint color) => new() { X = x, Y = y, Width = 1, Height = 1, Pixels = new[] { color } };
 
+var animation = new MetaPngAnimation { Enabled = true, RestartOnActivation = true, Frames = new() {
+	new() { Path = "a.png", Duration = 2 }, new() { Path = "b.png", Duration = 3, OriginX = -2, OriginY = 7 }, new() { Path = "c.png", Duration = 1 }
+} };
+var timeline = new MetaPngTimeline(animation);
+Check(Enumerable.Range(0,12).Select(i => timeline.SelectFrame((ulong)i)).SequenceEqual(new[] {0,0,1,1,1,2,0,0,1,1,1,2}), "Animation durations and loop boundaries must use emulated frames.");
+Check(timeline.SelectFrame(ulong.MaxValue) == timeline.SelectFrame(ulong.MaxValue % 6), "Long-running animation must not overflow.");
+animation.Playback = MetaPngPlayback.PingPong; timeline = new MetaPngTimeline(animation);
+Check(timeline.Duration == 9 && Enumerable.Range(0,10).Select(i => timeline.SelectFrame((ulong)i)).SequenceEqual(new[] {0,0,1,1,1,2,1,1,1,0}), "Ping-pong must reverse without repeating endpoint visits.");
+animation.Playback = MetaPngPlayback.PlayOnce; timeline = new MetaPngTimeline(animation);
+Check(timeline.SelectFrame(5) == 2 && timeline.SelectFrame(6) == 2 && timeline.SelectFrame(ulong.MaxValue) == 2, "Play-once must hold its final frame.");
+animation.Frames[0].Duration = 10;
+Check(timeline.SelectFrame(2) == 1, "Compiled timing must not change when editor drafts change.");
+animation.Enabled = false; Check(new MetaPngTimeline(animation).SelectFrame(0) == -1, "Disabled animation must select static artwork.");
+foreach(string invalid in new[] { "../outside.png", "C:\\outside.png", "/outside.png", "a/../../outside.png", "file.jpg" }) {
+	var rejectedAnimation = new MetaPngAnimation { Frames = new() { new() { Path = invalid } } };
+	bool rejected = false; try { rejectedAnimation.Validate(); } catch(InvalidDataException) { rejected = true; }
+	Check(rejected, "Invalid animation asset paths must be rejected: " + invalid);
+}
+animation.Enabled = true; animation.Frames[0].Duration = 0;
+bool rejectedDuration = false; try { animation.Validate(); } catch(InvalidDataException) { rejectedDuration = true; }
+Check(rejectedDuration, "Zero-duration animation frames must be rejected."); animation.Frames[0].Duration = 2;
+var oneFrame = new MetaPngAnimation { Enabled=true, Playback=MetaPngPlayback.PingPong, Frames=new() { new() { Path="one.png", Duration=7 } } };
+Check(new MetaPngTimeline(oneFrame).SelectFrame(ulong.MaxValue)==0,"A single ping-pong frame must remain stable.");
+oneFrame.Frames.Add(new() { Path="two.png", Duration=2 }); var twoFrames=new MetaPngTimeline(oneFrame);
+Check(twoFrames.Duration==9 && twoFrames.SelectFrame(7)==1 && twoFrames.SelectFrame(9)==0,"Two-frame ping-pong must not invent reverse endpoint visits.");
+Console.WriteLine("PASS: PNG animation duration boundaries, loop/ping-pong/play-once timing, immutable compilation, large ticks and invalid input rejection.");
+if(args.Length > 0) {
+	Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(args[0]))!);
+	using var timingFile = new BinaryWriter(File.Create(args[0]+".animation"));
+	timingFile.Write(0x31544150u); // PAT1 managed/native timing verification.
+	timingFile.Write(12);
+	foreach(MetaPngPlayback playback in Enum.GetValues<MetaPngPlayback>()) {
+		foreach(int count in new[] {1,2,3,256}) {
+			var sequence = new MetaPngAnimation { Enabled=true, Playback=playback };
+			for(int i=0;i<count;i++) { sequence.Frames.Add(new() { Path=$"frame-{i}.png", Duration=count==256 ? 3600000 : i+1 }); }
+			var compiled = new MetaPngTimeline(sequence);
+			var ticks = new SortedSet<ulong> {0,1,2,3,4,5,6,compiled.Duration-1,compiled.Duration,compiled.Duration+1,ulong.MaxValue};
+			ulong boundary=0;
+			foreach(var frame in sequence.Frames) { boundary+=(ulong)frame.Duration; ticks.Add(boundary-1); ticks.Add(boundary); }
+			timingFile.Write((int)playback); timingFile.Write(count);
+			foreach(var frame in sequence.Frames) { timingFile.Write(frame.Duration); }
+			timingFile.Write(compiled.Duration); timingFile.Write(ticks.Count);
+			foreach(ulong tick in ticks) { timingFile.Write(tick); timingFile.Write(compiled.SelectFrame(tick)); }
+		}
+	}
+}
+
+var animationPack = new MetaSpritePack { Groups=new() { new() {
+	Id=1, Enabled=true, Width=1, Height=1, ReplacementPath="static.png", Members=new() { Sprite(0,0,0xFFFF0000) },
+	Animation=new() { Enabled=true, Frames=new() {new() {Path="a.png",Duration=2},new() {Path="b.png",Duration=1,OriginX=1}} },
+	AlternateArtwork=new() { new() { Path="alt.png",MemoryConditions=new() {new() {Address=7,Value=1}},
+		Animation=new() { Enabled=true,Frames=new() {new() {Path="blue.png"},new() {Path="white.png"}} } } }
+} } };
+byte[] animatedPacket=MetaSpriteRuntimePacket.Create(animationPack,_ => (2,1,new[] {0xFFFF0000u,0xFFFF0000u}),
+	_ => (2,1,new[] {0xFF0000FFu,0xFF0000FFu}), (frame,_) => (2,1,frame.Path switch {
+		"a.png" => new[] {0xFF00FF00u,0xFF00FF00u}, "b.png" => new[] {0u,0x80FFFF00u},
+		"blue.png" => new[] {0xFF0000FFu,0xFF0000FFu}, _ => new[] {0xFFFFFFFFu,0xFFFFFFFFu}
+	}));
+Check(BitConverter.ToUInt32(animatedPacket)==MetaSpriteRuntimePacket.AnimationMagic,"Animated artwork requires MSP5 transport.");
+if(args.Length>0) { File.WriteAllBytes(args[0]+".animated",animatedPacket); }
+animationPack.Groups[0].Animation.RestartOnActivation=true;
+animationPack.Groups[0].AlternateArtwork[0].Animation.RestartOnActivation=true;
+byte[] activationPacket=MetaSpriteRuntimePacket.Create(animationPack,_ => (2,1,new[] {0xFFFF0000u,0xFFFF0000u}),
+	_ => (2,1,new[] {0xFF0000FFu,0xFF0000FFu}), (frame,_) => (2,1,frame.Path switch {
+		"a.png" => new[] {0xFF00FF00u,0xFF00FF00u}, "b.png" => new[] {0u,0x80FFFF00u},
+		"blue.png" => new[] {0xFF0000FFu,0xFF0000FFu}, _ => new[] {0xFFFFFFFFu,0xFFFFFFFFu}
+	}));
+if(args.Length>0) { File.WriteAllBytes(args[0]+".activated",activationPacket); }
+Console.WriteLine("PASS: MSP5 default/conditional alternate animation frame transport with inherited scale, optional origins and PNG alpha.");
+var animatedBackgroundPack = new MetaSpritePack { System="Gameboy", BackgroundLayers=new() { new() {
+	Id=1,Enabled=true,ArtworkPath="background.png",ArtworkWidth=1,ArtworkHeight=1,HideOriginalLayer=true,
+	MemoryConditions=new() {new() {Address=7,Value=1}},Animation=new() {Enabled=true,Frames=new() {
+		new() {Path="bg-a.png",Duration=2},new() {Path="bg-b.png",OriginX=1}
+	}}
+} } };
+byte[] animatedBackgroundPacket=MetaBackgroundRuntimePacket.Create(animatedBackgroundPack,_ => (1,1,new[] {0xFF000000u}),
+	(frame,_) => frame.Path=="bg-a.png" ? (2,1,new[] {0xFF00FF00u,0xFF00FF00u}) : (3,1,new[] {0u,0x80FFFF00u,0xFFFFFFFFu}));
+Check(BitConverter.ToUInt32(animatedBackgroundPacket)==MetaBackgroundRuntimePacket.AnimationMagic,"Animated backgrounds require MBGH transport.");
+if(args.Length>0) { File.WriteAllBytes(args[0]+".background.animated",animatedBackgroundPacket); }
+animatedBackgroundPack.BackgroundLayers[0].Animation.RestartOnActivation=true;
+byte[] activatedBackgroundPacket=MetaBackgroundRuntimePacket.Create(animatedBackgroundPack,_ => (1,1,new[] {0xFF000000u}),
+	(frame,_) => frame.Path=="bg-a.png" ? (2,1,new[] {0xFF00FF00u,0xFF00FF00u}) : (3,1,new[] {0u,0x80FFFF00u,0xFFFFFFFFu}));
+if(args.Length>0) { File.WriteAllBytes(args[0]+".background.activated",activatedBackgroundPacket); }
+Console.WriteLine("PASS: MBGH background sequence transport preserves RAM conditions, hide-native settings, changing dimensions and origins.");
+
 var memoryConditions = new System.Collections.Generic.List<MetaMemoryCondition> {
 	new() { Address = 0xC000, Value = 3, Mask = 15 }, new() { Address = 0xC001, Value = 7 }
 };
@@ -97,6 +182,19 @@ try {
 	pack.Groups.Add(group);
 	var background = new MetaBackgroundLayer { Id = 1, NativeLayer = 1, DrawOrder = 7, ArtworkPath = "background.png", ArtworkWidth = 64, ArtworkHeight = 32, ArtworkScale = 2, X = 3, Y = 5, WrapX = true };
 	pack.BackgroundLayers.Add(background);
+	pack.Save(path);
+	pack.Groups[0].Animation = animation;
+	pack.BackgroundLayers[0].Animation = animation;
+	pack.Groups[0].AlternateArtwork.Add(new() { Path="alternate.png", Animation=animation });
+	pack.Save(path);
+	var animatedPack=MetaSpritePack.Load(path,"test-rom","Gameboy");
+	Check(animatedPack.Groups[0].Animation.Frames[1].OriginX == -2 && animatedPack.Groups[0].Animation.Frames[0].OriginX == null
+		&& animatedPack.Groups[0].Animation.RestartOnActivation && animatedPack.BackgroundLayers[0].Animation.Playback == MetaPngPlayback.PlayOnce
+		&& animatedPack.Groups[0].AlternateArtwork[^1].Animation.Frames.Count == 3, "Animation sequences must survive JSON for all artwork owners.");
+	bool rejectedPlayback=false;
+	try { MetaSpriteRuntimePacket.Create(animatedPack,_ => (1,1,new[] {0xFFFFFFFFu})); } catch(InvalidDataException) { rejectedPlayback=true; }
+	Check(rejectedPlayback,"Enabled animation requires a PNG frame loader.");
+	pack.Groups[0].Animation=new(); pack.BackgroundLayers[0].Animation=new(); pack.Groups[0].AlternateArtwork.RemoveAt(pack.Groups[0].AlternateArtwork.Count-1);
 	pack.Save(path);
 	Check(!File.ReadAllText(path).Contains("RuntimeSpriteIndex"), "Transient hardware indices must never enter saved recognition definitions.");
 	var loaded = MetaSpritePack.Load(path, "test-rom", "Gameboy");
@@ -543,3 +641,7 @@ if(args.Length >= 3 && args[1] == "--viewer-refresh") {
 	GameplayFixture.RunViewerRefreshSuite(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }
 if(args.Length >= 2 && args[1] == "--matcher-benchmark") { MatcherBenchmark.Run(); }
+
+if(args.Length>=3 && args[1]=="--animation-state") {
+	GameplayFixture.RunAnimationStateSuite(Path.GetFullPath(args[2]),Path.GetFullPath(args[0]));
+}

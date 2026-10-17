@@ -1,5 +1,6 @@
 #include "../../Core/Shared/Video/MetaSpriteCompositor.h"
 #include "../../Core/Shared/Video/MetaSnesCapture.h"
+#include "../../Core/Shared/Video/MetaPngAnimation.h"
 #include "../../Core/Shared/Video/MetaSpritePacket.h"
 #include "../../Core/Shared/Video/MetaBackgroundReplacement.h"
 #include "../../Core/Shared/Video/MetaBackgroundPacket.h"
@@ -106,6 +107,208 @@ static void BenchmarkComposition(bool largeGroups = false, int effects = 0)
 
 int main(int argc, char** argv)
 {
+	{
+        std::shared_ptr<const std::vector<uint32_t>> retained;
+        {
+            MetaPngPixelPool pool;
+            retained=pool.Intern({0xFF123456,0});
+            assert(retained == pool.Intern({0xFF123456,0}));
+            assert(retained != pool.Intern({0xFF123456,1}));
+            assert(retained != pool.Intern({0xFF123456}));
+            MetaPngArtworkFrame frame; frame.Pixels=retained;
+            auto copy=frame; assert(copy.Pixels==frame.Pixels);
+        }
+        assert(retained->size()==2 && (*retained)[0]==0xFF123456);
+        std::cout << "PASS: immutable PNG pixel sharing, distinct content and retained lifetime.\n";
+        MetaPngActivationClock clock;
+        assert(clock.Observe(100,true)==0 && clock.Observe(102,true)==2);
+        assert(clock.Observe(102,true)==2); // repeated paused/presented frame
+        assert(clock.Observe(200,false)==0 && clock.Observe(210,true)==0);
+        assert(clock.Observe(212,true)==2 && clock.Observe(50,true)==0);
+        MetaPngActivationClock wrap;
+        assert(wrap.Observe(UINT32_MAX-1,true)==0 && wrap.Observe(1,true)==3);
+        std::cout << "PASS: activation clock pause/repeat, skipped frames, deactivate/reactivate, rewind and counter wrap.\n";
+		MetaPngTimeline timeline(MetaPngPlayback::PingPong,{2,3,1});
+		assert(timeline.Duration()==9 && timeline.SelectFrame(5)==2 && timeline.SelectFrame(6)==1 && timeline.SelectFrame(9)==0);
+		assert(MetaPngTimeline().SelectFrame(0)==-1);
+		for(auto durations : {std::vector<uint32_t>{},std::vector<uint32_t>{0},std::vector<uint32_t>{3600001},std::vector<uint32_t>(257,1)}) {
+			bool rejected=false; try { MetaPngTimeline invalid(MetaPngPlayback::Loop,durations); } catch(const std::runtime_error&) { rejected=true; } assert(rejected);
+		}
+		bool rejected=false; try { MetaPngTimeline invalid((MetaPngPlayback)3,{1}); } catch(const std::runtime_error&) { rejected=true; } assert(rejected);
+		std::cout << "PASS: native immutable PNG animation timing and invalid duration/mode/count rejection.\n";
+	}
+	if(argc>1 && std::string(argv[1]).find("--")!=0) {
+		std::ifstream timing(std::string(argv[1])+".animation",std::ios::binary); assert(timing);
+		auto read32=[&]() { uint32_t value=0; timing.read(reinterpret_cast<char*>(&value),4); assert(timing); return value; };
+		auto read64=[&]() { uint64_t value=0; timing.read(reinterpret_cast<char*>(&value),8); assert(timing); return value; };
+		assert(read32()==0x31544150); uint32_t cases=read32(); assert(cases==12);
+		for(uint32_t test=0;test<cases;test++) {
+			auto mode=(MetaPngPlayback)read32(); uint32_t count=read32(); assert(count>=1 && count<=256);
+			std::vector<uint32_t> durations; for(uint32_t i=0;i<count;i++) { durations.push_back(read32()); }
+			MetaPngTimeline timeline(mode,durations); assert(timeline.Duration()==read64()); uint32_t ticks=read32();
+			for(uint32_t i=0;i<ticks;i++) { uint64_t tick=read64(); uint32_t expected=read32(); assert(timeline.SelectFrame(tick)==(int)expected); }
+		}
+		assert(timing.peek()==std::char_traits<char>::eof());
+		std::cout << "PASS: managed/native PNG animation parity for all modes, one/two/three/256 frames, exact boundaries and 64-bit ticks.\n";
+		std::ifstream artwork(std::string(argv[1])+".animated",std::ios::binary); assert(artwork);
+		std::vector<uint8_t> packet((std::istreambuf_iterator<char>(artwork)),std::istreambuf_iterator<char>());
+		MetaPngPixelPool parsedPixelPool;
+		auto groups=MetaSpritePacket(packet.data(),packet.size(),&parsedPixelPool).Parse(); assert(groups.size()==1);
+		auto duplicateGroups=MetaSpritePacket(packet.data(),packet.size(),&parsedPixelPool).Parse();
+		assert(groups[0].Animation.Frames[0].Pixels==duplicateGroups[0].Animation.Frames[0].Pixels);
+		assert(groups[0].AlternateArtwork[0].Animation.Frames[0].Pixels==duplicateGroups[0].AlternateArtwork[0].Animation.Frames[0].Pixels);
+		assert(groups[0].Animation.Frames.size()==2 && groups[0].AlternateArtwork[0].Animation.Frames.size()==2);
+		MetaMemorySnapshot snapshot; assert(groups[0].SelectArtwork(snapshot,0).Artwork[0]==0xFF00FF00);
+		assert(groups[0].SelectArtwork(snapshot,1).Artwork[0]==0xFF00FF00);
+		assert(groups[0].SelectArtwork(snapshot,2).ArtworkOriginX==1 && groups[0].SelectArtwork(snapshot,2).Artwork[1]==0x80FFFF00);
+		assert(groups[0].SelectArtwork(snapshot,3).Artwork[0]==0xFF00FF00);
+		snapshot[7]=1; assert(groups[0].SelectArtwork(snapshot,0).Artwork[0]==0xFF0000FF && groups[0].SelectArtwork(snapshot,1).Artwork[0]==0xFFFFFFFF);
+		MetaSpriteFrame frame(2,1); frame.SnesColorEffects=true; frame.DecodedRows={{0,0,0,0,1,1,{0xFFFF0000}}}; frame.DecodedRows[0].SnesPriorityCode=3;
+		for(auto& pixel : frame.Pixels) { pixel.SnesFallbackCaptured=true; pixel.SnesFallbackMainColor=0x7C00; pixel.Brightness=15; pixel.SnesObjectsMain=true; pixel.SnesObjectPriorities[3]=6; }
+		MetaSpriteCompositor compositor; compositor.SetGroups(groups); std::vector<uint32_t> original(2,0xFF0000FF);
+		frame.FrameNumber=1; auto output=compositor.Apply(original.data(),2,1,frame); assert(output[0]==0xFF00FF00 && output[1]==0xFF00FF00);
+		frame.FrameNumber=2; output=compositor.Apply(original.data(),2,1,frame); assert(output[0]==0xFF80807F && output[1]==0xFF0000FF);
+		int reads=0; compositor.CaptureMemorySnapshot(frame,[&](uint32_t address,uint8_t& value) { assert(address==7); value=0; reads++; return true; });
+		assert(reads==1 && frame.MemorySnapshot.size()==1 && !frame.AnimationTiming);
+		auto even=frame, odd=frame; even.FrameNumber=1; odd.FrameNumber=2; MetaSpriteFrame woven(4,2);
+		assert(MetaSnesCapture::WeaveFieldsWithoutMath(even,odd,woven)); std::vector<uint32_t> larger(8,0xFF0000FF);
+		output=compositor.Apply(larger.data(),4,2,woven); assert(output[0]==0xFF00FF00 && output[4]==0xFF80807F);
+		for(size_t length=0;length<packet.size();length++) { bool rejected=false; try { MetaSpritePacket(packet.data(),length).Parse(); } catch(const std::runtime_error&) { rejected=true; } assert(rejected); }
+		for(size_t offset : {packet.size()-64,packet.size()-60,packet.size()-56}) {
+			auto invalid=packet; uint32_t bad=offset==packet.size()-56 ? 0 : 3;
+			for(int byte=0;byte<4;byte++) { invalid[offset+byte]=(uint8_t)(bad>>(byte*8)); }
+			bool rejected=false; try { MetaSpritePacket(invalid.data(),invalid.size()).Parse(); } catch(const std::runtime_error&) { rejected=true; } assert(rejected);
+		}
+		std::cout << "PASS: MSP5 animated default/alternate transfer, frame-clock rendering, shifted origin, PNG alpha and truncated/invalid payload rejection.\n";
+		std::ifstream bgFile(std::string(argv[1])+".background.animated",std::ios::binary); assert(bgFile);
+		std::vector<uint8_t> bgPacket((std::istreambuf_iterator<char>(bgFile)),std::istreambuf_iterator<char>());
+		auto backgrounds=MetaBackgroundPacket(bgPacket.data(),bgPacket.size(),&parsedPixelPool).Parse(); assert(backgrounds.size()==1 && backgrounds[0].Animation.Frames.size()==2);
+		auto duplicateBackgrounds=MetaBackgroundPacket(bgPacket.data(),bgPacket.size(),&parsedPixelPool).Parse();
+		assert(backgrounds[0].Animation.Frames[0].Pixels==duplicateBackgrounds[0].Animation.Frames[0].Pixels);
+		assert(backgrounds[0].Animation.Frames[0].Pixels==parsedPixelPool.Intern(*backgrounds[0].Animation.Frames[0].Pixels));
+		std::cout << "PASS: sprite/default/alternate and background parsers reuse load-scoped immutable animation buffers.\n";
+		MetaSpriteFrame bgFrame(3,1); bgFrame.MemorySnapshot[7]=1;
+		for(int x=0;x<3;x++) { auto& p=bgFrame.Pixels[x]; p.BackgroundSample={x,0,0,true}; p.NativeBackdropCaptured=true; }
+		MetaSpriteCompositor bgCompositor; bgCompositor.SetBackgroundLayers(backgrounds); std::vector<uint32_t> blue(3,0xFF0000FF);
+		auto convert=[](uint16_t) { return 0xFF000000u; };
+		bgFrame.FrameNumber=0; output=bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert); assert(output[0]==0xFF00FF00 && output[1]==0xFF00FF00 && output[2]==0xFF000000);
+		bgFrame.FrameNumber=2; output=bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert); assert(output[0]==0xFF808000 && output[1]==0xFFFFFFFF && output[2]==0xFF000000);
+		backgrounds[0].WrapX=true; bgCompositor.SetBackgroundLayers(backgrounds); bgFrame.FrameNumber=0;
+		output=bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert); assert(output[2]==0xFF00FF00);
+		bgFrame.FrameNumber=2; output=bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert); assert(output[2]==0xFF000000);
+		backgrounds[0].WrapX=false; backgrounds[0].UseCpuCamera=true; backgrounds[0].CameraX.Format=1; backgrounds[0].CameraX.Address=8;
+		bgFrame.MemorySnapshot[8]=1; bgCompositor.SetBackgroundLayers(backgrounds);
+		output=bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert); assert(output[0]==0xFFFFFFFF && output[1]==0xFF000000);
+		bgFrame.MemorySnapshot[7]=0; assert(bgCompositor.Apply(blue.data(),3,1,bgFrame,0,0,convert)==blue.data());
+		for(size_t length=0;length<bgPacket.size();length++) { bool rejected=false; try { MetaBackgroundPacket(bgPacket.data(),length).Parse(); } catch(const std::runtime_error&) { rejected=true; } assert(rejected); }
+		for(size_t offset : {bgPacket.size()-68,bgPacket.size()-64,bgPacket.size()-60}) {
+			auto invalid=bgPacket; uint32_t bad=offset==bgPacket.size()-60 ? 0 : 3;
+			for(int byte=0;byte<4;byte++) { invalid[offset+byte]=(uint8_t)(bad>>(byte*8)); }
+			bool rejected=false; try { MetaBackgroundPacket(invalid.data(),invalid.size()).Parse(); } catch(const std::runtime_error&) { rejected=true; } assert(rejected);
+		}
+		backgrounds=MetaBackgroundPacket(bgPacket.data(),bgPacket.size()).Parse(); bgCompositor.SetBackgroundLayers(backgrounds);
+		for(bool snes : {false,true}) {
+			MetaSpriteFrame staged(3,1); staged.SnesColorEffects=snes; staged.GbaColorEffects=!snes; staged.MemorySnapshot[7]=1;
+			if(snes) { staged.SnesBackgrounds.resize(3); }
+			for(int x=0;x<3;x++) {
+				auto& p=staged.Pixels[x]; p.Brightness=15;
+				if(snes) {
+					p.SnesFallbackCaptured=true; auto& screen=staged.SnesBackgrounds[x]; screen.Captured=true; screen.MainPriority=1;
+					auto& layer=screen.Layers[0]; layer.Sample={x,0,0,true}; layer.Main=layer.Opaque=true; layer.Priority=1; layer.Color=0x7C00;
+				} else { p.GbaFallbackCaptured=true; p.GbaBackgroundSamples[0]={x,0,0,true}; p.GbaBackgroundLayers[0]={0x7C00,1,true}; }
+			}
+			output=bgCompositor.Apply(blue.data(),3,1,staged); assert(output[0]==0xFF00FF00 && output[1]==0xFF00FF00 && output[2]==0xFF000000);
+			staged.FrameNumber=2; output=bgCompositor.Apply(blue.data(),3,1,staged); assert(output[0]==0xFF808000 && output[1]==0xFFFFFFFF && output[2]==0xFF000000);
+		}
+		MetaSpriteFrame fields(3,2); fields.MemorySnapshot[7]=1; fields.SnesFieldMemoryCaptured=true; fields.SnesFieldFrameNumber[1]=2;
+		for(int y=0;y<2;y++) { for(int x=0;x<3;x++) { auto& p=fields.Pixels[y*3+x]; p.BackgroundSample={x,0,0,true}; p.NativeBackdropCaptured=true; } }
+		std::vector<uint32_t> fieldBlue(6,0xFF0000FF); output=bgCompositor.Apply(fieldBlue.data(),3,2,fields,0,0,convert);
+		assert(output[0]==0xFF00FF00 && output[3]==0xFF808000);
+		std::cout << "PASS: MBGH animated background dimensions/origins, PNG alpha, native hiding, wrap, CPU camera, condition restoration and truncation rejection.\n";
+        std::ifstream activeFile(std::string(argv[1])+".activated",std::ios::binary); assert(activeFile);
+        std::vector<uint8_t> activePacket((std::istreambuf_iterator<char>(activeFile)),std::istreambuf_iterator<char>());
+        auto activeGroups=MetaSpritePacket(activePacket.data(),activePacket.size()).Parse();
+        assert(activeGroups[0].Animation.RestartOnActivation && activeGroups[0].AlternateArtwork[0].Animation.RestartOnActivation);
+        MetaSpriteCompositor activeCompositor; activeCompositor.SetGroups(activeGroups);
+        uint8_t ram=0; bool readable=true;
+        auto capture=[&](MetaSpriteFrame& captured,uint32_t tick) {
+            captured.FrameNumber=tick;
+            activeCompositor.CaptureMemorySnapshot(captured,[&](uint32_t address,uint8_t& value) { assert(address==7); value=ram; return readable; });
+        };
+        auto activeFrame=frame;
+        capture(activeFrame,100); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF00FF00);
+        capture(activeFrame,102); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF80807F);
+        output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF80807F);
+        ram=1; capture(activeFrame,103); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        auto firstField=activeFrame;
+        capture(activeFrame,104); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFFFFFFFF);
+        auto secondField=activeFrame;
+        MetaSpriteFrame activeWoven(4,2); assert(MetaSnesCapture::WeaveFieldsWithoutMath(firstField,secondField,activeWoven));
+        assert(activeWoven.SnesFieldAnimationTiming[0]==firstField.AnimationTiming && activeWoven.SnesFieldAnimationTiming[1]==secondField.AnimationTiming);
+        output=activeCompositor.Apply(larger.data(),4,2,activeWoven); assert(output[0]==0xFF0000FF && output[4]==0xFFFFFFFF);
+        ram=0; capture(activeFrame,105); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF00FF00);
+        ram=1; capture(activeFrame,106); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        readable=false; capture(activeFrame,107); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF00FF00);
+        readable=true; capture(activeFrame,108); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        capture(activeFrame,109); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFFFFFFFF);
+        capture(activeFrame,20); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        // Pack reapplication starts a fresh clock, while retained old frames stay immutable.
+        activeCompositor.SetGroups(activeGroups); capture(activeFrame,21);
+        output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        assert(firstField.AnimationTiming && !firstField.AnimationTiming->Elapsed.empty());
+        auto resetFrame=firstField; resetFrame.Reset(); assert(!resetFrame.AnimationTiming && !resetFrame.SnesFieldAnimationTiming[0]);
+        std::ifstream activeBgFile(std::string(argv[1])+".background.activated",std::ios::binary); assert(activeBgFile);
+        std::vector<uint8_t> activeBgPacket((std::istreambuf_iterator<char>(activeBgFile)),std::istreambuf_iterator<char>());
+        auto activeBackgrounds=MetaBackgroundPacket(activeBgPacket.data(),activeBgPacket.size()).Parse();
+        assert(activeBackgrounds[0].Animation.RestartOnActivation);
+        activeCompositor.SetReplacements({},activeBackgrounds);
+        auto activeBgFrame=bgFrame; readable=true; ram=1;
+        capture(activeBgFrame,300); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF00FF00);
+        capture(activeBgFrame,302); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF808000);
+        ram=0; capture(activeBgFrame,303); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF0000FF);
+        ram=1; capture(activeBgFrame,304); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF00FF00);
+        std::cout << "PASS: MSP5/MBGH condition-activation transfer, alternate/default re-entry, immutable field timing, failed reads and pack/rewind restarts.\n";
+        // Save and restore on newly parsed definitions: addresses/OAM pointers are irrelevant.
+        activeCompositor.SetReplacements(activeGroups,activeBackgrounds); ram=1;
+        capture(activeFrame,500); capture(activeFrame,501);
+        auto savedClocks=activeCompositor.SaveAnimationState(); assert(savedClocks.size()==16);
+        capture(activeFrame,503);
+        auto reparsedGroups=MetaSpritePacket(activePacket.data(),activePacket.size()).Parse();
+        auto reparsedBackgrounds=MetaBackgroundPacket(activeBgPacket.data(),activeBgPacket.size()).Parse();
+        activeCompositor.SetReplacements(reparsedGroups,reparsedBackgrounds);
+        assert(activeCompositor.RestoreAnimationState(savedClocks));
+        capture(activeFrame,501); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFFFFFFFF);
+        // Restoring to an earlier or later emulated time preserves the stored phase.
+        capture(activeFrame,502); assert(activeCompositor.RestoreAnimationState(savedClocks));
+        capture(activeFrame,501); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFFFFFFFF);
+        auto loaded=activeCompositor.SaveAnimationState(); assert(loaded==savedClocks);
+        // Speculative condition capture must not mutate the presented timeline.
+        auto beforeSpeculative=activeCompositor.SaveAnimationState();
+        activeFrame.FrameNumber=600;
+        activeCompositor.CaptureMemorySnapshot(activeFrame,[](uint32_t,uint8_t& value) { value=0; return true; },false);
+        assert(activeCompositor.SaveAnimationState()==beforeSpeculative && !activeFrame.AnimationTiming);
+        // Old states, malformed sections and changed artwork start fresh clocks.
+        assert(activeCompositor.RestoreAnimationState({}));
+        capture(activeFrame,501); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        for(auto bad : {std::vector<uint64_t>{0},std::vector<uint64_t>{0x314B434D,1},savedClocks}) {
+            if(bad.size()>5) { bad[4]=uint64_t(2)<<32; }
+            assert(!activeCompositor.RestoreAnimationState(bad));
+            capture(activeFrame,501); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        }
+        auto duplicated=savedClocks; duplicated.insert(duplicated.end(),savedClocks.begin()+1,savedClocks.begin()+6);
+        assert(!activeCompositor.RestoreAnimationState(duplicated));
+        auto changedPacket=activePacket; changedPacket.back()^=1;
+        auto changedGroups=MetaSpritePacket(changedPacket.data(),changedPacket.size()).Parse();
+        assert(changedGroups[0].Animation.SourceIdentity!=activeGroups[0].Animation.SourceIdentity);
+        activeCompositor.SetReplacements(changedGroups,{}); assert(activeCompositor.RestoreAnimationState(savedClocks));
+        capture(activeFrame,501); output=activeCompositor.Apply(original.data(),2,1,activeFrame); assert(output[0]==0xFF0000FF);
+        activeCompositor.SetReplacements({},reparsedBackgrounds); assert(activeCompositor.RestoreAnimationState(savedClocks));
+        capture(activeBgFrame,501); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF00FF00);
+        capture(activeBgFrame,502); output=activeCompositor.Apply(blue.data(),3,1,activeBgFrame,0,0,convert); assert(output[0]==0xFF808000);
+        std::cout << "PASS: animation clock state round-trip, reparse identity, earlier/same-frame loads, legacy/malformed/changed-pack fallback and speculative isolation.\n";
+
+
+	}
 	{
 		MetaSpriteFrame fields[2] = {MetaSpriteFrame(4,4),MetaSpriteFrame(4,4)};
 		MetaSpriteReplacement group; group.ArtworkWidth = 4; group.ArtworkHeight = 8;

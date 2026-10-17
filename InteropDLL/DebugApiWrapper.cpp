@@ -124,9 +124,10 @@ extern "C"
 			if(nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole())) { return false; }
 			if(!romHash || (!gameboy && !sms && !pce && !gba && !ws && !nes && !snes) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
 				|| (pce && pce->IsSuperGrafx()) || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
-			auto groups = MetaSpritePacket(packet, length).Parse();
+			MetaPngPixelPool animationPixels;
+			auto groups = MetaSpritePacket(packet, length, &animationPixels).Parse();
 			if(combined) {
-				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength).Parse();
+				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength, &animationPixels).Parse();
 				if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return false; }
 				if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return false; }
 				if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return false; }

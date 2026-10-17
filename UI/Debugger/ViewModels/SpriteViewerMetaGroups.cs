@@ -422,6 +422,22 @@ public partial class SpriteViewerViewModel
 		MetaStatus = "Groups saved."; ApplyMetaReplacements(); RefreshMetaAlternatePreview();
 		return true;
 	}
+	public PngAnimationViewModel? CreateMetaAnimationEditor()
+	{
+		if(_metaLoadFailed || SelectedMetaGroup is not MetaSpriteGroup group || _metaPackPath.Length==0) { return null; }
+		var pack=_metaPack; var alternate=ViewingMetaAlternate ? SelectedMetaAlternate : null;
+		var source=alternate?.Animation ?? group.Animation;
+		return new PngAnimationViewModel($"PNG Animation — Meta {group.Id:D3}"+(alternate==null ? "" : " alternate"),Path.GetDirectoryName(_metaPackPath)!,source,
+			alternate?.Scale ?? group.ReplacementScale,alternate?.OriginX ?? group.ReplacementOriginX,alternate?.OriginY ?? group.ReplacementOriginY,false,animation => {
+				if(!ReferenceEquals(pack,_metaPack) || !pack.Groups.Contains(group) || (alternate!=null && !group.AlternateArtwork.Contains(alternate))
+					|| EmuApi.GetRomHash(HashType.Sha1)!=pack.RomHash) { return (false,"The game or group changed. Reopen the animation editor."); }
+				var previous=alternate?.Animation ?? group.Animation;
+				if(alternate==null) { group.Animation=animation; } else { alternate.Animation=animation; }
+				bool saved=TrySaveMetaGroups();
+				if(!saved) { if(alternate==null) { group.Animation=previous; } else { alternate.Animation=previous; } }
+				return (saved,MetaStatus);
+			});
+	}
 
 	public void ApplyMetaReplacements()
 	{

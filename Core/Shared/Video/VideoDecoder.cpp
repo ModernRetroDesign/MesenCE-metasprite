@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Utilities/Serializer.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Shared/Video/VideoRenderer.h"
 #include "Shared/Video/BaseVideoFilter.h"
@@ -295,7 +296,10 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
 
 	_emu->OnBeforeSendFrame();
 
-	if(frame.MetaSprites && !forRewind) {
+	// Rewind reconstructs frames by emulating forward from each checkpoint.
+	// Capture their configured conditions/timing too; cached reverse pictures
+	// go directly to VideoRenderer and never re-enter this decoder.
+	if(frame.MetaSprites) {
 		auto console = _emu->GetConsole();
 		auto readByte = [&](uint32_t address, uint8_t& value) {
 			switch(_emu->GetConsoleType()) {
@@ -412,4 +416,14 @@ void VideoDecoder::TakeScreenshot(std::stringstream& stream)
 	if(_videoFilter) {
 		_videoFilter->TakeScreenshot(_videoFilterType, "", &stream);
 	}
+}
+
+// Optional named section preserves compatibility with states made before PNG
+// animation. Missing/mismatched pack data intentionally starts fresh clocks.
+void VideoDecoder::SerializeReplacementAnimation(Serializer& s)
+{
+	std::vector<uint64_t> clocks;
+	if(s.IsSaving()) { clocks=_metaSpriteCompositor.SaveAnimationState(); }
+	s.Stream(clocks,"replacementAnimationClocks");
+	if(!s.IsSaving()) { _metaSpriteCompositor.RestoreAnimationState(clocks); }
 }

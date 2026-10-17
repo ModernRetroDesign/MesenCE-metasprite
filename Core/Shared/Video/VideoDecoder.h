@@ -12,6 +12,7 @@ class ScaleFilter;
 class RotateFilter;
 class IRenderingDevice;
 class Emulator;
+class Serializer;
 
 class VideoDecoder
 {
@@ -54,7 +55,9 @@ public:
 	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
 	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
 	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
-	void CaptureMetaSpriteMemory(const MetaSpriteFrame& frame, const std::function<bool(uint32_t,uint8_t&)>& readByte) { _metaSpriteCompositor.CaptureMemorySnapshot(frame,readByte); }
+	void CaptureMetaSpriteMemory(const MetaSpriteFrame& frame, const std::function<bool(uint32_t,uint8_t&)>& readByte, bool timing = true) { _metaSpriteCompositor.CaptureMemorySnapshot(frame,readByte,timing); }
+	void SerializeReplacementAnimation(Serializer& s);
+	void ResetReplacementAnimation() { _metaSpriteCompositor.RestoreAnimationState({}); }
 	bool HasMetaBackgroundLayers() { return _metaSpriteCompositor.HasBackgroundLayers(); }
 	VideoDecoder(Emulator* console);
 	~VideoDecoder();

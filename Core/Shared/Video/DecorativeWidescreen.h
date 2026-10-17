@@ -147,8 +147,9 @@ public:
 					MetaBackgroundSample reference; int referenceX = 0;
 					if(!FindReference(*frame, layer, y, cropLeft, width / scale, reference, referenceX)) { continue; }
 					int pixelScale = std::max(1, (int)reference.PixelScaleX);
-					int64_t begin = ((int64_t)layer.X - scroll) * pixelScale;
-					int64_t end = begin + (int64_t)(layer.Width / layer.Scale) * pixelScale;
+					auto image=layer.Animation.Select(frame->SnesFieldMemoryCaptured ? frame->SnesFieldFrameNumber[y & 1] : frame->FrameNumber, frame->SnesFieldMemoryCaptured ? frame->SnesFieldAnimationTiming[y & 1].get() : frame->AnimationTiming.get());
+					int64_t begin = ((int64_t)layer.X - (image ? image->OriginX : 0) - scroll) * pixelScale;
+					int64_t end = begin + (int64_t)((image ? image->Width : layer.Width) / layer.Scale) * pixelScale;
 					low = std::max(low, (int64_t)canvasWidth - (end - cropLeft) * scale);
 					high = std::min(high, ((int64_t)cropLeft - begin) * scale);
 				}

@@ -142,6 +142,18 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
   }
   catch(Exception ex) { MetaStatus = "Could not save backgrounds: " + ex.Message; }
  }
+	public PngAnimationViewModel? CreateAnimationEditor()
+	{
+		if(_metaLoadFailed || SelectedMetaBackground is not MetaBackgroundLayer layer || _metaPackPath.Length==0) { return null; }
+		var pack=_metaPack;
+		return new PngAnimationViewModel($"PNG Animation — Background {layer.Id:D3}",Path.GetDirectoryName(_metaPackPath)!,layer.Animation,layer.ArtworkScale,0,0,true,animation => {
+			if(!ReferenceEquals(pack,_metaPack) || !pack.BackgroundLayers.Contains(layer) || EmuApi.GetRomHash(HashType.Sha1)!=pack.RomHash) { return (false,"The game or background changed. Reopen the animation editor."); }
+			var previous=layer.Animation; layer.Animation=animation; bool saved=false;
+			try { layer.MemoryConditions=MetaMemoryConditionText.Parse(MemoryConditionsText); SavePack(); saved=true; ApplyMetaReplacements(); RefreshMetaBackgroundPreview(); }
+			catch(Exception ex) { if(!saved) { layer.Animation=previous; } MetaStatus="Could not save background animation: "+ex.Message; }
+			return (saved,MetaStatus);
+		});
+	}
  private void ApplyMetaReplacements()
  {
   try {

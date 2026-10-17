@@ -37,7 +37,7 @@ namespace MetaSnesCapture
 			|| output.Pixels.size() != source.Pixels.size() * 4 || !CanExpandWithoutMath(source)) { return false; }
 		output.Reset(); output.SnesColorEffects = true; output.SpriteCoordinateScale = 2;
 		output.FrameNumber = source.FrameNumber; output.DecodedRows = source.DecodedRows;
-		output.MemorySnapshot = source.MemorySnapshot;
+		output.MemorySnapshot = source.MemorySnapshot; output.AnimationTiming = source.AnimationTiming;
 		if(!source.SnesBackgrounds.empty()) { output.SnesBackgrounds.resize(output.Pixels.size()); }
 		for(uint32_t y = 0; y < source.Height; y++) {
 			for(uint32_t x = 0; x < source.Width; x++) {
@@ -160,8 +160,11 @@ namespace MetaSnesCapture
 		for(auto row : odd.DecodedRows) { row.Sprite += 128; row.SnesField = 2; output.DecodedRows.push_back(std::move(row)); }
 		const auto& newest = even.FrameNumber > odd.FrameNumber ? even : odd;
 		output.FrameNumber = newest.FrameNumber; output.MemorySnapshot = newest.MemorySnapshot;
+		output.AnimationTiming = newest.AnimationTiming;
+		output.SnesFieldAnimationTiming[0] = even.AnimationTiming; output.SnesFieldAnimationTiming[1] = odd.AnimationTiming;
 		output.SnesFieldMemory[0] = even.MemorySnapshot; output.SnesFieldMemory[1] = odd.MemorySnapshot;
 		output.SnesFieldMemoryCaptured = true;
+		output.SnesFieldFrameNumber[0] = even.FrameNumber; output.SnesFieldFrameNumber[1] = odd.FrameNumber;
 		return true;
 	}
 }

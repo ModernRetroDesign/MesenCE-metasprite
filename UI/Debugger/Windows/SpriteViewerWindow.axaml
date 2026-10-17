@@ -96,6 +96,7 @@
 								<Button Name="metaArtworkRemove" Content="−" Width="28" MinWidth="28" Padding="0" Click="OnRemoveMetaAlternate" IsEnabled="{Binding ViewingMetaAlternate}" ToolTip.Tip="Remove the displayed alternate from this group. Its PNG file is retained." />
 							</StackPanel>
 							<TextBlock Text="{Binding MetaArtworkLabel}" TextWrapping="Wrap" />
+							<Button Content="Edit PNG animation…" Click="OnEditMetaAnimation" IsEnabled="{Binding HasMetaGroup}" />
 							<Grid>
 							<StackPanel Name="metaDefaultArtworkPanel" Spacing="4" IsVisible="{Binding !ViewingMetaAlternate}">
 							<TextBlock Text="Click preview to set origin" />

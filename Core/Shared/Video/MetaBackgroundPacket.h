@@ -7,6 +7,8 @@ class MetaBackgroundPacket
 {
 	const uint8_t* _data;
 	size_t _length, _offset = 0;
+	MetaPngPixelPool _localPool;
+	MetaPngPixelPool* _pixelPool;
 	uint32_t Read()
 	{
 		if(_length - _offset < 4) { throw std::runtime_error("Truncated background packet"); }
@@ -16,12 +18,12 @@ class MetaBackgroundPacket
 		return value;
 	}
 public:
-	MetaBackgroundPacket(const uint8_t* data, size_t length) : _data(data), _length(length) {}
+	MetaBackgroundPacket(const uint8_t* data, size_t length, MetaPngPixelPool* pool = nullptr) : _data(data), _length(length), _pixelPool(pool ? pool : &_localPool) {}
 	std::vector<MetaBackgroundReplacement> Parse()
 	{
 		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t magic = Read();
-		if(((magic < 0x3147424D || magic > 0x3947424D) && (magic < 0x4147424D || magic > 0x4747424D)) || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
+		if(((magic < 0x3147424D || magic > 0x3947424D) && (magic < 0x4147424D || magic > 0x4847424D)) || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t count = Read();
 		if(count > 128) { throw std::runtime_error("Too many background layers"); }
 		std::set<int> ids;
@@ -93,9 +95,32 @@ public:
 					layer.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 				}
 			}
+			if(magic == 0x4847424D) {
+				uint32_t animationCount=Read(); if(animationCount>256) { throw std::runtime_error("Too many background animation frames"); }
+				if(animationCount) {
+					uint32_t mode=Read(), restart=Read(); if(mode>2 || restart>1) { throw std::runtime_error("Unsupported background animation settings"); }
+					layer.Animation.RestartOnActivation=restart!=0;
+					std::vector<uint32_t> durations;
+					for(uint32_t f=0;f<animationCount;f++) {
+						uint32_t duration=Read(); if(duration<1 || duration>3600000) { throw std::runtime_error("Invalid background frame duration"); }
+						durations.push_back(duration); MetaPngArtworkFrame image;
+						image.OriginX=(int32_t)Read(); image.OriginY=(int32_t)Read();
+						uint32_t w=Read(), h=Read();
+						if(image.OriginX < -4096 || image.OriginX > 4096 || image.OriginY < -4096 || image.OriginY > 4096
+							|| w<1 || w>8192 || h<1 || h>8192 || w%scale || h%scale || (size_t)w*h > (_length-_offset)/4) { throw std::runtime_error("Invalid background animation canvas"); }
+						image.Width=w; image.Height=h; std::vector<uint32_t> animationPixels; animationPixels.reserve((size_t)w*h);
+						for(size_t p=0;p<(size_t)w*h;p++) { animationPixels.push_back(Read()); }
+						image.Pixels=_pixelPool->Intern(std::move(animationPixels));
+						layer.Animation.Frames.push_back(std::move(image));
+					}
+					layer.Animation.Timeline=MetaPngTimeline((MetaPngPlayback)mode,durations);
+				}
+			}
 			result.push_back(std::move(layer));
 		}
 		if(_offset != _length) { throw std::runtime_error("Trailing background data"); }
+		auto identity=MetaPngPacketIdentity(_data,_length);
+		for(auto& layer : result) { layer.Animation.SourceIdentity=identity; }
 		return result;
 	}
 };

@@ -6,6 +6,7 @@
 #include <memory>
 #include <array>
 #include "MetaMemoryCondition.h"
+#include "MetaPngAnimation.h"
 
 // Most pixels have no overlapping OBJ coverage. Avoid constructing two checked
 // STL vector iterator proxies for every pixel in Debug builds. Storage is only
@@ -304,8 +305,11 @@ struct MetaSpriteFrame
 	std::vector<MetaSpriteRow> NesRows;
 	// Filled on the emulation thread at publication, after prior decode completes.
 	mutable MetaMemorySnapshot MemorySnapshot;
+	mutable std::shared_ptr<const MetaPngAnimationSnapshot> AnimationTiming;
+	std::shared_ptr<const MetaPngAnimationSnapshot> SnesFieldAnimationTiming[2];
 	MetaMemorySnapshot SnesFieldMemory[2];
 	bool SnesFieldMemoryCaptured = false;
+	uint32_t SnesFieldFrameNumber[2] = {};
 
 	MetaSpriteFrame(uint32_t width, uint32_t height) : Width(width), Height(height), Pixels(width * height) {}
 	void Reset()
@@ -319,6 +323,8 @@ struct MetaSpriteFrame
 		}
 		SnesBackgrounds.clear(); BackgroundUnderlays.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
 		SnesFieldMemory[0].clear(); SnesFieldMemory[1].clear(); SnesFieldMemoryCaptured = false;
+		SnesFieldFrameNumber[0] = SnesFieldFrameNumber[1] = 0;
+		AnimationTiming.reset(); SnesFieldAnimationTiming[0].reset(); SnesFieldAnimationTiming[1].reset();
 	}
 };
 

@@ -147,6 +147,7 @@ namespace Mesen.Debugger.Windows
 		private async void OnLoadMetaReplacement(object? sender, RoutedEventArgs e) => await _model.LoadMetaReplacement(this);
 		private async void OnAddMetaAlternate(object? sender, RoutedEventArgs e) => await _model.AddMetaAlternate(this);
 		private void OnPreviousMetaArtwork(object? sender, RoutedEventArgs e) => _model.BrowseMetaArtwork(-1);
+		private async void OnEditMetaAnimation(object? sender,RoutedEventArgs e) { var model=_model.CreateMetaAnimationEditor(); if(model!=null) { await new PngAnimationWindow(model).ShowDialog(this); } }
 		private void OnNextMetaArtwork(object? sender, RoutedEventArgs e) => _model.BrowseMetaArtwork(1);
 		private void OnRemoveMetaAlternate(object? sender, RoutedEventArgs e) => _model.RemoveMetaAlternate();
 		private void OnMoveMetaAlternateEarlier(object? sender, RoutedEventArgs e) => _model.MoveMetaAlternate(-1);

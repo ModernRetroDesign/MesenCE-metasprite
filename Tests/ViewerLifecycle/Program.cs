@@ -23,6 +23,8 @@ internal static class Program
 	[DllImport("MesenCore.dll")]
 	private static extern void ConfigureMetaSoftwareRendererTest();
 	[DllImport("MesenCore.dll")] private static extern uint RunMetaSpriteSnesAuthoredPackTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename, byte[] packet, uint length);
+	[DllImport("MesenCore.dll")] private static extern uint RunMetaAnimationStateTest(byte[] sprites,uint spriteLength,byte[] backgrounds,uint backgroundLength);
+	[DllImport("MesenCore.dll")] private static extern uint RunMetaBackgroundSnesAnimationTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename, byte[] packet, uint length);
 	[DllImport("MesenCore.dll")]
 	[return: MarshalAs(UnmanagedType.I1)] private static extern bool CheckWidescreenPresentationInterop();
 	[DllImport("MesenCore.dll")] private static extern uint RunWsMusicReplacementChecks(byte[] packet, uint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
@@ -950,6 +952,106 @@ internal static class Program
 					viewer.LoadMetaGroups();
 					if(viewer.MetaGroups.Count!=1 || viewer.MetaGroups[0].Members[1].Y!=8) { throw new Exception("OBJ-interlace group reload lost source offsets."); }
 					Console.WriteLine("PASS: actual SNES OBJ-interlace two-member selection, full-source PNG export, oversized PNG import, persisted pack decode, live whole-frame rendering and reload.");
+					string whitePath=Path.Combine(Path.GetDirectoryName(packPath)!,"animation-white.png");
+					using(var canvas=new WriteableBitmap(new PixelSize(22,18),new Vector(96,96),PixelFormat.Bgra8888,AlphaFormat.Unpremul)) {
+						using(var pixels=canvas.Lock()) { Marshal.Copy(Enumerable.Repeat(unchecked((int)0xFFFFFFFF),22*18).ToArray(),0,pixels.Address,22*18); }
+						canvas.Save(whitePath,PngBitmapEncoderOptions.Default);
+					}
+					viewer.SelectedMetaGroup=viewer.MetaGroups[0];
+					viewer.SelectedMetaGroup.Animation=new() { Enabled=true,Frames=new() {
+						new() {Path=viewer.SelectedMetaGroup.ReplacementPath},
+						new() {Path="animation-white.png",OriginX=viewer.SelectedMetaGroup.ReplacementOriginX+1,OriginY=viewer.SelectedMetaGroup.ReplacementOriginY+1}
+					} };
+					viewer.SaveMetaGroups();
+					if(!viewer.MetaStatus.StartsWith("Replacements applied.")) { throw new Exception("Actual animation PNG loading failed: "+viewer.MetaStatus); }
+					saved=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+					packet=MetaSpriteRuntimePacket.Create(saved,g => Decode(Path.Combine(Path.GetDirectoryName(packPath)!,g.ReplacementPath)),
+						loadFrame:(frame,_) => Decode(Path.Combine(Path.GetDirectoryName(packPath)!,frame.Path)));
+					result=RunMetaSpriteSnesAuthoredPackTest(romPath,packet,(uint)packet.Length);
+					if(result!=7) { throw new Exception("Saved animated PNG pack failed field-clock live rendering: "+result); }
+					Console.WriteLine("PASS: actual PNG animation files load/save, MSP5 activation and live woven full-canvas playback with distinct field clocks and frame origins.");
+					saved.BackgroundLayers.Add(new() { Id=1,Enabled=true,NativeLayer=0,CompositionPosition=1,FollowScroll=false,HideOriginalLayer=true,
+						ArtworkPath=saved.Groups[0].ReplacementPath,ArtworkWidth=22,ArtworkHeight=18,X=8,Y=15,
+						MemoryConditions=new() {new() {Address=0,Mask=0}}, Animation=new() {Enabled=true,Frames=new() {
+							new() {Path=saved.Groups[0].ReplacementPath},new() {Path="animation-white.png",OriginX=1,OriginY=1}
+						}}
+					});
+					saved.Save(packPath); viewer.LoadMetaGroups(); viewer.SaveMetaGroups();
+					if(!viewer.MetaStatus.StartsWith("Replacements applied.")) { throw new Exception("Background animation PNG loading failed: "+viewer.MetaStatus); }
+					byte[] backgroundPacket=MetaBackgroundRuntimePacket.Create(saved,layer => Decode(Path.Combine(Path.GetDirectoryName(packPath)!,layer.ArtworkPath)),
+						(frame,_) => Decode(Path.Combine(Path.GetDirectoryName(packPath)!,frame.Path)));
+					string backgroundRom=Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture.obj-interlace-bg-holes.sfc");
+					result=RunMetaBackgroundSnesAnimationTest(backgroundRom,backgroundPacket,(uint)backgroundPacket.Length);
+					if(result!=7) { throw new Exception("Saved background animation failed live whole-frame playback: "+result); }
+					Console.WriteLine("PASS: actual background PNG animation files, saved settings, MBGH loader activation and live whole-frame SNES field playback.");
+					viewer.SelectedMetaGroup=viewer.MetaGroups[0];
+					using(var editor=viewer.CreateMetaAnimationEditor() ?? throw new Exception("Missing default PNG animation editor.")) {
+						var original=viewer.SelectedMetaGroup.Animation; editor.FrameDuration=2;
+						if(original.Frames[0].Duration!=1) { throw new Exception("Animation draft changed its owner before save."); }
+						var window=new Mesen.Debugger.Windows.PngAnimationWindow(editor);
+						var restartControl=window.FindControl<CheckBox>("animationRestart") ?? throw new Exception("Missing animation restart control.");
+						restartControl.IsChecked=true; Dispatcher.UIThread.RunJobs();
+						if(!editor.RestartOnActivation || original.RestartOnActivation) { throw new Exception("Restart control failed binding or changed the saved owner before save."); }
+						var first=editor.SelectedFrame;
+						window.FindControl<Button>("animationPrevious")!.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+						window.FindControl<Button>("animationNext")!.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+						if(!ReferenceEquals(first,editor.SelectedFrame)) { throw new Exception("Animation window navigation was not routed."); }
+						window.FindControl<Button>("animationPlay")!.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+						editor.AdvancePreview(); if(!ReferenceEquals(first,editor.SelectedFrame)) { throw new Exception("Preview ignored frame duration."); }
+						editor.AdvancePreview(); if(ReferenceEquals(first,editor.SelectedFrame)) { throw new Exception("Preview did not advance at the duration boundary."); }
+						window.FindControl<Button>("animationStop")!.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+						if(editor.IsPlaying) { throw new Exception("Animation stop control failed."); }
+						editor.RemoveFrame(); if(!File.Exists(whitePath)) { throw new Exception("Removing an animation frame deleted its shared PNG."); }
+						int files=Directory.GetFiles(Path.GetDirectoryName(packPath)!,"*.png").Length; editor.AddFrame(whitePath);
+						if(Directory.GetFiles(Path.GetDirectoryName(packPath)!,"*.png").Length!=files) { throw new Exception("Animation importer copied a PNG already in the pack."); }
+						editor.AddFrame(enlarged); if(editor.SelectedFrame?.Path!="obj-canvas.png") { throw new Exception("Animation import did not preserve the external filename."); }
+						editor.Move(-1); editor.Browse(1); editor.SetPreviewOrigin(2,3); editor.FrameDuration=3; editor.PlaybackMode=1;
+						if(!editor.OverrideOrigin || editor.SelectedFrame?.OriginX!=2 || editor.SelectedFrame.OriginY!=3) { throw new Exception("Animation preview origin mapping failed."); }
+						string beforeAnimationSave=File.ReadAllText(packPath); Directory.CreateDirectory(packPath+".tmp");
+						try { if(editor.Save()) { throw new Exception("Failed animation save reported success."); } } finally { Directory.Delete(packPath+".tmp"); }
+						if(!ReferenceEquals(original,viewer.SelectedMetaGroup.Animation) || File.ReadAllText(packPath)!=beforeAnimationSave) { throw new Exception("Failed animation save did not roll back owner/settings."); }
+						if(!editor.Save()) { throw new Exception("Animation editor retry failed: "+editor.Status); }
+						var authored=MetaSpritePack.Load(packPath,hash,cpu.ToString()).Groups[0].Animation;
+						if(authored.Frames.Count!=3 || !authored.RestartOnActivation || authored.Playback!=MetaPngPlayback.PingPong || authored.Frames[2].OriginX!=2) { throw new Exception("Animation controls did not persist frames/order/origins: "+authored.Playback+" / "+string.Join(",",authored.Frames.Select(f => f.Path+":"+f.OriginX))); }
+						window.Close();
+					}
+					viewer.MetaAlternateConditionsText="$0 == $00 / $00"; viewer.AddMetaAlternatePng(enlarged);
+					using(var alternateEditor=viewer.CreateMetaAnimationEditor() ?? throw new Exception("Missing alternate animation editor.")) {
+						alternateEditor.AddFrame(whitePath); alternateEditor.FrameDuration=4; alternateEditor.RestartOnActivation=true;
+						if(!alternateEditor.Save()) { throw new Exception("Alternate animation editor save failed: "+alternateEditor.Status); }
+						if(viewer.SelectedMetaAlternate?.Animation.RestartOnActivation!=true || viewer.SelectedMetaAlternate?.Animation.Frames.Single().Duration!=4 || viewer.SelectedMetaGroup!.Animation.Frames.Count!=3) { throw new Exception("Alternate animation edited the default sequence."); }
+					}
+					using(var tilemap=new TilemapViewerViewModel(cpu,new PictureViewer(),new ScrollPictureViewer(),new Window())) {
+						tilemap.OnGameLoaded(); Dispatcher.UIThread.RunJobs(); tilemap.BackgroundEditor.SelectedMetaBackground=tilemap.BackgroundEditor.MetaBackgrounds[0];
+						using var backgroundEditor=tilemap.BackgroundEditor.CreateAnimationEditor() ?? throw new Exception("Missing background animation editor.");
+						backgroundEditor.RestartOnActivation=true; backgroundEditor.FrameDuration=5; if(!backgroundEditor.Save()) { throw new Exception("Background animation editor save failed: "+backgroundEditor.Status); }
+						var authored=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+						if(!authored.BackgroundLayers[0].Animation.RestartOnActivation || authored.BackgroundLayers[0].Animation.Frames[0].Duration!=5 || authored.Groups[0].Animation.Frames.Count!=3) { throw new Exception("Background animation save lost updated sprite sequences."); }
+					}
+					var statePack=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+					string stateFolder=Path.GetDirectoryName(packPath)!;
+					byte[] stateSprites=MetaSpriteRuntimePacket.Create(statePack,g => Decode(Path.Combine(stateFolder,g.ReplacementPath)),
+						a => Decode(Path.Combine(stateFolder,a.Path)),(f,_) => Decode(Path.Combine(stateFolder,f.Path)));
+					byte[] stateBackgrounds=MetaBackgroundRuntimePacket.Create(statePack,b => Decode(Path.Combine(stateFolder,b.ArtworkPath)),
+						(f,_) => Decode(Path.Combine(stateFolder,f.Path)));
+					uint stateResult=RunMetaAnimationStateTest(stateSprites,(uint)stateSprites.Length,stateBackgrounds,(uint)stateBackgrounds.Length);
+					if(stateResult!=0) { throw new Exception("Emulator animation state test failed at stage "+stateResult); }
+					Console.WriteLine("PASS: PNG animation editor XAML controls, draft isolation, timing preview, frame import/reuse/order/removal, origins, rollback/retry and default/alternate/background persistence.");
+					string thumbnailPath=Path.Combine(home,"wide-preview.png");
+					using(var wide=new WriteableBitmap(new PixelSize(1024,32),new Vector(96,96),PixelFormat.Bgra8888,AlphaFormat.Unpremul)) { wide.Save(thumbnailPath,PngBitmapEncoderOptions.Default); }
+					using(var scaled=new PngAnimationViewModel("Scaled test",Path.GetDirectoryName(packPath)!,new(),2,2,3,false,_ => (true,"Saved"))) {
+						scaled.AddFrame(thumbnailPath); if(scaled.PreviewWidth!=512) { throw new Exception("Animation thumbnail was not bounded."); }
+						scaled.SetPreviewOrigin(16,4);
+						if(scaled.SelectedFrame?.OriginX!=16 || scaled.SelectedFrame.OriginY!=4) { throw new Exception("Scaled thumbnail click did not map back to native origin units."); }
+						scaled.OverrideOrigin=false;
+						if(scaled.FrameOriginX!=2 || scaled.FrameOriginY!=3 || scaled.SelectedFrame.OriginX!=null || scaled.SelectedFrame.OriginY!=null) { throw new Exception("Clearing frame origin override did not restore inherited origin."); }
+					}
+					viewer.SelectedMetaGroup=viewer.MetaGroups[0];
+					using(var stale=viewer.CreateMetaAnimationEditor() ?? throw new Exception("Missing stale-animation test editor.")) {
+						string latestAnimation=File.ReadAllText(packPath); viewer.LoadMetaGroups();
+						if(stale.Save() || File.ReadAllText(packPath)!=latestAnimation || !stale.Status.Contains("changed")) { throw new Exception("Animation dialog saved against a replaced pack context."); }
+					}
+					Console.WriteLine("PASS: bounded animation preview, scaled origin clicks/inheritance and stale-context save rejection.");
 					return;
 				}
 				viewer.SelectedMetaGroup!.Name = "Standing";

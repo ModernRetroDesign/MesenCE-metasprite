@@ -7,6 +7,20 @@ using System.Runtime.InteropServices;
 internal static class GameplayFixture
 {
 	[DllImport("MesenCore.dll")]
+	private static extern uint RunMetaAnimationStateRomTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename,byte[] sprites,uint spriteLength,byte[] backgrounds,uint backgroundLength);
+	public static void RunAnimationStateSuite(string dllPath,string packetPath)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(),(name,_,_) => name=="MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		byte[] sprites=File.ReadAllBytes(packetPath+".activated"), backgrounds=File.ReadAllBytes(packetPath+".background.activated");
+		foreach(string extension in new[] {"nes","gb","gbc","gba","pce","sms","sfc","wsc"}) {
+			string filename=Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture."+extension);
+			if(!File.Exists(filename)) { throw new Exception("Missing generated animation state fixture: "+filename); }
+			uint result=RunMetaAnimationStateRomTest(filename,sprites,(uint)sprites.Length,backgrounds,(uint)backgrounds.Length);
+			if(result!=0) { throw new Exception($"Animation state round-trip failed for {extension} at stage {result}."); }
+			Console.WriteLine($"PASS: {extension} animation clocks through actual emulator save/load and full/XOR rewind serialization.");
+		}
+	}
+	[DllImport("MesenCore.dll")]
 	private static extern uint RunForegroundOverlayGameplayTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 	public static void RunForegroundSuite(string dllPath)
 	{
@@ -285,7 +299,7 @@ internal static class GameplayFixture
 			"interlace-bob-field-holes", "interlace-bob-blend-field-holes", "interlace-bob-field-first-picture-holes", "interlace-bob-blend-field-first-picture-holes",
 			"obj-interlace-holes", "obj-interlace-current-field-holes", "obj-interlace-bob-field-holes", "obj-interlace-bob-blend-field-holes",
 			"obj-interlace-group-holes", "obj-interlace-hflip-holes", "obj-interlace-vflip-holes",
-			"obj-interlace-rect-holes", "obj-interlace-rect-vflip-holes", "obj-interlace-window-holes", "obj-interlace-poses-holes", "obj-interlace-poses-conditions-holes"
+			"obj-interlace-rect-holes", "obj-interlace-rect-vflip-holes", "obj-interlace-window-holes", "obj-interlace-poses-holes", "obj-interlace-poses-conditions-holes", "obj-interlace-bg-holes"
 		}) {
 			if(onlyObjInterlace && !fixture.StartsWith("obj-interlace")) { continue; }
 			if(!includeInterlace && fixture.Contains("interlace")) { continue; }
@@ -352,7 +366,7 @@ internal static class GameplayFixture
 		for(int index = 0; index < 32; index++) { Store(0x2104, 0); }
 		Store(0x2102, 0); Store(0x2103, 0);
 		Store(0x2104, 8); Store(0x2104, 8); Store(0x2104, 0);
-		Store(0x2104, (byte)((math == 1 ? 8 : 0) | (romPath.Contains("obj-interlace") && romPath.Contains("hflip") ? 0x40 : 0) | (romPath.Contains("obj-interlace") && romPath.Contains("vflip") ? 0x80 : 0)));
+		Store(0x2104, (byte)((math == 1 ? 8 : 0) | (romPath.Contains("obj-interlace-bg") ? 0x30 : 0) | (romPath.Contains("obj-interlace") && romPath.Contains("hflip") ? 0x40 : 0) | (romPath.Contains("obj-interlace") && romPath.Contains("vflip") ? 0x80 : 0)));
 		if(romPath.Contains("obj-interlace-group")) { Store(0x2104, 20); Store(0x2104, 12); Store(0x2104, 0); Store(0x2104, 0); }
 		if(overlap) { Store(0x2104, 15); Store(0x2104, 8); Store(0x2104, 1); Store(0x2104, 0); }
 		Store(0x2115, 0x80); Store(0x2116, 0); Store(0x2117, mode7 ? (byte)0x40 : (byte)0);
@@ -368,6 +382,9 @@ internal static class GameplayFixture
 		}
 		Store(0x2121, 0); Store(0x2122, 0); Store(0x2122, 0x7C);
 		Store(0x2121, math == 1 ? (byte)193 : (byte)129); Store(0x2122, 31); Store(0x2122, 0);
+		if(romPath.Contains("obj-interlace-bg")) {
+			Store(0x2121,1); Store(0x2122,0); Store(0x2122,0x7C); Store(0x2122,0); Store(0x2122,0x7C);
+		}
 		if(mode7) {
 			Store(0x2116, 0); Store(0x2117, 0);
 			for(int word = 0; word < 64; word++) { Store(0x2118, 0); Store(0x2119, romPath.Contains("ext-high") ? (byte)0x81 : (byte)1); }
@@ -424,6 +441,7 @@ internal static class GameplayFixture
 		if(romPath.Contains("interlace")) { screenMode |= 1; }
 		if(romPath.Contains("obj-interlace")) { screenMode |= 2; }
 		Store(0x2133, screenMode);
+		if(romPath.Contains("obj-interlace-bg")) { Store(0x212C,0x11); }
 		if(rotate) { Store(0x2102, 2); Store(0x2103, 0x80); } // Start evaluation at sprite 1.
 		Store(0x2100, 15);
 		if(romPath.Contains("obj-interlace-poses")) {

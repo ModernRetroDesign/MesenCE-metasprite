@@ -2,6 +2,7 @@
 #include "Core/Shared/RecordedRomTest.h"
 #include "Core/Shared/Emulator.h"
 #include "Core/Shared/Video/MetaSpritePacket.h"
+#include "Core/Shared/Video/MetaBackgroundPacket.h"
 #include "Core/Shared/Audio/MusicReplacement.h"
 #include "Core/Shared/Audio/SoundMixer.h"
 #include "Core/NES/NesMemoryManager.h"
@@ -40,7 +41,9 @@
 #include "Core/Debugger/DebugBreakHelper.h"
 #include "Core/Shared/NotificationManager.h"
 #include "Core/Shared/SaveStateManager.h"
+#include "Core/Shared/RewindData.h"
 #include <sstream>
+#include "Utilities/Serializer.h"
 #include <mutex>
 #include <set>
 #include <iostream>
@@ -1567,7 +1570,7 @@ extern "C"
 		emu->Release(); return flags;
 	}
 
-	static uint32_t RunMetaSpriteSnesCaptureTestImpl(const char* filename, const std::vector<MetaSpriteReplacement>* authored)
+	static uint32_t RunMetaSpriteSnesCaptureTestImpl(const char* filename, const std::vector<MetaSpriteReplacement>* authored, const std::vector<MetaBackgroundReplacement>* animatedBackground = nullptr)
 	{
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
 		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
@@ -1648,6 +1651,28 @@ extern "C"
 					});
 					if(captured) {
 						flags=1; MetaSpriteReplacement replacement; replacement.Id=1;
+						if(animatedBackground) {
+							emu->GetVideoDecoder()->SetMetaReplacements({},*animatedBackground);
+							const auto& layer=animatedBackground->front();
+							if(waitForField([&]() {
+								if(!renderer.Capture || renderer.Width!=512 || renderer.Height!=478 || renderer.Capture->SnesBackgrounds.empty()) { return false; }
+								const auto& capture=*renderer.Capture;
+								if(!capture.SnesBackgrounds[30*512+16].Layers[0].Sample.Valid) { return false; }
+								for(int y=0;y<478;y++) { for(int x=0;x<512;x++) {
+									uint32_t expected=y<14 || y>=462 ? 0xFF000000u : 0xFF0000FFu;
+									if(x>=16 && x<30 && y>=30 && y<38) { expected=(y & 1) ? 0xFF0000FFu : 0xFFFF0000u; }
+									auto image=layer.Animation.Select(capture.SnesFieldMemoryCaptured ? capture.SnesFieldFrameNumber[y & 1] : capture.FrameNumber);
+									if(!image) { return false; }
+									int ax=x/2-layer.X+image->OriginX, ay=y/2-layer.Y+image->OriginY;
+									if(y>=14 && y<462 && ax>=0 && ay>=0 && ax<image->Width && ay<image->Height) { expected=(*image->Pixels)[ay*image->Width+ax]; }
+									if(renderer.Pixels[y*512+x]!=expected) { return false; }
+								} } return true;
+							})) { flags|=2; }
+							emu->GetVideoDecoder()->SetMetaReplacements({},{});
+							if(waitForField([&]() { return renderer.Pixels[30*512+18]==0xFFFF0000 && renderer.Pixels[60*512+40]==0xFF0000FF; })) { flags|=4; }
+							std::cout << "SNES background PNG animation whole-frame probe flags: " << flags << std::endl;
+							emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Release(); return flags;
+						}
 						MetaSpriteGraphic member {0,0,sourceWidth,sourceHeight,-1,std::vector<uint32_t>(sourceWidth*sourceHeight)};
 						for(int y=0;y<sourceHeight;y++) { for(int x=0;x<sourceWidth;x++) { member.Pixels[y*sourceWidth+x]=sourcePixel(x,y); } }
 						replacement.Members={member};
@@ -1682,10 +1707,13 @@ extern "C"
 								if(window && x>=24 && x<32) { return 0xFF0000FFu; }
 								int sourceY=bobField ? (fieldPhase ? (y==14 ? 15 : ((y-1)/2)*2+1) : (y/2)*2) : y;
 								if(authored) {
-									int ax=x/2-(8+replacement.OriginX-replacement.ArtworkOriginX);
-									int ay=sourceY-(30+replacement.OriginY-replacement.ArtworkOriginY);
-									if(ax>=0 && ay>=0 && ax<replacement.ArtworkWidth && ay<replacement.ArtworkHeight) {
-										uint32_t color=replacement.Artwork[ay*replacement.ArtworkWidth+ax];
+									const auto& capture=*renderer.Capture; int field=y & 1;
+									const auto& snapshot=capture.SnesFieldMemoryCaptured ? capture.SnesFieldMemory[field] : capture.MemorySnapshot;
+									auto image=replacement.SelectArtwork(snapshot,capture.SnesFieldMemoryCaptured ? capture.SnesFieldFrameNumber[field] : capture.FrameNumber);
+									int ax=x/2-(8+replacement.OriginX-image.ArtworkOriginX);
+									int ay=sourceY-(30+replacement.OriginY-image.ArtworkOriginY);
+									if(ax>=0 && ay>=0 && ax<image.ArtworkWidth && ay<image.ArtworkHeight) {
+										uint32_t color=image.Artwork[ay*image.ArtworkWidth+ax];
 										return (color>>24)==255 ? color : 0xFF0000FFu;
 									} return 0xFF0000FFu;
 								}
@@ -2049,6 +2077,98 @@ extern "C"
 			auto groups=MetaSpritePacket(packet,length).Parse();
 			if(groups.size()!=1 || groups.front().ArtworkScale!=1 || groups.front().Members.size()!=2) { return 0; }
 			return RunMetaSpriteSnesCaptureTestImpl(filename,&groups);
+		} catch(...) { return 0; }
+	}
+	static uint32_t RunMetaAnimationStateImpl(Emulator* emu, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
+	{
+		uint32_t stage=1;
+		try {
+			auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+			std::stringstream original; emu->Serialize(original,false,0);
+			auto groups=MetaSpritePacket(sprites,spriteLength).Parse();
+			auto layers=MetaBackgroundPacket(backgrounds,backgroundLength).Parse();
+			emu->GetVideoDecoder()->SetMetaReplacements(groups,layers);
+			MetaSpriteFrame captured(0,0);
+			auto phase=[&](uint32_t frame) {
+				captured.FrameNumber=frame;
+				emu->GetVideoDecoder()->CaptureMetaSpriteMemory(captured,[](uint32_t,uint8_t& value) { value=0; return true; });
+				uint64_t largest=0;
+				if(captured.AnimationTiming) { for(const auto& entry : captured.AnimationTiming->Elapsed) { largest=std::max(largest,entry.second); } }
+				return largest;
+			};
+			auto check=[&](bool value) { if(!value) { throw std::runtime_error("Animation emulator state mismatch"); } };
+			stage=2; check(phase(100)==0 && phase(107)==7);
+			for(bool settings : {false,true}) {
+				std::stringstream saved; emu->Serialize(saved,settings,0);
+				check(phase(140)==40);
+				saved.seekg(0); stage=3;
+				check(emu->Deserialize(saved,SaveStateManager::FileFormatVersion,settings,std::nullopt,false)==DeserializeResult::Success);
+				check(phase(107)==7); // Same-frame state load retains phase.
+				emu->GetVideoDecoder()->ResetReplacementAnimation(); check(phase(1)==0);
+				saved.clear(); saved.seekg(0); stage=4;
+				check(emu->Deserialize(saved,SaveStateManager::FileFormatVersion,settings,std::nullopt,false)==DeserializeResult::Success);
+				check(phase(107)==7 && phase(108)==8); // Forward load, then one normal tick.
+				// Return to the same saved phase before the next settings variant.
+				saved.clear(); saved.seekg(0); check(emu->Deserialize(saved,SaveStateManager::FileFormatVersion,settings,std::nullopt,false)==DeserializeResult::Success);
+				check(phase(107)==7);
+			}
+            stage=7;
+            std::deque<RewindData> history;
+            RewindData full; full.SaveState(emu,history); history.push_back(full);
+            check(phase(109)==9);
+            RewindData delta; delta.SaveState(emu,history); history.push_back(delta);
+            check(phase(150)==50);
+            history[1].LoadState(emu,history,1,false); check(phase(109)==9);
+            history[0].LoadState(emu,history,0,false); check(phase(107)==7);
+			stage=5;
+			Serializer legacy(SaveStateManager::FileFormatVersion,true); auto console=emu->GetConsole(); legacy.Stream(console,"");
+			std::stringstream oldState; legacy.SaveTo(oldState,0); oldState.seekg(0);
+			check(emu->Deserialize(oldState,SaveStateManager::FileFormatVersion,false,std::nullopt,false)==DeserializeResult::Success);
+			check(phase(107)==0);
+			stage=6; emu->GetVideoDecoder()->SetMetaReplacements(groups,layers);
+			original.seekg(0); check(emu->Deserialize(original,SaveStateManager::FileFormatVersion,false,std::nullopt,false)==DeserializeResult::Success);
+			std::cout << "PASS: actual emulator animation state serialization with/without settings, same-frame/forward loads, continued ticks, full/XOR rewind checkpoints and legacy state fallback." << std::endl;
+			return 0;
+		} catch(...) { return stage; }
+	}
+	DllExport uint32_t __stdcall RunMetaAnimationStateTest(const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
+	{
+		return RunMetaAnimationStateImpl(_emu.get(),sprites,spriteLength,backgrounds,backgroundLength);
+	}
+	DllExport uint32_t __stdcall RunMetaAnimationStateRomTest(const char* filename, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
+	{
+		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+		emu->GetSettings()->SetFlag(EmulationFlags::TestMode);
+		emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+		MetaSpriteTestRenderer renderer;
+		emu->GetSettings()->GetGameboyConfig().Model=string(filename).find(".gbc")!=string::npos ? GameboyModel::GameboyColor : GameboyModel::Gameboy;
+		emu->GetSettings()->GetGbaConfig().SkipBootScreen=true;
+		emu->GetSettings()->GetWsConfig().UseBootRom=false;
+		uint32_t result=100;
+		if(emu->LoadRom((VirtualFile)filename,VirtualFile())) {
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			// Wait for startup before acquiring the emulator lock. Otherwise a very
+			// fast state-only test can race Run() setting its initial stop flag.
+			bool started=false;
+			for(int i=0;i<500;i++) {
+				{ std::lock_guard<std::mutex> lock(renderer.Mutex); started=renderer.FrameNumber>=2; }
+				if(started) { break; }
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+			result=started ? RunMetaAnimationStateImpl(emu.get(),sprites,spriteLength,backgrounds,backgroundLength) : 101;
+			std::cout << "Animation state: stopping " << filename << std::endl;
+			emu->Stop(false,true,false);
+			emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); std::cout << "Animation state: released " << filename << std::endl; return result;
+	}
+	DllExport uint32_t __stdcall RunMetaBackgroundSnesAnimationTest(const char* filename, const uint8_t* packet, uint32_t length)
+	{
+		try {
+			auto layers=MetaBackgroundPacket(packet,length).Parse();
+			if(layers.size()!=1 || layers[0].Animation.Frames.size()!=2 || layers[0].CompositionPosition!=1 || layers[0].FollowScroll || layers[0].Scale!=1) { return 0; }
+			return RunMetaSpriteSnesCaptureTestImpl(filename,nullptr,&layers);
 		} catch(...) { return 0; }
 	}
 	DllExport uint32_t __stdcall RunMetaSpriteNesCaptureTest(const char* filename)

@@ -1,6 +1,7 @@
 #pragma once
 #include "MetaSpriteFrame.h"
 #include "MetaBackgroundReplacement.h"
+#include "MetaPngAnimation.h"
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -28,6 +29,7 @@ struct MetaAlternateArtwork
 	int ArtworkScale = 1, ArtworkWidth = 0, ArtworkHeight = 0;
 	std::vector<uint32_t> Artwork;
 	std::vector<MetaMemoryCondition> MemoryConditions;
+	MetaPngArtworkAnimation Animation;
 };
 
 struct MetaArtworkSelection
@@ -46,13 +48,16 @@ struct MetaSpriteReplacement
 	std::vector<uint32_t> Artwork;
 	std::vector<MetaMemoryCondition> MemoryConditions;
 	std::vector<MetaAlternateArtwork> AlternateArtwork;
-	MetaArtworkSelection SelectArtwork(const MetaMemorySnapshot& snapshot) const
+	MetaPngArtworkAnimation Animation;
+	MetaArtworkSelection SelectArtwork(const MetaMemorySnapshot& snapshot, uint64_t emulatedFrame = 0, const MetaPngAnimationSnapshot* timing = nullptr) const
 	{
 		for(const auto& alternate : AlternateArtwork) {
 			if(!alternate.MemoryConditions.empty() && MetaMemoryCondition::Matches(alternate.MemoryConditions, snapshot)) {
+				if(auto image = alternate.Animation.Select(emulatedFrame,timing)) { return {image->OriginX,image->OriginY,alternate.ArtworkScale,image->Width,image->Height,*image->Pixels}; }
 				return {alternate.ArtworkOriginX, alternate.ArtworkOriginY, alternate.ArtworkScale, alternate.ArtworkWidth, alternate.ArtworkHeight, alternate.Artwork};
 			}
 		}
+		if(auto image = Animation.Select(emulatedFrame,timing)) { return {image->OriginX,image->OriginY,ArtworkScale,image->Width,image->Height,*image->Pixels}; }
 		return {ArtworkOriginX, ArtworkOriginY, ArtworkScale, ArtworkWidth, ArtworkHeight, Artwork};
 	}
 };
@@ -73,6 +78,68 @@ class MetaSpriteCompositor
 	std::shared_ptr<const std::vector<MetaBackgroundReplacement>> _backgroundLayers;
 	std::shared_ptr<const std::vector<uint32_t>> _memoryAddresses;
 	MetaBackgroundView _activeBackgrounds;
+	uint64_t _animationRevision = 0, _capturedAnimationRevision = UINT64_MAX;
+	bool _hasRestartAnimations = false;
+	std::unordered_map<const MetaPngArtworkAnimation*,MetaPngActivationClock> _activationClocks;
+	void PrepareActivationClocks(const std::shared_ptr<const std::vector<MetaSpriteReplacement>>& groups,
+		const std::shared_ptr<const std::vector<MetaBackgroundReplacement>>& backgrounds, uint64_t revision)
+	{
+		if(_capturedAnimationRevision != revision) {
+			_activationClocks.clear(); _capturedAnimationRevision = revision; _hasRestartAnimations=false;
+			if(groups) { for(const auto& group : *groups) {
+				_hasRestartAnimations |= group.Animation.RestartOnActivation && !group.Animation.Frames.empty();
+				for(const auto& alternate : group.AlternateArtwork) { _hasRestartAnimations |= alternate.Animation.RestartOnActivation && !alternate.Animation.Frames.empty(); }
+			} }
+			if(backgrounds) { for(const auto& layer : *backgrounds) { _hasRestartAnimations |= layer.Animation.RestartOnActivation && !layer.Animation.Frames.empty(); } }
+		}
+	}
+	// Keys use stable definition IDs and alternate slots, never OAM indices or pointers.
+	std::unordered_map<uint64_t,const MetaPngArtworkAnimation*> AnimationBindings() const
+	{
+		std::unordered_map<uint64_t,const MetaPngArtworkAnimation*> result;
+		auto add=[&](uint64_t key,const MetaPngArtworkAnimation& animation) {
+			if(animation.RestartOnActivation && !animation.Frames.empty()) { result.emplace(key,&animation); }
+		};
+		if(_groups) { for(const auto& group : *_groups) {
+			add(uint64_t(group.Id)<<8,group.Animation);
+			for(size_t i=0;i<group.AlternateArtwork.size();i++) { add((uint64_t(group.Id)<<8)|(i+1),group.AlternateArtwork[i].Animation); }
+		} }
+		if(_backgroundLayers) { for(const auto& layer : *_backgroundLayers) { add((uint64_t(1)<<63)|uint64_t(layer.Id),layer.Animation); } }
+		return result;
+	}
+	void CaptureAnimationTiming(const MetaSpriteFrame& frame,
+		const std::shared_ptr<const std::vector<MetaSpriteReplacement>>& groups,
+		const std::shared_ptr<const std::vector<MetaBackgroundReplacement>>& backgrounds, uint64_t revision)
+	{
+		// Woven output already contains both field snapshots. Do not replace them
+		// with a second condition observation taken after the fields were joined.
+		if(frame.SnesFieldMemoryCaptured) { return; }
+		std::lock_guard<std::mutex> lock(_lock);
+		if(revision != _animationRevision) { frame.AnimationTiming.reset(); return; }
+		PrepareActivationClocks(groups,backgrounds,revision);
+		if(!_hasRestartAnimations) { frame.AnimationTiming.reset(); return; }
+		auto timing = std::make_shared<MetaPngAnimationSnapshot>(); timing->Groups=groups; timing->Backgrounds=backgrounds;
+		auto observe = [&](const MetaPngArtworkAnimation& animation, bool active) {
+			if(animation.RestartOnActivation && !animation.Frames.empty()) {
+				timing->Elapsed.emplace(&animation,_activationClocks[&animation].Observe(frame.FrameNumber,active));
+			}
+		};
+		if(groups) { for(const auto& group : *groups) {
+			bool enabled=MetaMemoryCondition::Matches(group.MemoryConditions,frame.MemorySnapshot), alternateSelected=false;
+			for(const auto& alternate : group.AlternateArtwork) {
+				bool selected=enabled && !alternateSelected && !alternate.MemoryConditions.empty()
+					&& MetaMemoryCondition::Matches(alternate.MemoryConditions,frame.MemorySnapshot);
+				observe(alternate.Animation,selected); alternateSelected |= selected;
+			}
+			observe(group.Animation,enabled && !alternateSelected);
+		} }
+		if(backgrounds) { for(const auto& layer : *backgrounds) {
+			int x,y;
+			bool cameraValid=!layer.UseCpuCamera || !layer.FollowScroll || (layer.CameraX.Decode(frame.MemorySnapshot,x) && layer.CameraY.Decode(frame.MemorySnapshot,y));
+			observe(layer.Animation,layer.IsValid() && cameraValid && MetaMemoryCondition::Matches(layer.MemoryConditions,frame.MemorySnapshot));
+		} }
+		frame.AnimationTiming=std::move(timing);
+	}
 	static std::shared_ptr<const std::vector<uint32_t>> CompileMemoryAddresses(const std::vector<MetaSpriteReplacement>& groups, const std::vector<MetaBackgroundReplacement>& backgrounds)
 	{
 		std::vector<uint32_t> addresses;
@@ -486,6 +553,7 @@ public:
 		auto addresses = CompileMemoryAddresses(*snapshot, _backgroundLayers ? *_backgroundLayers : emptyBackgrounds);
 		_groups = std::move(snapshot);
 		_memoryAddresses = std::move(addresses);
+		_animationRevision++;
 	}
 	void SetBackgroundLayers(std::vector<MetaBackgroundReplacement> layers)
 	{
@@ -494,6 +562,7 @@ public:
 		_backgroundLayers = std::move(snapshot);
 		static const std::vector<MetaSpriteReplacement> emptyGroups;
 		_memoryAddresses = CompileMemoryAddresses(_groups ? *_groups : emptyGroups, *_backgroundLayers);
+		_animationRevision++;
 	}
 	void SetReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers)
 	{
@@ -504,20 +573,61 @@ public:
 		_groups = std::move(sprites);
 		_backgroundLayers = std::move(backgrounds);
 		_memoryAddresses = std::move(addresses);
+		_animationRevision++;
 	}
 	// Called on the emulation thread before publishing the captured frame.
 	// Failed reads stay absent so conditions cannot match stale memory.
-	void CaptureMemorySnapshot(const MetaSpriteFrame& frame, const std::function<bool(uint32_t, uint8_t&)>& readByte)
+	void CaptureMemorySnapshot(const MetaSpriteFrame& frame, const std::function<bool(uint32_t, uint8_t&)>& readByte, bool timing = true)
 	{
 		std::shared_ptr<const std::vector<uint32_t>> addresses;
-		{ std::lock_guard<std::mutex> lock(_lock); addresses = _memoryAddresses; }
+		std::shared_ptr<const std::vector<MetaSpriteReplacement>> groups;
+		std::shared_ptr<const std::vector<MetaBackgroundReplacement>> backgrounds;
+		uint64_t revision;
+		{ std::lock_guard<std::mutex> lock(_lock); addresses = _memoryAddresses; groups=_groups; backgrounds=_backgroundLayers; revision=_animationRevision; }
 		frame.MemorySnapshot.clear();
-		if(!addresses || !readByte) { return; }
+		if(!addresses || !readByte) { frame.AnimationTiming.reset(); return; }
 		frame.MemorySnapshot.reserve(addresses->size());
 		for(uint32_t address : *addresses) {
 			uint8_t value;
 			if(readByte(address, value)) { frame.MemorySnapshot.emplace(address, value); }
 		}
+		if(timing) { CaptureAnimationTiming(frame,groups,backgrounds,revision); }
+		else { frame.AnimationTiming.reset(); }
+	}
+	// Optional state section: only clocks and pack identities, never artwork or RAM.
+	std::vector<uint64_t> SaveAnimationState()
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		PrepareActivationClocks(_groups,_backgroundLayers,_animationRevision);
+		std::vector<uint64_t> data;
+		for(const auto& binding : AnimationBindings()) {
+			auto found=_activationClocks.find(binding.second);
+			if(found==_activationClocks.end()) { continue; }
+			if(data.empty()) { data.push_back(0x314B434D); }
+			auto state=found->second.Save();
+			data.insert(data.end(),{binding.first,binding.second->SourceIdentity[0],binding.second->SourceIdentity[1],state[0],state[1]});
+		}
+		return data;
+	}
+	bool RestoreAnimationState(const std::vector<uint64_t>& data)
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		PrepareActivationClocks(_groups,_backgroundLayers,_animationRevision);
+		_activationClocks.clear();
+		if(data.empty()) { return true; } // Older state: fresh activation.
+		if(data[0]!=0x314B434D || (data.size()-1)%5 || (data.size()-1)/5 > 1024*65+128) { return false; }
+		auto bindings=AnimationBindings();
+		std::unordered_map<const MetaPngArtworkAnimation*,MetaPngActivationClock> restored;
+		for(size_t i=1;i<data.size();i+=5) {
+			MetaPngActivationClock clock;
+			if(!clock.Restore(data[i+3],data[i+4])) { return false; }
+			auto found=bindings.find(data[i]);
+			if(found==bindings.end()) { continue; }
+			const auto* animation=found->second;
+			if(animation->SourceIdentity==std::array<uint64_t,2>{} || animation->SourceIdentity!=std::array<uint64_t,2>{data[i+1],data[i+2]}) { continue; }
+			if(!restored.emplace(animation,clock).second) { return false; }
+		}
+		_activationClocks=std::move(restored); return true;
 	}
 	bool HasReplacements()
 	{
@@ -631,14 +741,14 @@ public:
 		auto candidates = !frame.NesRows.empty() ? BuildNesCandidates(frame, backgroundColor)
 			: frame.DecodedRows.empty() ? BuildGameboyCandidates(frame) : BuildDecodedCandidates(frame);
 		for(const auto& group : *groups) {
-			auto includeScale = [&](const MetaMemorySnapshot& snapshot) {
+			auto includeScale = [&](const MetaMemorySnapshot& snapshot, uint32_t emulatedFrame, const MetaPngAnimationSnapshot* timing) {
 				if(MetaMemoryCondition::Matches(group.MemoryConditions, snapshot)) {
-					auto artwork = group.SelectArtwork(snapshot);
+					auto artwork = group.SelectArtwork(snapshot,emulatedFrame,timing);
 					_outputScale = std::max(_outputScale, (uint32_t)((std::clamp(artwork.ArtworkScale, 1, 10) + frame.SpriteCoordinateScale - 1) / frame.SpriteCoordinateScale));
 				}
 			};
-			includeScale(frame.MemorySnapshot);
-			if(frame.SnesFieldMemoryCaptured) { includeScale(frame.SnesFieldMemory[0]); includeScale(frame.SnesFieldMemory[1]); }
+			includeScale(frame.MemorySnapshot,frame.FrameNumber,frame.AnimationTiming.get());
+			if(frame.SnesFieldMemoryCaptured) { for(int field=0;field<2;field++) { includeScale(frame.SnesFieldMemory[field],frame.SnesFieldFrameNumber[field],frame.SnesFieldAnimationTiming[field].get()); } }
 		}
 		if(applyBackgrounds || applyGbaBackgrounds || applySnesBackgrounds || applyForegroundBackgrounds || applyOrderedSpriteScene) { for(const auto& layer : _activeBackgrounds) { if(layer.IsValid()) { _outputScale = std::max(_outputScale, (uint32_t)layer.Scale); } } }
 		uint32_t outputWidth = width * _outputScale;
@@ -714,7 +824,9 @@ public:
 				uint8_t field=candidates[i].SnesField;
 				const auto& snapshot=frame.SnesFieldMemoryCaptured && field>=1 && field<=2 ? frame.SnesFieldMemory[field-1] : frame.MemorySnapshot;
 				if(!MetaMemoryCondition::Matches(group.MemoryConditions,snapshot)) { continue; }
-				auto artwork=group.SelectArtwork(snapshot);
+				uint32_t emulatedFrame=frame.SnesFieldMemoryCaptured && field>=1 && field<=2 ? frame.SnesFieldFrameNumber[field-1] : frame.FrameNumber;
+				const auto* timing=frame.SnesFieldMemoryCaptured && field>=1 && field<=2 ? frame.SnesFieldAnimationTiming[field-1].get() : frame.AnimationTiming.get();
+				auto artwork=group.SelectArtwork(snapshot,emulatedFrame,timing);
 				if(artwork.ArtworkScale<1 || artwork.ArtworkWidth<1 || artwork.ArtworkHeight<1
 					|| artwork.Artwork.size()!=(size_t)artwork.ArtworkWidth*artwork.ArtworkHeight) { continue; }
 				int left = candidates[i].X - anchor.X, top = candidates[i].Y - anchor.Y;

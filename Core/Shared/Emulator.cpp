@@ -360,6 +360,7 @@ void Emulator::Reset()
 	_soundMixer->ResetReplacementMusic();
 
 	_console->Reset();
+	_videoDecoder->ResetReplacementAnimation();
 
 	//Ensure reset button flag is off before recording input for first frame
 	_systemActionManager->ResetState();
@@ -978,6 +979,7 @@ void Emulator::Serialize(ostream& out, bool includeSettings, int compressionLeve
 		SV(_settings);
 	}
 	s.Stream(_console, "");
+	if(!_isRunAheadFrame) { _videoDecoder->SerializeReplacementAnimation(s); }
 	s.SaveTo(out, compressionLevel);
 }
 
@@ -1028,6 +1030,7 @@ DeserializeResult Emulator::Deserialize(istream& in, uint32_t fileFormatVersion,
 	if(s.HasError()) {
 		return DeserializeResult::SpecificError;
 	}
+	if(!_isRunAheadFrame) { _videoDecoder->SerializeReplacementAnimation(s); }
 	_videoDecoder->ResetFrameBlendHistory();
 	if(sendNotification) { _soundMixer->ResetReplacementMusic(); }
 
