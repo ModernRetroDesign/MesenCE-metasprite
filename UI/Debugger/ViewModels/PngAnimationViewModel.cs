@@ -12,6 +12,7 @@ namespace Mesen.Debugger.ViewModels;
 
 public partial class PngAnimationViewModel : ObservableObject, IDisposable
 {
+	private const int DefaultFrameDuration = 8;
 	private readonly string _directory;
 	private readonly int _scale, _originX, _originY;
 	private readonly bool _background;
@@ -24,20 +25,26 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 	private readonly Queue<string> _previewOrder = new();
 	private readonly Dictionary<string,(int Width,int Height)> _dimensions = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 	private int _sourceWidth=1, _sourceHeight=1;
+	private bool _alignedPreview;
+	private double _previewScale=1, _previewMinX, _previewMinY, _previewCanvasWidth=1, _previewCanvasHeight=1;
 	public string Title { get; }
 	public string DirectoryPath => _directory;
 	public bool HasFrame => SelectedFrame!=null;
-	public int PreviewWidth => Preview?.PixelSize.Width ?? 1;
-	public int PreviewHeight => Preview?.PixelSize.Height ?? 1;
-	public double PreviewOriginX => (double)FrameOriginX*_scale*PreviewWidth/_sourceWidth;
-	public double PreviewOriginY => (double)FrameOriginY*_scale*PreviewHeight/_sourceHeight;
+	public int PreviewWidth => _alignedPreview ? (int)Math.Ceiling(_previewCanvasWidth) : Preview?.PixelSize.Width ?? 1;
+	public int PreviewHeight => _alignedPreview ? (int)Math.Ceiling(_previewCanvasHeight) : Preview?.PixelSize.Height ?? 1;
+	public double PreviewImageWidth => _alignedPreview ? _sourceWidth*_previewScale : PreviewWidth;
+	public double PreviewImageHeight => _alignedPreview ? _sourceHeight*_previewScale : PreviewHeight;
+	public double PreviewImageLeft => _alignedPreview ? (-FrameOriginX*_scale-_previewMinX)*_previewScale : 0;
+	public double PreviewImageTop => _alignedPreview ? (-FrameOriginY*_scale-_previewMinY)*_previewScale : 0;
+	public double PreviewOriginX => PreviewImageLeft+(double)FrameOriginX*_scale*PreviewImageWidth/_sourceWidth;
+	public double PreviewOriginY => PreviewImageTop+(double)FrameOriginY*_scale*PreviewImageHeight/_sourceHeight;
 	public string ScaleInfo => $"Shared artwork scale: {_scale}×. Origins use native pixels.";
 	public ObservableCollection<MetaPngAnimationFrame> Frames { get; } = new();
 	[ObservableProperty] public partial bool Enabled { get; set; }
 	[ObservableProperty] public partial bool RestartOnActivation { get; set; }
 	[ObservableProperty] public partial int PlaybackMode { get; set; }
 	[ObservableProperty] public partial MetaPngAnimationFrame? SelectedFrame { get; set; }
-	[ObservableProperty] public partial int FrameDuration { get; set; } = 1;
+	[ObservableProperty] public partial int FrameDuration { get; set; } = DefaultFrameDuration;
 	[ObservableProperty] public partial bool OverrideOrigin { get; set; }
 	[ObservableProperty] public partial int FrameOriginX { get; set; }
 	[ObservableProperty] public partial int FrameOriginY { get; set; }
@@ -71,8 +78,8 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 				if(_background) { MetaSpritePlacement.ValidateCanvas(codec.Info.Width,codec.Info.Height,_scale); }
 				else { MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width,codec.Info.Height,_scale); }
 				size=(long)codec.Info.Width*codec.Info.Height*4; sizes.Add(path,size);
+				bytes=checked(bytes+size); // Unique paths are an upper estimate; identical content also shares storage.
 			}
-			bytes=checked(bytes+size); // Native transport currently stores each frame, including repeated paths.
 		}
 		return bytes;
 	}
@@ -80,12 +87,35 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 	{
 		StopPreview();
 		try {
-			var draft=BuildDraft(); long bytes=draft.Enabled ? ValidateAssets(draft) : 0;
-			if(draft.Enabled && bytes>=536870912) { throw new InvalidDataException("This sequence exceeds the current 512 MiB artwork limit. Reduce frame sizes or count."); }
+			var draft=BuildDraft(); if(draft.Enabled) { ValidateAssets(draft); }
+			// The packet writer enforces the actual encoded size after content sharing.
 			var result=_save(draft); Status=result.Status; return result.Saved;
 		} catch(Exception ex) { Status=ex.Message; return false; }
 	}
-	public void AddFrame(string path)
+	public void AddFrames(IEnumerable<string> paths)
+	{
+		var selected=paths.ToList(); if(selected.Count==0) { return; }
+		StopPreview();
+		if(selected.Count>256-Frames.Count) { Status="A sequence supports up to 256 frames. No frames were added."; return; }
+		try { ValidateExistingFrames(); } catch(Exception ex) { Status=ex.Message; return; }
+		int added=0;
+		foreach(string path in selected) {
+			if(!AddFrameCore(path,false)) {
+				string error=Status; if(added>0) { SelectedFrame=Frames[^1]; }
+				Status=$"Added {added} of {selected.Count} frames. "+error; return;
+			}
+			added++;
+		}
+		SelectedFrame=Frames[^1];
+		Status=$"Added {added} PNG frame(s) in picker order. Save and apply to use the sequence.";
+	}
+	public bool AddFrame(string path)
+	{
+		try { ValidateExistingFrames(); } catch(Exception ex) { Status=ex.Message; return false; }
+		return AddFrameCore(path,true);
+	}
+	private void ValidateExistingFrames() => new MetaPngAnimation {Playback=(MetaPngPlayback)PlaybackMode,Frames=Frames.Select(CopyFrame).ToList()}.Validate();
+	private bool AddFrameCore(string path,bool refresh)
 	{
 		StopPreview(); string? created=null;
 		try {
@@ -101,12 +131,15 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 				using var input=new FileStream(source,FileMode.Open,FileAccess.Read,FileShare.Read);
 				using var output=new FileStream(destination,FileMode.CreateNew,FileAccess.Write); created=destination; input.CopyTo(output);
 			}
-			var frame=new MetaPngAnimationFrame {Path=Path.GetFileName(destination)};
-			var check=new MetaPngAnimation {Enabled=true,Playback=(MetaPngPlayback)PlaybackMode,Frames=Frames.Select(CopyFrame).Append(frame).ToList()}; check.Validate();
-			_measureDirty=true; Frames.Add(frame); SelectedFrame=frame; Enabled=true; Status="PNG frame added. Save and apply to use the sequence."; RefreshPreview();
+			var frame=new MetaPngAnimationFrame {Path=Path.GetFileName(destination),Duration=DefaultFrameDuration};
+			new MetaPngAnimation {Enabled=true,Playback=(MetaPngPlayback)PlaybackMode,Frames=new() {frame}}.Validate();
+			_measureDirty=true; Frames.Add(frame); Enabled=true;
+			if(refresh) { SelectedFrame=frame; }
+			Status="PNG frame added. Save and apply to use the sequence."; return true;
 		} catch(Exception ex) {
 			Status=ex.Message;
 			if(created!=null) { try { File.Delete(created); } catch(Exception cleanup) { Status+=" Could not remove incomplete PNG copy: "+cleanup.Message; } }
+			return false;
 		}
 	}
 	public void RemoveFrame()
@@ -129,10 +162,28 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 	{
 		try {
 			var draft=BuildDraft(); draft.Enabled=true; draft.Validate(); ValidateAssets(draft); _timeline=new(draft); _tick=0;
-			ClearPreviews(); IsPlaying=true; SelectPlaybackFrame(); RefreshPreview(); Status="Preview runs at 60 frames/s. Gameplay follows emulation.";
+			ClearPreviews(); PreparePlaybackCanvas(draft); IsPlaying=true; SelectPlaybackFrame(); RefreshPreview(); Status="Preview runs at 60 frames/s, aligned at the shared origin. Gameplay follows emulation.";
 		} catch(Exception ex) { IsPlaying=false; Status=ex.Message; }
 	}
-	public void StopPreview() => IsPlaying=false;
+	private void PreparePlaybackCanvas(MetaPngAnimation draft)
+	{
+		double minX=0,minY=0,maxX=0,maxY=0;
+		var dimensions=new Dictionary<string,(int Width,int Height)>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+		foreach(var frame in draft.Frames) {
+			string path=Path.GetFullPath(Path.Combine(_directory,frame.Path));
+			if(!dimensions.TryGetValue(path,out var size)) {
+				using var codec=SKCodec.Create(path) ?? throw new InvalidDataException("Could not read PNG preview.");
+				size=(codec.Info.Width,codec.Info.Height); dimensions.Add(path,size);
+			}
+			double left=-(double)(frame.OriginX ?? _originX)*_scale, top=-(double)(frame.OriginY ?? _originY)*_scale;
+			minX=Math.Min(minX,left); minY=Math.Min(minY,top); maxX=Math.Max(maxX,left+size.Width); maxY=Math.Max(maxY,top+size.Height);
+		}
+		_previewMinX=minX; _previewMinY=minY;
+		_previewScale=Math.Min(1,Math.Min(512/Math.Max(1,maxX-minX),512/Math.Max(1,maxY-minY)));
+		_previewCanvasWidth=Math.Max(1,(maxX-minX)*_previewScale); _previewCanvasHeight=Math.Max(1,(maxY-minY)*_previewScale);
+		_alignedPreview=true; NotifyPreviewLayout();
+	}
+	public void StopPreview() { IsPlaying=false; if(_alignedPreview) { _alignedPreview=false; NotifyPreviewLayout(); } }
 	public void AdvancePreview()
 	{
 		if(!IsPlaying || _timeline==null) { return; } _tick++; SelectPlaybackFrame();
@@ -147,20 +198,25 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 	{
 		OnPropertyChanged(nameof(HasFrame));
 		if(!_fromPlayback) { StopPreview(); } _selecting=true;
-		try { FrameDuration=value?.Duration ?? 1; OverrideOrigin=value?.OriginX!=null || value?.OriginY!=null; FrameOriginX=value?.OriginX ?? _originX; FrameOriginY=value?.OriginY ?? _originY; }
+		try { FrameDuration=value?.Duration ?? DefaultFrameDuration; OverrideOrigin=value?.OriginX!=null || value?.OriginY!=null; FrameOriginX=value?.OriginX ?? _originX; FrameOriginY=value?.OriginY ?? _originY; }
 		finally { _selecting=false; } RefreshPreview();
 	}
 	partial void OnPlaybackModeChanged(int value) { StopPreview(); }
 	partial void OnFrameDurationChanged(int value) { if(!_selecting && SelectedFrame!=null) { StopPreview(); SelectedFrame.Duration=value; } }
 	partial void OnFrameOriginXChanged(int value) { if(!_selecting && OverrideOrigin && SelectedFrame!=null) { StopPreview(); SelectedFrame.OriginX=value; } OnPropertyChanged(nameof(PreviewOriginX)); }
 	partial void OnFrameOriginYChanged(int value) { if(!_selecting && OverrideOrigin && SelectedFrame!=null) { StopPreview(); SelectedFrame.OriginY=value; } OnPropertyChanged(nameof(PreviewOriginY)); }
-	partial void OnPreviewChanged(Bitmap? value) { OnPropertyChanged(nameof(PreviewWidth)); OnPropertyChanged(nameof(PreviewHeight)); OnPropertyChanged(nameof(PreviewOriginX)); OnPropertyChanged(nameof(PreviewOriginY)); }
+	private void NotifyPreviewLayout()
+	{
+		foreach(string property in new[] {nameof(PreviewWidth),nameof(PreviewHeight),nameof(PreviewImageWidth),nameof(PreviewImageHeight),nameof(PreviewImageLeft),nameof(PreviewImageTop),nameof(PreviewOriginX),nameof(PreviewOriginY)}) { OnPropertyChanged(property); }
+	}
+	partial void OnPreviewChanged(Bitmap? value) => NotifyPreviewLayout();
 	public void SetPreviewOrigin(double x,double y)
 	{
 		if(SelectedFrame==null || Preview==null || !double.IsFinite(x) || !double.IsFinite(y)) { return; }
-		OverrideOrigin=true;
-		FrameOriginX=(int)Math.Clamp(Math.Round(x*_sourceWidth/PreviewWidth/_scale),-4096,4096);
-		FrameOriginY=(int)Math.Clamp(Math.Round(y*_sourceHeight/PreviewHeight/_scale),-4096,4096);
+		// Resolve the click before stopping aligned playback changes the layout.
+		int originX=(int)Math.Clamp(Math.Round((x-PreviewImageLeft)*_sourceWidth/PreviewImageWidth/_scale),-4096,4096);
+		int originY=(int)Math.Clamp(Math.Round((y-PreviewImageTop)*_sourceHeight/PreviewImageHeight/_scale),-4096,4096);
+		StopPreview(); OverrideOrigin=true; FrameOriginX=originX; FrameOriginY=originY;
 	}
 	partial void OnOverrideOriginChanged(bool value)
 	{
@@ -172,12 +228,17 @@ public partial class PngAnimationViewModel : ObservableObject, IDisposable
 		Preview=null;
 		FrameInfo=SelectedFrame==null ? "No frames" : $"Frame {Frames.IndexOf(SelectedFrame)+1} / {Frames.Count}: {SelectedFrame.Path}";
 		try {
-			if(_measureDirty) { MemoryInfo=$"Approximate decoded sequence: {ValidateAssets(BuildDraft())/1048576.0:F1} MiB"; _measureDirty=false; }
+			if(_measureDirty) { MemoryInfo=$"Decoded artwork estimate (unique paths): {ValidateAssets(BuildDraft())/1048576.0:F1} MiB"; _measureDirty=false; }
 			if(SelectedFrame!=null) {
 				string path=Path.Combine(_directory,SelectedFrame.Path);
 				if(!_previews.TryGetValue(path,out var bitmap)) {
 					using var codec=SKCodec.Create(path) ?? throw new InvalidDataException("Could not read PNG preview.");
-					using var stream=File.OpenRead(path); bitmap=Bitmap.DecodeToWidth(stream,Math.Min(512,codec.Info.Width));
+					// Bound both axes: portrait backgrounds must not decode a full-height
+					// thumbnail just because their width is already below the limit.
+					using var stream=File.OpenRead(path);
+					bitmap=codec.Info.Height>codec.Info.Width
+						? Bitmap.DecodeToHeight(stream,Math.Min(512,codec.Info.Height))
+						: Bitmap.DecodeToWidth(stream,Math.Min(512,codec.Info.Width));
 					_dimensions[path]=(codec.Info.Width,codec.Info.Height);
 					_previews.Add(path,bitmap); _previewOrder.Enqueue(path);
 					while(_previews.Count>3) { string old=_previewOrder.Dequeue(); _previews[old].Dispose(); _previews.Remove(old); _dimensions.Remove(old); }

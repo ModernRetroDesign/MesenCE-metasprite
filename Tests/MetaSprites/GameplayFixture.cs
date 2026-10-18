@@ -7,17 +7,31 @@ using System.Runtime.InteropServices;
 internal static class GameplayFixture
 {
 	[DllImport("MesenCore.dll")]
-	private static extern uint RunMetaAnimationStateRomTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename,byte[] sprites,uint spriteLength,byte[] backgrounds,uint backgroundLength);
-	public static void RunAnimationStateSuite(string dllPath,string packetPath)
+	private static extern uint RunAnimationGameplayTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	public static void RunAnimationGameplaySuite(string dllPath)
 	{
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(),(name,_,_) => name=="MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
-		byte[] sprites=File.ReadAllBytes(packetPath+".activated"), backgrounds=File.ReadAllBytes(packetPath+".background.activated");
+		foreach(var fixture in new[] {("background-scroll.nes","NES mapper 0"),("gb","DMG"),("gbc","CGB"),("background-scroll.gba","GBA BG/OBJ"),("background.pce","PCE single VDC"),("sms","SMS mode 4"),("legacy-mode0.sms","SMS mode 0"),("background-sub-bg0-mode1-scroll.sfc","SNES mode 1 BG0/OBJ"),("background-scroll.wsc","WS BG/OBJ")}) {
+			string path=Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture."+fixture.Item1);
+			if(!File.Exists(path)) { throw new Exception("Missing generated animation fixture: "+path); }
+			uint flags=RunAnimationGameplayTest(path);
+			if(flags!=131071) { throw new Exception($"Live animation failed for {fixture.Item2}: {flags:X}/1FFFF."); }
+			Console.WriteLine($"PASS: {fixture.Item2} live animation/RAM gates/pause/2x/run-ahead/save-load transitions, 110 exact whole-frame reverse rewind matches and native restoration.");
+		}
+	}
+	[DllImport("MesenCore.dll")]
+	private static extern uint RunMetaAnimationStateRomTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename,byte[] sprites,uint spriteLength,byte[] backgrounds,uint backgroundLength);
+	public static void RunAnimationStateSuite(string dllPath,string packetPath,bool shared=false)
+	{
+		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(),(name,_,_) => name=="MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
+		string sharedSuffix=shared ? ".shared" : "";
+		byte[] sprites=File.ReadAllBytes(packetPath+".activated"+sharedSuffix), backgrounds=File.ReadAllBytes(packetPath+".background.activated"+sharedSuffix);
 		foreach(string extension in new[] {"nes","gb","gbc","gba","pce","sms","sfc","wsc"}) {
 			string filename=Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture."+extension);
 			if(!File.Exists(filename)) { throw new Exception("Missing generated animation state fixture: "+filename); }
 			uint result=RunMetaAnimationStateRomTest(filename,sprites,(uint)sprites.Length,backgrounds,(uint)backgrounds.Length);
 			if(result!=0) { throw new Exception($"Animation state round-trip failed for {extension} at stage {result}."); }
-			Console.WriteLine($"PASS: {extension} animation clocks through actual emulator save/load and full/XOR rewind serialization.");
+			Console.WriteLine($"PASS: {extension} {(shared ? "shared-format" : "legacy-format")} animation clocks through actual emulator save/load and full/XOR rewind serialization.");
 		}
 	}
 	[DllImport("MesenCore.dll")]
@@ -71,6 +85,8 @@ internal static class GameplayFixture
 	private static extern uint RunMetaSpriteSnesCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 	[DllImport("MesenCore.dll", CallingConvention = CallingConvention.StdCall)]
 	private static extern uint RunMetaSpriteSnesHiresCaptureTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
+	[DllImport("MesenCore.dll", CallingConvention = CallingConvention.StdCall)]
+	private static extern uint RunMetaSpriteSnesHiresMathTest([MarshalAs(UnmanagedType.LPUTF8Str)] string filename);
 
 	public static void Run(string dllPath, string romPath, bool gameboyOnly = false)
 	{
@@ -296,15 +312,21 @@ internal static class GameplayFixture
 		foreach(string fixture in new[] {
 			"mode5-hires", "mode6-hires", "pseudo-hires", "mode5-hires-both-screens", "mode5-hires-both-screens-window", "pseudo-hires-window",
 			"mode5-hires-background-scroll", "mode6-hires-background-scroll", "pseudo-hires-background-scroll", "interlace-holes", "interlace-current-field-holes",
+			"mode5-hires-math-both-screens", "mode6-hires-math-both-screens-window", "pseudo-hires-math",
+			"mode5-hires-math-operand-both-screens", "mode6-hires-math-operand-both-screens-window", "pseudo-hires-math-operand-both-screens",
+			"pseudo-hires-math-operand-both-screens-mixed-raster",
+			"mode5-hires-math-interlace-both-screens", "mode6-hires-math-operand-interlace-both-screens-window", "pseudo-hires-math-operand-interlace-both-screens",
+			"mode5-hires-math-interlace-current-field-both-screens", "mode6-hires-math-operand-interlace-bob-field-both-screens", "pseudo-hires-math-operand-interlace-bob-blend-field-both-screens",
 			"interlace-bob-field-holes", "interlace-bob-blend-field-holes", "interlace-bob-field-first-picture-holes", "interlace-bob-blend-field-first-picture-holes",
 			"obj-interlace-holes", "obj-interlace-current-field-holes", "obj-interlace-bob-field-holes", "obj-interlace-bob-blend-field-holes",
+			"obj-interlace-math-holes", "obj-interlace-current-field-math-holes", "obj-interlace-bob-field-math-holes", "obj-interlace-bob-blend-field-math-holes",
 			"obj-interlace-group-holes", "obj-interlace-hflip-holes", "obj-interlace-vflip-holes",
-			"obj-interlace-rect-holes", "obj-interlace-rect-vflip-holes", "obj-interlace-window-holes", "obj-interlace-poses-holes", "obj-interlace-poses-conditions-holes", "obj-interlace-bg-holes"
+			"obj-interlace-rect-holes", "obj-interlace-rect-vflip-holes", "obj-interlace-window-holes", "obj-interlace-poses-holes", "obj-interlace-poses-conditions-holes", "obj-interlace-bg-holes", "obj-interlace-bg-fields-holes"
 		}) {
 			if(onlyObjInterlace && !fixture.StartsWith("obj-interlace")) { continue; }
 			if(!includeInterlace && fixture.Contains("interlace")) { continue; }
 			if(!includeObjInterlace && fixture.Contains("obj-interlace")) { continue; }
-			try { RunSnes(Path.ChangeExtension(romPath, fixture + ".sfc"), holes: true, window: fixture.Contains("window") ? 1 : 0, backgroundSub: fixture.Contains("hires-background")); }
+			try { RunSnes(Path.ChangeExtension(romPath, fixture + ".sfc"), holes: true, window: fixture.Contains("window") ? 1 : 0, math: fixture.Contains("math") ? 1 : 0, backgroundSub: fixture.Contains("hires-background")); }
 			catch(Exception ex) { failures.Add(ex); Console.WriteLine($"FAIL: {ex.Message}"); }
 		}
 		if(failures.Count != 0) { throw new AggregateException("SNES hires/interlace capture probes failed.", failures); }
@@ -375,7 +397,7 @@ internal static class GameplayFixture
 			bool alternateObjRow = romPath.Contains("obj-interlace") && word < 8 && (word & 1) != 0;
 			Store(0x2118, alternateObjRow ? (byte)0 : bits); Store(0x2119, alternateObjRow ? bits : (byte)0);
 		}
-		if(romPath.Contains("obj-interlace")) { Store(0x2121, 130); Store(0x2122, 0); Store(0x2122, 0x7C); }
+		if(romPath.Contains("obj-interlace")) { Store(0x2121, math==1 ? (byte)194 : (byte)130); Store(0x2122, 0); Store(0x2122, 0x7C); }
 		if(overlap) {
 			for(int word = 0; word < 16; word++) { Store(0x2118, 0); Store(0x2119, word < 8 ? (byte)255 : (byte)0); }
 			Store(0x2121, 130); Store(0x2122, 0); Store(0x2122, 0x7C);
@@ -436,6 +458,7 @@ internal static class GameplayFixture
 			Store(0x212C, (byte)((1 << backgroundLayer) | 8));
 		}
 		Store(0x2130, sub ? (byte)2 : (byte)0); Store(0x2131, sub ? (byte)(0x40 | (1 << backgroundLayer)) : math != 0 ? (byte)0x50 : (byte)0);
+		if(romPath.Contains("hires-math-operand")) { Store(0x2130,2); }
 		Store(0x2132, 0x9F); // Blue fixed color for object half-add math.
 		byte screenMode = romPath.Contains("pseudo-hires") ? (byte)8 : mode7 && backgroundLayer == 1 ? (byte)0x40 : (byte)0;
 		if(romPath.Contains("interlace")) { screenMode |= 1; }
@@ -444,7 +467,22 @@ internal static class GameplayFixture
 		if(romPath.Contains("obj-interlace-bg")) { Store(0x212C,0x11); }
 		if(rotate) { Store(0x2102, 2); Store(0x2103, 0x80); } // Start evaluation at sprite 1.
 		Store(0x2100, 15);
-		if(romPath.Contains("obj-interlace-poses")) {
+        if(romPath.Contains("obj-interlace-bg-fields")) {
+			// Opposite WRAM camera/condition values in adjacent real PPU fields.
+			Store(0x0000,0); Store(0x0001,1);
+			ushort poll=(ushort)(0x8000+code.Count);
+			code.AddRange(new byte[] {0xAD,0x12,0x42,0x10,0xFB,0xAD,0,0,0x49,1,0x8D,0,0,0x49,1,0x8D,1,0});
+			code.AddRange(new byte[] {0xAD,0x12,0x42,0x30,0xFB,0x4C,(byte)poll,(byte)(poll>>8)});
+		} else if(romPath.Contains("mixed-raster")) {
+			// Toggle pseudo-hires off after 80 real horizontal blank periods.
+			ushort poll=(ushort)(0x8000+code.Count);
+			code.AddRange(new byte[] {0xAD,0x12,0x42,0x10,0xFB}); Store(0x2133,8);
+			code.AddRange(new byte[] {0xAD,0x12,0x42,0x30,0xFB,0xA2,80,0});
+			int horizontal=code.Count;
+			code.AddRange(new byte[] {0x2C,0x12,0x42,0x50,0xFB,0x2C,0x12,0x42,0x70,0xFB,0xCA,0xD0,0});
+			code[^1]=unchecked((byte)(horizontal-code.Count)); Store(0x2133,0);
+			code.AddRange(new byte[] {0x4C,(byte)poll,(byte)(poll>>8)});
+		} else if(romPath.Contains("obj-interlace-poses")) {
 			// Switch two source colors every vblank. Adjacent woven fields must
 			// retain different poses, even though their OAM identity is unchanged.
 			Store(0x0000, 0);
@@ -476,7 +514,7 @@ internal static class GameplayFixture
 		rom[0x7FD5] = 0x20; rom[0x7FD7] = 5; rom[0x7FD9] = 1;
 		rom[0x7FDC] = 255; rom[0x7FDD] = 255; rom[0x7FFC] = 0; rom[0x7FFD] = 0x80;
 		File.WriteAllBytes(romPath, rom);
-		uint result = romPath.Contains("hires") ? RunMetaSpriteSnesHiresCaptureTest(romPath) : RunMetaSpriteSnesCaptureTest(romPath);
+		uint result = romPath.Contains("hires-math") ? RunMetaSpriteSnesHiresMathTest(romPath) : romPath.Contains("hires") ? RunMetaSpriteSnesHiresCaptureTest(romPath) : RunMetaSpriteSnesCaptureTest(romPath);
 		if(result != 7) { throw new Exception($"SNES live capture/replacement failed for {Path.GetFileName(romPath)} (LoROM, BG mode {backgroundMode}): flags {result}."); }
 		Console.WriteLine($"PASS: {Path.GetFileName(romPath)}, SNES LoROM / BG mode {backgroundMode}, live capture, HD replacement, transparent/partial-alpha backdrop, border placement, and disable restoration.");
 	}

@@ -3,9 +3,60 @@
 
 namespace MetaSnesCapture
 {
-	// First hires integration stage: without color math, each output phase
-	// depends only on its primary plane. Math and field weaving need additional
-	// dependencies and deliberately remain on the native rendering path.
+	inline MetaSnesSubOutputPhase CaptureSubOutputPhase(const MetaSpritePixelState& current,
+		const MetaSpritePixelState& control,int x,uint16_t subColor,uint16_t previousMainColor,bool captured)
+	{
+		MetaSnesSubOutputPhase phase;
+		static_cast<MetaSpritePixelState&>(phase)=current;
+		phase.MathControlX=(int16_t)(x>0 ? x-1 : 0); phase.SecondarySampleX=(int16_t)(x>0 ? x-1 : -1); phase.Captured=captured;
+		phase.VisibleSprite=current.SecondarySprite; phase.SecondarySprite=x>0 ? control.VisibleSprite : -1;
+		phase.SpriteColor=subColor; phase.SecondaryColor=x>0 ? previousMainColor : 0;
+		phase.SnesFallbackMainColor=current.SnesFallbackSubColor;
+		phase.SnesFallbackSubColor=x>0 ? control.SnesFallbackMainColor : 0;
+		phase.SnesFallbackMainFlags=current.SnesFallbackSubPriority | (control.SnesFallbackMainFlags & 0x80);
+		phase.SnesFallbackSubPriority=x>0 ? control.SnesFallbackMainFlags & 15 : 0;
+		phase.SnesFallbackMainLayer=current.SnesFallbackSubLayer; phase.SnesFallbackSubLayer=x>0 ? control.SnesFallbackMainLayer : 0xFF;
+		phase.BackgroundSample=current.SnesSubBackgroundSample;
+		phase.SnesSubBackgroundSample=x>0 ? control.BackgroundSample : MetaBackgroundSample{};
+		return phase;
+	}
+	// Normal-width fields duplicate the completed main screen horizontally.
+	// Their existing low-resolution metadata already contains both math operands;
+	// unlike hires sub/main phases, no operand must be synthesized or discarded.
+	inline bool CanExpandMainWithMath(const MetaSpriteFrame& source)
+	{
+		if(!source.SnesColorEffects || source.SpriteCoordinateScale!=1 || source.Pixels.size()!=(size_t)source.Width*source.Height
+			|| (!source.SnesSubOutput.empty() && source.SnesSubOutput.size()!=source.Pixels.size())
+			|| (!source.SnesBackgrounds.empty() && source.SnesBackgrounds.size()!=source.Pixels.size())) { return false; }
+		for(const auto& phase : source.SnesSubOutput) { if(phase.Captured) { return false; } }
+		for(const auto& pixel : source.Pixels) { if(pixel.SnesHiresBackgrounds) { return false; } }
+		for(const auto& backgrounds : source.SnesBackgrounds) { for(const auto& layer : backgrounds.Layers) { if(layer.SeparateSub) { return false; } } }
+		return true;
+	}
+	inline bool ExpandMainWithMath(const MetaSpriteFrame& source,MetaSpriteFrame& output)
+	{
+		if(!CanExpandMainWithMath(source) || output.Width!=source.Width*2 || output.Height!=source.Height*2 || output.Pixels.size()!=source.Pixels.size()*4) { return false; }
+		output.Reset(); output.SnesColorEffects=true; output.SpriteCoordinateScale=2;
+		output.FrameNumber=source.FrameNumber; output.DecodedRows=source.DecodedRows;
+		output.MemorySnapshot=source.MemorySnapshot; output.AnimationTiming=source.AnimationTiming;
+		if(!source.SnesBackgrounds.empty()) { output.SnesBackgrounds.resize(output.Pixels.size()); }
+		for(uint32_t y=0;y<source.Height;y++) { for(uint32_t x=0;x<source.Width;x++) {
+			size_t index=(size_t)y*source.Width+x;
+			for(uint8_t dy=0;dy<2;dy++) { for(uint8_t dx=0;dx<2;dx++) {
+				size_t destination=(size_t)(y*2+dy)*output.Width+x*2+dx;
+				auto sample=[&](MetaBackgroundSample& value) { value.PixelScaleX=value.PixelScaleY=2; value.PixelOffsetX=dx; value.PixelOffsetY=dy; };
+				auto& pixel=output.Pixels[destination]; pixel=source.Pixels[index];
+				sample(pixel.BackgroundSample); sample(pixel.SnesSubBackgroundSample);
+				if(!source.SnesBackgrounds.empty()) {
+					auto& background=output.SnesBackgrounds[destination]; background=source.SnesBackgrounds[index];
+					for(auto& layer : background.Layers) { sample(layer.Sample); sample(layer.SubSample); }
+				}
+			} }
+		} }
+		return true;
+	}
+	// Hires sub/main phases currently require math-free captures. Normal-width
+	// fields can instead preserve both operands through ExpandMainWithMath.
 	inline bool CanExpandWithoutMath(const MetaSpriteFrame& source)
 	{
 		if(!source.SnesColorEffects || source.SpriteCoordinateScale != 1
@@ -31,10 +82,22 @@ namespace MetaSnesCapture
 		return true;
 	}
 
-	inline bool ExpandWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output)
+	inline bool CanExpandHiresMath(const MetaSpriteFrame& source)
+	{
+		if(!source.SnesColorEffects || source.SpriteCoordinateScale!=1 || !source.Width || !source.Height
+			|| source.Pixels.size()!=(size_t)source.Width*source.Height || source.SnesSubOutput.size()!=source.Pixels.size()
+			|| (!source.SnesBackgrounds.empty() && source.SnesBackgrounds.size()!=source.Pixels.size())) { return false; }
+		for(const auto& row : source.DecodedRows) { if(row.SnesField || row.SnesRowStep!=1) { return false; } }
+		for(size_t i=0;i<source.SnesSubOutput.size();i++) {
+			const auto& phase=source.SnesSubOutput[i]; int x=(int)(i%source.Width);
+			if(phase.Captured && (phase.MathControlX!=(x ? x-1 : 0) || phase.SecondarySampleX!=(x ? x-1 : -1))) { return false; }
+		}
+		return true;
+	}
+	inline bool ExpandWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output,bool retainHiresMath=false)
 	{
 		if(output.Width != source.Width * 2 || output.Height != source.Height * 2
-			|| output.Pixels.size() != source.Pixels.size() * 4 || !CanExpandWithoutMath(source)) { return false; }
+			|| output.Pixels.size() != source.Pixels.size() * 4 || !(retainHiresMath ? CanExpandHiresMath(source) : CanExpandWithoutMath(source))) { return false; }
 		output.Reset(); output.SnesColorEffects = true; output.SpriteCoordinateScale = 2;
 		output.FrameNumber = source.FrameNumber; output.DecodedRows = source.DecodedRows;
 		output.MemorySnapshot = source.MemorySnapshot; output.AnimationTiming = source.AnimationTiming;
@@ -91,9 +154,23 @@ namespace MetaSnesCapture
 	// Prepare one woven field. The other field intentionally has no replacement
 	// eligibility: runtime integration must combine it with its own capture and
 	// recognition data, rather than repeat the current field's sprite pose.
-	inline bool MapFieldWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output, bool oddField)
+	// Legacy helper names default to strict math-free mapping. Detailed math
+	// callers retain the logical sources alongside the projected output.
+	inline bool RequiresHiresMathSource(const MetaSpriteFrame& source) { return !CanExpandWithoutMath(source) && CanExpandHiresMath(source); }
+	inline bool CanUseHiresMathSource(const MetaSpriteFrame& source)
 	{
-		if(!ExpandWithoutMath(source, output)) { return false; }
+		if(CanExpandHiresMath(source)) { return true; }
+		if(!CanExpandMainWithMath(source)) { return false; }
+		for(const auto& row : source.DecodedRows) { if(row.SnesField || row.SnesRowStep!=1) { return false; } } return true;
+	}
+	inline bool ExpandSupportedMath(const MetaSpriteFrame& source,MetaSpriteFrame& output,bool mainMath,bool hiresMath)
+	{
+		if(hiresMath && RequiresHiresMathSource(source)) { return ExpandWithoutMath(source,output,true); }
+		return mainMath && CanExpandMainWithMath(source) ? ExpandMainWithMath(source,output) : ExpandWithoutMath(source,output);
+	}
+	inline bool MapFieldWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output, bool oddField, bool allowMainMath=false,bool allowHiresMath=false)
+	{
+		if(!ExpandSupportedMath(source,output,allowMainMath,allowHiresMath)) { return false; }
 		for(uint32_t y = 0; y < source.Height; y++) {
 			uint32_t inactiveRow = y * 2 + (oddField ? 0 : 1);
 			for(uint32_t x = 0; x < output.Width; x++) {
@@ -105,9 +182,9 @@ namespace MetaSnesCapture
 		return true;
 	}
 
-	inline bool MapBobWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output, bool oddField, uint32_t firstPictureRow)
+	inline bool MapBobWithoutMath(const MetaSpriteFrame& source, MetaSpriteFrame& output, bool oddField, uint32_t firstPictureRow, bool allowMainMath=false,bool allowHiresMath=false)
 	{
-		if(firstPictureRow >= source.Height || !ExpandWithoutMath(source, output)) { return false; }
+		if(firstPictureRow >= source.Height || !ExpandSupportedMath(source,output,allowMainMath,allowHiresMath)) { return false; }
 		if(!oddField) { return true; }
 		output.SnesOutputOffsetY = 1;
 		for(uint32_t y = output.Height - 1; y > 0; y--) { for(uint32_t x = 0; x < output.Width; x++) {
@@ -126,9 +203,11 @@ namespace MetaSnesCapture
 		return true;
 	}
 
-	inline bool WeaveFieldsWithoutMath(const MetaSpriteFrame& even, const MetaSpriteFrame& odd, MetaSpriteFrame& output)
+	inline bool WeaveFieldsWithoutMath(const MetaSpriteFrame& even, const MetaSpriteFrame& odd, MetaSpriteFrame& output, bool allowMainMath=false,bool allowHiresMath=false)
 	{
-		if(even.Width != odd.Width || even.Height != odd.Height || !CanExpandWithoutMath(even) || !CanExpandWithoutMath(odd)) { return false; }
+		auto canExpand=[&](const MetaSpriteFrame& field) { return (allowHiresMath && CanExpandHiresMath(field)) || (allowMainMath && CanExpandMainWithMath(field)) || CanExpandWithoutMath(field); };
+		if(even.Width != odd.Width || even.Height != odd.Height || !canExpand(even) || !canExpand(odd)) { return false; }
+		if(allowHiresMath && (RequiresHiresMathSource(even) || RequiresHiresMathSource(odd)) && (!CanUseHiresMathSource(even) || !CanUseHiresMathSource(odd))) { return false; }
 		// Each input must contain untagged SNES OAM IDs. Reject an already
 		// woven capture before changing output, rather than aliasing its fields.
 		for(const auto* field : {&even, &odd}) {
@@ -140,7 +219,8 @@ namespace MetaSnesCapture
 			}
 		}
 		MetaSpriteFrame oddOutput(output.Width, output.Height);
-		if(!ExpandWithoutMath(even, output) || !ExpandWithoutMath(odd, oddOutput)) { return false; }
+		auto expand=[&](const MetaSpriteFrame& field,MetaSpriteFrame& target) { return ExpandSupportedMath(field,target,allowMainMath,allowHiresMath); };
+		if(!expand(even, output) || !expand(odd, oddOutput)) { return false; }
 		if(!oddOutput.SnesBackgrounds.empty() && output.SnesBackgrounds.empty()) { output.SnesBackgrounds.resize(output.Pixels.size()); }
 		for(uint32_t y = 0; y < output.Height; y++) { for(uint32_t x = 0; x < output.Width; x++) {
 			size_t index = (size_t)y * output.Width + x;

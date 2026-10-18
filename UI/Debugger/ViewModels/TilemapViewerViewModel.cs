@@ -29,6 +29,40 @@ namespace Mesen.Debugger.ViewModels
 
 		public TilemapViewerConfig Config { get; }
 		public MetaBackgroundEditorViewModel BackgroundEditor { get; }
+		public TextReplacementViewModel CreateTextReplacementEditor()
+		{
+			lock(_updateLock) {
+				string hash=EmuApi.GetRomHash(HashType.Sha1);
+				CpuType cpu=CpuType;
+				if(string.IsNullOrWhiteSpace(hash)) { throw new InvalidOperationException("Load a game before editing text replacements."); }
+				var tile=GetSelectedTileInfo();
+				if(GetBackgroundImportLayer().Layer is not int layer) { throw new InvalidOperationException("Select a hardware background tilemap before opening text replacements."); }
+				var editor = new TextReplacementViewModel(MetaSpriteRuntimeLoader.GetPackPath(hash,cpu),hash,cpu.ToString(),BackgroundEditor.HardwareLayerNames,layer,
+					tile?.TileIndex ?? -1,tile?.TileAddress ?? -1,tile?.PaletteIndex ?? -1,
+					() => CpuType==cpu && EmuApi.GetRomHash(HashType.Sha1)==hash,
+					pack => MetaSpriteRuntimeLoader.Apply(pack,MetaSpriteRuntimeLoader.GetPackPath(hash,cpu)));
+				if(_data.PpuState!=null && _data.PpuToolsState!=null) {
+					editor.SetSourcePreview(CaptureBackgroundPngSnapshot(),SelectionRect);
+					var sourceTiles=new System.Collections.Generic.Dictionary<(int X,int Y),TextReplacementViewModel.SourceTile>();
+					var options=GetOptions(SelectedTab);
+					for(int y=0;y<editor.SourceHeight;y+=8) { for(int x=0;x<editor.SourceWidth;x+=8) {
+						var info=DebugApi.GetTilemapTileInfo((uint)x,(uint)y,cpu,options,_data.Vram,_data.PpuState,_data.PpuToolsState);
+						if(info is {} source && source.TileIndex>=0 && source.TileAddress>=0) {
+							uint index=(uint)source.TileIndex,address=(uint)source.TileAddress;
+							if(cpu==CpuType.Snes && source.TileCount>1) {
+								int cx=source.Width>8 ? ((x&8)!=0 ? 1 : 0) : 0,cy=source.Height>8 ? ((y&8)!=0 ? 1 : 0) : 0;
+								if(source.Width>8 && source.HorizontalMirroring==NullableBoolean.True) { cx^=1; }
+								if(source.Height>8 && source.VerticalMirroring==NullableBoolean.True) { cy^=1; }
+								index=(index+(uint)(cx+cy*16))&0x3FF; address=source.TileAddresses[cy*(source.Width>8 ? 2 : 1)+cx]&0xFFFF;
+							}
+							sourceTiles[(x,y)]=new(index,address,source.PaletteIndex);
+						}
+					} }
+					editor.SetSourceTiles(sourceTiles,(tile?.Column ?? 0)*(tile?.Width ?? 8),(tile?.Row ?? 0)*(tile?.Height ?? 8));
+				}
+				return editor;
+			}
+		}
 		public Bitmap CaptureBackgroundPngSnapshot()
 		{
 			lock(_updateLock) {
@@ -75,9 +109,9 @@ namespace Mesen.Debugger.ViewModels
 			if((CpuType == CpuType.Snes && layer >= 4) || (CpuType == CpuType.Gba && layer >= 4) || (CpuType == CpuType.Sms && layer >= 1)) {
 				return (null, "Select a hardware background tilemap; this tab is a composite or memory-access view.");
 			}
-			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Gameplay currently requires Mode 4 and the default filter."
+			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Supported Mode 4 and legacy graphics/text modes use the default filter."
 				: CpuType == CpuType.Ws ? "Imported for the selected WonderSwan background. Gameplay requires the default filter, frame blending off, and LCD icons off."
-				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer + 1} (native layer {layer}). Artwork follows this layer's scrolling, priority and windows. Gameplay requires the default filter and neutral color settings; supported hires/interlace paths require color math off. OBJ-interlace remains unsupported."
+				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer + 1} (native layer {layer}). Artwork follows scrolling, priority and windows.\nUse the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output.\nHires OBJ-interlace math and interlaced rewind replacements remain pending."
 				: CpuType == CpuType.Gba ? $"Imported as GBA BG{layer}. Gameplay requires the default filter with color adjustment and frame blending disabled."
 				: "Definitions can be authored here; gameplay background integration for this system is pending.");
 		}

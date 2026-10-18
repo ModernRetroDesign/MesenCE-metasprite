@@ -374,6 +374,7 @@ void SmsVdp::LoadBgTilesSms()
 
 			bool vMirror = ntData & 0x400;
 			uint16_t tileIndex = ntData & 0x1FF;
+			if(_metaFrame && _metaFrame->TextLayerMask) { _textFetch={}; _textFetch.Valid=true; _textFetch.TileIndex=tileIndex; _textFetch.GraphicsAddress=tileIndex*32; _textFetch.Palette=(ntData>>11)&1; _textFetch.LocalY=y&7; }
 			uint8_t tileRow = vMirror ? 7 - (y & 0x07) : (y & 0x07);
 
 			_bgPriority |= ((ntData & 0x1000) ? 0xFF : 0) << (16 - _pixelsAvailable);
@@ -421,6 +422,7 @@ void SmsVdp::LoadBgTilesSms()
 				_metaBgSamples[_pixelsAvailable + i] = _metaBgFetch;
 				_metaBgSamples[_pixelsAvailable + i].X = (_metaBgFetch.X + i) & 255;
 				_metaBgSamples[_pixelsAvailable + i].Valid &= !_disableBackground;
+				if(_metaFrame->TextLayerMask) { _textSamples[_pixelsAvailable+i]=_textFetch; _textSamples[_pixelsAvailable+i].LocalX=uint8_t(i); }
 			}
 			_pixelsAvailable += 8;
 			break;
@@ -597,6 +599,7 @@ void SmsVdp::DrawPixel()
 	_bgShifters[0] <<= 1;
 	if(_metaFrame) {
 		for(int i = 0; i < 23; i++) { _metaBgSamples[i] = _metaBgSamples[i + 1]; }
+		if(_metaFrame->TextLayerMask) { for(int i=0;i<23;i++) { _textSamples[i]=_textSamples[i+1]; } _textSamples[23]={}; }
 		_metaBgSamples[23].Valid = false;
 	}
 	_bgShifters[1] <<= 1;
@@ -682,6 +685,7 @@ void SmsVdp::ProcessEndOfScanline()
 	} else if(_state.Scanline >= _scanlineCount) {
 		_state.Scanline = 0;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 240) : nullptr;
+		if(_metaFrame) { _metaFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask(); }
 	if(_metaFrame) { _metaFrame->SmsCapture = true; }
 		_state.VerticalScrollLatch = _state.VerticalScroll;
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Sms);
@@ -1267,6 +1271,10 @@ uint16_t SmsVdp::GetPixelColor()
 		pixel.NativeBackdropColor = _state.UseMode4 ? _internalPaletteRam[0x10 | _state.BackgroundColorIndex] : _activeSgPalette[_state.BackgroundColorIndex]; pixel.NativeBackdropCaptured = true;
 		pixel.BackgroundColorIndex = color;
 		pixel.BackgroundSample = _metaBgSamples[0];
+		if(_state.UseMode4 && _metaFrame->TextLayerMask) {
+			auto text=_textSamples[0]; for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=_internalPaletteRam[text.Palette*16+ink]; }
+			_metaFrame->CaptureText(0,xPos,_state.Scanline+GetViewportYOffset(),text,pixel.BackgroundSample);
+		}
 		pixel.BackgroundOverlayOccludesClasses = highPriority ? 1 : 0;
 		pixel.VisibleSprite = spriteDrawn && !(highPriority && color != 0) && !_disableSprites ? visibleSprite : -1;
 		pixel.ReplacementEligibleSprites = !(highPriority && color != 0) && !_disableSprites ? replacementCoverage : 0;

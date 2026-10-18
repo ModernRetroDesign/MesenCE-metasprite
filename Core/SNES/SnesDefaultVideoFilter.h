@@ -32,6 +32,7 @@ public:
 
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
 	OverscanDimensions GetOverscan() override;
+	uint32_t GetNativeColor(uint16_t color) const { return _calculatedPalette[color&0x7FFF]; }
 	bool SupportsMetaSprites() const {
 		return !_forceFixedRes && _colorCorrection == SnesColorCorrectionMode::None
 			&& _videoConfig.Hue == 0 && _videoConfig.Saturation == 0 && _videoConfig.Brightness == 0 && _videoConfig.Contrast == 0;

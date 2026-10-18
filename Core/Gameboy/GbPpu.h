@@ -39,6 +39,7 @@ private:
 	GbPpuFetcher _bgFetcher;
 	MetaBackgroundSample _metaBgFetch;
 	MetaBackgroundSample _metaBgFifo[8] = {};
+	MetaTextPixel _textFetch, _textFifo[8] = {};
 
 	GbPpuFifo _oamFifo;
 	GbPpuFetcher _oamFetcher;

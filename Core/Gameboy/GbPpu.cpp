@@ -503,6 +503,11 @@ void GbPpu::RunDrawCycle()
 				metaPixel->BackgroundSample.ScrollX = _fetchWindow ? metaPixel->BackgroundSample.X - _drawnPixels : _state.ScrollX;
 				metaPixel->BackgroundSample.ScrollY = _fetchWindow ? metaPixel->BackgroundSample.Y - _state.Scanline : _state.ScrollY;
 				metaPixel->BackgroundSample.ScrollWrapX = metaPixel->BackgroundSample.ScrollWrapY = 256;
+				if(_metaSpriteFrame->TextLayerMask) {
+					auto text=_textFifo[_bgFifo.Position];
+					for(int ink=1;ink<=3;ink++) { int pi=_state.CgbEnabled ? text.Palette*4+ink : (_state.BgPalette>>(ink*2))&3; text.InkColors[ink-1]=LcdReadBgPalette(pi)&0x7FFF; }
+					_metaSpriteFrame->CaptureText(metaPixel->BackgroundSample.Layer,_drawnPixels,_state.Scanline,text,metaPixel->BackgroundSample);
+				}
 				metaPixel->BackgroundOverlayOccludesClasses = _state.CgbEnabled && !_state.BgEnabled ? 0 : (entry.Attributes & 0x80) ? 3 : 2;
 				if(_fetchWindow && metaPixel->BackgroundSample.Valid && !_metaSpriteFrame->BackgroundUnderlays.empty()) {
 					// Retain the BG map beneath the window using the registers and VRAM
@@ -663,6 +668,7 @@ void GbPpu::ResetRenderer()
 		_metaSpriteFrame = _metaCaptureRequested && !_gameboy->IsSgb() && !_gameboy->GetLinkedConsole()
 			? _metaFramePool.Acquire(GbConstants::ScreenWidth, GbConstants::ScreenHeight) : nullptr;
 		if(_metaSpriteFrame) { _metaSpriteFrame->GameboyCapture = true; }
+	if(_metaSpriteFrame) { _metaSpriteFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask(); }
 		if(_metaSpriteFrame && _emu->GetVideoDecoder()->HasMetaBackgroundLayers()) {
 			_metaSpriteFrame->BackgroundUnderlays.resize(GbConstants::ScreenWidth * GbConstants::ScreenHeight);
 		}
@@ -785,6 +791,7 @@ void GbPpu::ClockTileFetcher()
 			}
 
 			tileRowAddr |= tileBank;
+			if(_metaSpriteFrame && _metaSpriteFrame->TextLayerMask) { _textFetch={}; _textFetch.Valid=true; _textFetch.TileIndex=_tileIndex; _textFetch.GraphicsAddress=tileRowAddr&~15; _textFetch.Palette=attributes&7; _textFetch.LocalY=yOffset&7; }
 			_bgFetcher.Addr = tileRowAddr;
 			_bgFetcher.Attributes = (attributes & 0xBF);
 			break;
@@ -884,6 +891,7 @@ void GbPpu::PushTileToPixelFifo()
 		_bgFifo.Content[i].Attributes = _bgFetcher.Attributes;
 		_metaBgFifo[i] = _metaBgFetch;
 		_metaBgFifo[i].X = (_metaBgFetch.X + i) & 255;
+		if(_metaSpriteFrame && _metaSpriteFrame->TextLayerMask) { _textFifo[i]=_textFetch; _textFifo[i].LocalX=uint8_t(i); }
 	}
 
 	_fetchColumn = (_fetchColumn + 1) & 0x1F;

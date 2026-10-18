@@ -45,7 +45,7 @@ public:
 	static const MetaBackgroundReplacement* SelectPosition(const MetaSpriteFrame* frame, const std::vector<MetaBackgroundReplacement>* definitions) {
 		if(!frame || !definitions) { return nullptr; }
 		for(const auto& layer : *definitions) {
-			if(!layer.UseWidescreenPosition || !layer.ExtendIntoMargins || !layer.IsValid() || !MetaMemoryCondition::Matches(layer.MemoryConditions, frame->MemorySnapshot)) { continue; }
+			if(!layer.UseWidescreenPosition || !layer.ExtendIntoMargins || !layer.IsValid() || !layer.IsActiveForFrame(*frame)) { continue; }
 			int x, y;
 			if(layer.UseCpuCamera && layer.FollowScroll && (!layer.CameraX.Decode(frame->MemorySnapshot, x) || !layer.CameraY.Decode(frame->MemorySnapshot, y))) { continue; }
 			return &layer;
@@ -63,7 +63,7 @@ public:
 		if(position == 3 && frame && definitions && (options.UseRamBoundaryFlags || options.CameraMin < options.CameraMax)) {
 			for(const auto& layer : *definitions) {
 				if(layer.Id != (int)options.CameraBackgroundId || !layer.ExtendIntoMargins
-					|| !layer.IsValid() || !MetaMemoryCondition::Matches(layer.MemoryConditions, frame->MemorySnapshot)) { continue; }
+					|| !layer.IsValid() || !layer.IsActiveForFrame(*frame)) { continue; }
 				int cameraX, cameraY;
 				bool cameraValid = layer.CameraX.Decode(frame->MemorySnapshot, cameraX) && layer.CameraY.Decode(frame->MemorySnapshot, cameraY);
 				if(options.UseRamBoundaryFlags) {
@@ -137,13 +137,15 @@ public:
 		if(position == 3 && compatible) {
 			for(const auto& layer : *definitions) {
 				if(layer.Id != (int)options.CameraBackgroundId || layer.WrapX || !layer.ExtendIntoMargins || !layer.IsValid()
-					|| !layer.UseCpuCamera || !layer.FollowScroll || !MetaMemoryCondition::Matches(layer.MemoryConditions, frame->MemorySnapshot)) { continue; }
-				int cameraX, cameraY;
-				if(!layer.CameraX.Decode(frame->MemorySnapshot, cameraX) || !layer.CameraY.Decode(frame->MemorySnapshot, cameraY)) { break; }
-				int64_t product = (int64_t)cameraX * layer.ScrollSpeedX;
-				int64_t scroll = product / 1000 - (product % 1000 < 0 ? 1 : 0);
+					|| !layer.UseCpuCamera || !layer.FollowScroll || !layer.IsActiveForFrame(*frame)) { continue; }
+
 				int64_t low = 0, high = extra;
 				for(int y = cropTop; y < cropTop + (int)(height / scale); y++) {
+					const auto& memory=frame->SnesFieldMemoryCaptured ? frame->SnesFieldMemory[y & 1] : frame->MemorySnapshot;
+					if(!layer.IsActive(memory)) { continue; }
+					int cameraX,cameraY; if(!layer.CameraX.Decode(memory,cameraX) || !layer.CameraY.Decode(memory,cameraY)) { continue; }
+					int64_t product=(int64_t)cameraX*layer.ScrollSpeedX;
+					int64_t scroll=product/1000-(product%1000<0 ? 1 : 0);
 					MetaBackgroundSample reference; int referenceX = 0;
 					if(!FindReference(*frame, layer, y, cropLeft, width / scale, reference, referenceX)) { continue; }
 					int pixelScale = std::max(1, (int)reference.PixelScaleX);
@@ -167,7 +169,7 @@ public:
 			|| cropLeft < 0 || cropTop < 0 || cropLeft + width / scale > frame->Width || cropTop + height / scale > frame->Height) { return _output.data(); }
 		MetaBackgroundView layers;
 		for(const auto& layer : *definitions) {
-			if(layer.ExtendIntoMargins && layer.IsValid() && MetaMemoryCondition::Matches(layer.MemoryConditions, frame->MemorySnapshot)) { layers.Layers.push_back(&layer); }
+			if(layer.ExtendIntoMargins && layer.IsActiveForFrame(*frame)) { layers.Layers.push_back(&layer); }
 		}
 		layers.PrepareRasterReferences(*frame);
 		brightness = std::min(100u, brightness);

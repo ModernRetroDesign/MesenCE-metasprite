@@ -23,6 +23,7 @@ protected:
 	MetaSpriteFramePool _metaFramePool;
 	MetaBackgroundSample _metaBackgroundFetch;
 	MetaBackgroundSample _metaBackgroundShift[16] = {};
+	MetaTextPixel _metaTextFetch, _metaTextShift[16] = {};
 	uint8_t _metaBackgroundShiftHead = 0;
 	int16_t _metaSecondarySpriteIds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 	int16_t _metaFetchedSpriteIds[64] = {};

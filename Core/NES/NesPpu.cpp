@@ -696,6 +696,7 @@ template<class T> void NesPpu<T>::LoadTileInfo()
 					MetaBackgroundSample& sample = _metaBackgroundShift[(_metaBackgroundShiftHead + 8 + x) & 15];
 					sample = _metaBackgroundFetch;
 					sample.X += x;
+					if(!_metaFrame->TextPixels.empty()) { auto& text=_metaTextShift[(_metaBackgroundShiftHead+8+x)&15]; text=_metaTextFetch; text.LocalX=uint8_t(x); }
 				}
 			}
 
@@ -713,6 +714,10 @@ template<class T> void NesPpu<T>::LoadTileInfo()
 				_metaBackgroundFetch.Valid = true;
 			}
 			_tile.TileAddr = (tileIndex << 4) | (_videoRamAddr >> 12) | _control.BackgroundPatternAddr;
+			if(_metaFrame && !_metaFrame->TextPixels.empty()) {
+				_metaTextFetch={}; _metaTextFetch.TileIndex=tileIndex; _metaTextFetch.GraphicsAddress=_tile.TileAddr&0x1FF0;
+				_metaTextFetch.LocalY=(_videoRamAddr>>12)&7; _metaTextFetch.Valid=true;
+			}
 			((T*)this)->StoreTileInformation(); //Used by HD packs
 			break;
 		}
@@ -720,6 +725,7 @@ template<class T> void NesPpu<T>::LoadTileInfo()
 		case 3: {
 			uint8_t shift = ((_videoRamAddr >> 4) & 0x04) | (_videoRamAddr & 0x02);
 			_tile.PaletteOffset = ((ReadVram(GetAttributeAddr()) >> shift) & 0x03) << 2;
+			if(_metaFrame && !_metaFrame->TextPixels.empty()) { _metaTextFetch.Palette=_tile.PaletteOffset>>2; }
 			break;
 		}
 
@@ -903,6 +909,10 @@ template<class T> uint8_t NesPpu<T>::GetPixelColor()
 		}
 		if(_cycle > _minimumDrawBgCycle && _emulatorBgEnabled && _prevRenderingEnabled) {
 			captured->BackgroundSample = _metaBackgroundShift[(_metaBackgroundShiftHead + offset) & 15];
+			if(!_metaFrame->TextPixels.empty()) {
+				auto& text=_metaFrame->TextPixels[_scanline*256+_cycle-1]; text=_metaTextShift[(_metaBackgroundShiftHead+offset)&15];
+				for(int ink=0;ink<3;ink++) { text.InkColors[ink]=(_paletteRam[text.Palette*4+ink+1]&(_mask.Grayscale ? 0x30 : 0x3F))|_intensifyColorBits; }
+			}
 			captured->BackgroundOverlayOccludesClasses = 2;
 			captured->BackgroundSample.ScrollX = (captured->BackgroundSample.X - (_cycle - 1) + 512) % 512;
 			captured->BackgroundSample.ScrollY = (captured->BackgroundSample.Y - _scanline + 480) % 480;
@@ -1517,6 +1527,8 @@ template<class T> void NesPpu<T>::ProcessScanlineFirstCycle()
 		_lastUpdatedPixel = -1;
 		_scanline = -1;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 240) : nullptr;
+		if(_metaFrame && _emu->GetVideoDecoder()->HasMetaTextProfiles()) { _metaFrame->TextPixels.resize(256*240); }
+		_metaTextFetch={}; for(auto& text:_metaTextShift) { text={}; }
 
 		//Force prerender scanline sprite fetches to load the dummy $FF tiles (fixes shaking in Ninja Gaiden 3 stage 1 after beating boss)
 		_spriteCount = 0;

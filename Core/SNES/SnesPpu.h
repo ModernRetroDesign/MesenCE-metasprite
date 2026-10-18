@@ -38,6 +38,7 @@ private:
 	MetaBackgroundSample _metaTileSamples[4][33] = {}, _metaMosaicSample[4] = {};
 	MetaBackgroundSample _metaBgMainSample[256] = {}, _metaBgSubSample[256] = {};
 	MetaSnesBackgroundLayer _metaBgLayers[256][4] = {};
+	MetaTextPixel _textTiles[4][33] = {};
 	void CaptureBackgroundPixel(uint8_t x, uint16_t color, uint8_t flags, bool main, uint8_t layer, const MetaBackgroundSample& sample);
 	constexpr static int SpriteLayerIndex = 4;
 	constexpr static int ColorWindowIndex = 5;

@@ -2,6 +2,7 @@
 #include "MetaSpriteFrame.h"
 #include "MetaBackgroundReplacement.h"
 #include "MetaPngAnimation.h"
+#include "MetaTextOverlay.h"
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -76,8 +77,10 @@ class MetaSpriteCompositor
 	std::mutex _lock;
 	std::shared_ptr<const std::vector<MetaSpriteReplacement>> _groups;
 	std::shared_ptr<const std::vector<MetaBackgroundReplacement>> _backgroundLayers;
+	std::shared_ptr<const std::vector<MetaTextReplacement>> _textProfiles=std::make_shared<const std::vector<MetaTextReplacement>>();
 	std::shared_ptr<const std::vector<uint32_t>> _memoryAddresses;
 	MetaBackgroundView _activeBackgrounds;
+	MetaTextOverlay _textOverlay;
 	uint64_t _animationRevision = 0, _capturedAnimationRevision = UINT64_MAX;
 	bool _hasRestartAnimations = false;
 	std::unordered_map<const MetaPngArtworkAnimation*,MetaPngActivationClock> _activationClocks;
@@ -140,9 +143,10 @@ class MetaSpriteCompositor
 		} }
 		frame.AnimationTiming=std::move(timing);
 	}
-	static std::shared_ptr<const std::vector<uint32_t>> CompileMemoryAddresses(const std::vector<MetaSpriteReplacement>& groups, const std::vector<MetaBackgroundReplacement>& backgrounds)
+	static std::shared_ptr<const std::vector<uint32_t>> CompileMemoryAddresses(const std::vector<MetaSpriteReplacement>& groups, const std::vector<MetaBackgroundReplacement>& backgrounds, const std::vector<MetaTextReplacement>& texts = {})
 	{
 		std::vector<uint32_t> addresses;
+		for(const auto& profile:texts) { for(const auto& condition:profile.Conditions) { addresses.push_back(condition.Address); } }
 		for(const auto& group : groups) { for(const auto& condition : group.MemoryConditions) { addresses.push_back(condition.Address); } }
 		for(const auto& group : groups) { for(const auto& alternate : group.AlternateArtwork) {
 			for(const auto& condition : alternate.MemoryConditions) { addresses.push_back(condition.Address); }
@@ -176,7 +180,7 @@ public:
 		bool SnesClip, SnesUseSubscreen, SnesMathEnabled, SnesSubtract, SnesHalf;
 		uint16_t SnesFixedColor;
 		uint8_t Brightness;
-		explicit SnesColorState(const MetaSpritePixel& pixel)
+		explicit SnesColorState(const MetaSpritePixelState& pixel)
 			: SnesClip(pixel.SnesClip), SnesUseSubscreen(pixel.SnesUseSubscreen),
 			SnesMathEnabled(pixel.SnesMathEnabled), SnesSubtract(pixel.SnesSubtract),
 			SnesHalf(pixel.SnesHalf), SnesFixedColor(pixel.SnesFixedColor), Brightness(pixel.Brightness) {}
@@ -213,7 +217,7 @@ public:
 		}
 		return result;
 	}
-	struct SnesResolvedScreen { uint32_t Color; uint8_t Priority; bool Math; };
+	struct SnesResolvedScreen { uint32_t Color; uint8_t Priority; bool Math; bool Artwork=false; };
 	static SnesPreparedScreen PrepareSnesBackgroundScreen(const MetaSnesBackgroundPixel& pixel)
 	{
 		SnesPreparedScreen screen;
@@ -239,7 +243,7 @@ public:
 		return screen;
 	}
 	static SnesResolvedScreen ComposeSnesBackgroundScreen(const SnesPreparedScreen& screen, const MetaBackgroundView& backgrounds,
-		bool mainScreen, int x, int y, int sx, int sy, int scale, bool objectVisible, uint32_t objectColor, uint8_t objectPriority, bool objectMath)
+		bool mainScreen, int x, int y, int sx, int sy, int scale, bool objectVisible, uint32_t objectColor, uint8_t objectPriority, bool objectMath,bool objectArtwork=false)
 	{
 		if(backgrounds.HasSnesIndependentPriority()) {
 			struct Entry { const MetaSnesBackgroundLayer* Source; const MetaBackgroundReplacement* Artwork; uint32_t Color; uint8_t Priority; };
@@ -270,24 +274,25 @@ public:
 			SnesResolvedScreen result {screen.Backdrop, 0, screen.BackdropMath}; bool objectDrawn = false;
 			for(size_t index = 0; index < entries.size(); index++) {
 				const auto& entry = data[index];
-				if(objectVisible && !objectDrawn && objectPriority < entry.Priority) { result = {objectColor, objectPriority, objectMath}; objectDrawn = true; }
+				if(objectVisible && !objectDrawn && objectPriority < entry.Priority) { result = {objectColor, objectPriority, objectMath,objectArtwork}; objectDrawn = true; }
 				const auto& layer = *entry.Source;
 				if(entry.Artwork) {
 					uint32_t artwork;
 					if(backgrounds.Sample(*entry.Artwork, layer.Sample, x, y, sx, sy, scale, artwork, true) && (artwork >> 24)) {
-						result = {CompositeAlpha(artwork, result.Color, artwork >> 24), entry.Priority, layer.Math};
+						result = {CompositeAlpha(artwork, result.Color, artwork >> 24), entry.Priority, layer.Math,true};
 					}
 				} else {
-					bool opaque = layer.Opaque && !backgrounds.HidesNativeLayer(layer.Sample.Layer);
+					bool opaque = layer.Opaque && !backgrounds.HidesNativeLayer(layer.Sample.Layer,y);
 					uint32_t color = opaque ? entry.Color : result.Color;
+					bool artworkUsed=opaque ? false : result.Artwork;
 					for(const auto& background : backgrounds) {
 						uint32_t artwork;
-						if(backgrounds.Sample(background, layer.Sample, x, y, sx, sy, scale, artwork) && (artwork >> 24)) { color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true; }
+						if(backgrounds.Sample(background, layer.Sample, x, y, sx, sy, scale, artwork) && (artwork >> 24)) { color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true; artworkUsed=true; }
 					}
-					if(opaque) { result = {color, entry.Priority, layer.Math}; }
+					if(opaque) { result = {color, entry.Priority, layer.Math,artworkUsed}; }
 				}
 			}
-			if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath}; }
+			if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath,objectArtwork}; }
 			return result;
 		}
 		// Retain enabled layers even at transparent native texels. PNG alpha overlays
@@ -295,7 +300,7 @@ public:
 		// Each alpha outcome supplies an opaque OBJ color here. Lower BG layers
 		// cannot change that outcome, so do not sample their PNGs or sort them.
 		uint8_t highestPriority = mainScreen ? screen.HighestMainPriority : screen.HighestSubPriority;
-		if(objectVisible && objectPriority >= highestPriority) { return {objectColor, objectPriority, objectMath}; }
+		if(objectVisible && objectPriority >= highestPriority) { return {objectColor, objectPriority, objectMath,objectArtwork}; }
 		SnesResolvedScreen result {screen.Backdrop, 0, screen.BackdropMath};
 		if(highestPriority == 0) { return result; }
 		bool objectDrawn = false;
@@ -303,19 +308,20 @@ public:
 			const auto& layer = *screen.Layers[i].Source;
 			if(!(mainScreen ? layer.Main : layer.Sub)) { continue; }
 			if(objectVisible && !objectDrawn && objectPriority < layer.Priority) {
-				result = {objectColor, objectPriority, objectMath}; objectDrawn = true;
+				result = {objectColor, objectPriority, objectMath,objectArtwork}; objectDrawn = true;
 			}
-			bool opaque = layer.Opaque && !backgrounds.HidesNativeLayer(layer.Sample.Layer);
+			bool opaque = layer.Opaque && !backgrounds.HidesNativeLayer(layer.Sample.Layer,y);
 			uint32_t color = opaque ? screen.Layers[i].Color : result.Color;
+			bool artworkUsed=opaque ? false : result.Artwork;
 			for(const auto& background : backgrounds) {
 				uint32_t artwork;
 				if(backgrounds.Sample(background, layer.Sample, x, y, sx, sy, scale, artwork) && (artwork >> 24)) {
-					color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true;
+					color = CompositeAlpha(artwork, color, artwork >> 24); opaque = true; artworkUsed=true;
 				}
 			}
-			if(opaque) { result = {color, layer.Priority, layer.Math}; }
+			if(opaque) { result = {color, layer.Priority, layer.Math,artworkUsed}; }
 		}
-		if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath}; }
+		if(objectVisible && !objectDrawn) { result = {objectColor, objectPriority, objectMath,objectArtwork}; }
 		return result;
 	}
 	// Apply captured GBA effects to an opaque artwork sample. PNG alpha is composed
@@ -385,7 +391,7 @@ public:
 				if(background.CompositionPosition != 2 || !backgrounds.Sample(background, pixel.GbaBackgroundSamples[i], x, y, sx, sy, scale, artwork, true)) { continue; }
 				storage.push_back({i, background.GbaPriority, artwork, false, true});
 			}
-			uint32_t color = pixel.GbaBackgroundLayers[i].Opaque && !backgrounds.HidesNativeLayer(i) ? Rgb555(pixel.GbaBackgroundLayers[i].Color) : 0;
+			uint32_t color = pixel.GbaBackgroundLayers[i].Opaque && !backgrounds.HidesNativeLayer(i,y) ? Rgb555(pixel.GbaBackgroundLayers[i].Color) : 0;
 			bool artworkUsed = false;
 			for(const auto& background : backgrounds) {
 				uint32_t artwork;
@@ -550,7 +556,7 @@ public:
 		auto snapshot = std::make_shared<const std::vector<MetaSpriteReplacement>>(std::move(groups));
 		std::lock_guard<std::mutex> lock(_lock);
 		static const std::vector<MetaBackgroundReplacement> emptyBackgrounds;
-		auto addresses = CompileMemoryAddresses(*snapshot, _backgroundLayers ? *_backgroundLayers : emptyBackgrounds);
+		auto addresses = CompileMemoryAddresses(*snapshot, _backgroundLayers ? *_backgroundLayers : emptyBackgrounds, *_textProfiles);
 		_groups = std::move(snapshot);
 		_memoryAddresses = std::move(addresses);
 		_animationRevision++;
@@ -561,20 +567,31 @@ public:
 		std::lock_guard<std::mutex> lock(_lock);
 		_backgroundLayers = std::move(snapshot);
 		static const std::vector<MetaSpriteReplacement> emptyGroups;
-		_memoryAddresses = CompileMemoryAddresses(_groups ? *_groups : emptyGroups, *_backgroundLayers);
+		_memoryAddresses = CompileMemoryAddresses(_groups ? *_groups : emptyGroups, *_backgroundLayers, *_textProfiles);
 		_animationRevision++;
 	}
 	void SetReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers)
 	{
-		auto addresses = CompileMemoryAddresses(groups, layers);
 		auto sprites = std::make_shared<const std::vector<MetaSpriteReplacement>>(std::move(groups));
 		auto backgrounds = std::make_shared<const std::vector<MetaBackgroundReplacement>>(std::move(layers));
 		std::lock_guard<std::mutex> lock(_lock);
+		auto addresses=CompileMemoryAddresses(*sprites,*backgrounds,*_textProfiles);
 		_groups = std::move(sprites);
 		_backgroundLayers = std::move(backgrounds);
 		_memoryAddresses = std::move(addresses);
 		_animationRevision++;
 	}
+	void SetAllReplacements(std::vector<MetaSpriteReplacement> groups,std::vector<MetaBackgroundReplacement> layers,std::vector<MetaTextReplacement> texts)
+	{
+		auto addresses=CompileMemoryAddresses(groups,layers,texts);
+		auto sprites=std::make_shared<const std::vector<MetaSpriteReplacement>>(std::move(groups));
+		auto backgrounds=std::make_shared<const std::vector<MetaBackgroundReplacement>>(std::move(layers));
+		auto profiles=std::make_shared<const std::vector<MetaTextReplacement>>(std::move(texts));
+		std::lock_guard<std::mutex> lock(_lock);
+		_groups=std::move(sprites); _backgroundLayers=std::move(backgrounds); _textProfiles=std::move(profiles); _memoryAddresses=std::move(addresses); _animationRevision++;
+	}
+	bool HasTextProfiles() { std::lock_guard<std::mutex> lock(_lock); return !_textProfiles->empty(); }
+	uint8_t TextLayerMask() { std::lock_guard<std::mutex> lock(_lock); uint8_t mask=0; for(const auto& p:*_textProfiles) { mask|=1<<p.Layer; } return mask; }
 	// Called on the emulation thread before publishing the captured frame.
 	// Failed reads stay absent so conditions cannot match stale memory.
 	void CaptureMemorySnapshot(const MetaSpriteFrame& frame, const std::function<bool(uint32_t, uint8_t&)>& readByte, bool timing = true)
@@ -632,7 +649,7 @@ public:
 	bool HasReplacements()
 	{
 		std::lock_guard<std::mutex> lock(_lock);
-		return (_groups && !_groups->empty()) || (_backgroundLayers && !_backgroundLayers->empty());
+		return (_groups && !_groups->empty()) || (_backgroundLayers && !_backgroundLayers->empty()) || !_textProfiles->empty();
 	}
 	bool HasBackgroundLayers()
 	{
@@ -678,15 +695,31 @@ public:
 		int cropLeft = 0, int cropTop = 0, std::function<uint32_t(uint16_t)> backgroundColor = {},
 		const std::vector<uint32_t>* backgroundFallback = nullptr)
 	{
-		_outputScale = 1;
 		std::shared_ptr<const std::vector<MetaSpriteReplacement>> groups;
 		std::shared_ptr<const std::vector<MetaBackgroundReplacement>> backgrounds;
-		{ std::lock_guard<std::mutex> lock(_lock); groups = _groups; backgrounds = _backgroundLayers; }
+		std::shared_ptr<const std::vector<MetaTextReplacement>> profiles;
+		{ std::lock_guard<std::mutex> lock(_lock); groups=_groups; backgrounds=_backgroundLayers; profiles=_textProfiles; }
+		auto* output=ApplyNative(original,width,height,frame,cropLeft,cropTop,backgroundColor,backgroundFallback,groups,backgrounds);
+		return _textOverlay.Apply(output,width,height,frame,cropLeft,cropTop,_outputScale,*profiles,backgroundColor);
+	}
+	uint32_t* ApplyNative(uint32_t* original, uint32_t width, uint32_t height, const MetaSpriteFrame& frame,
+		int cropLeft,int cropTop,std::function<uint32_t(uint16_t)> backgroundColor,const std::vector<uint32_t>* backgroundFallback,
+		std::shared_ptr<const std::vector<MetaSpriteReplacement>> groups,std::shared_ptr<const std::vector<MetaBackgroundReplacement>> backgrounds)
+	{
+		_outputScale = 1;
+		if(frame.SnesHiresOddSource && (!frame.SnesHiresSource || !frame.SnesFieldMemoryCaptured)) { return original; }
+		if(frame.SnesHiresSource) {
+			for(const auto* reference : {frame.SnesHiresSource.get(),frame.SnesHiresOddSource.get()}) {
+			if(!reference) { continue; } const auto& source=*reference;
+			if(&source==&frame || !source.Width || !source.Height || source.SpriteCoordinateScale!=1 || source.Width*2!=frame.Width || source.Height*2!=frame.Height
+				|| !source.SnesColorEffects || source.Pixels.size()!=(size_t)source.Width*source.Height || (!source.SnesSubOutput.empty() && source.SnesSubOutput.size()!=source.Pixels.size())
+				|| (!source.SnesBackgrounds.empty() && source.SnesBackgrounds.size()!=source.Pixels.size())) { return original; }
+			for(size_t i=0;i<source.SnesSubOutput.size();i++) { const auto& phase=source.SnesSubOutput[i]; int x=(int)(i%source.Width); if(phase.Captured && (phase.MathControlX!=(x ? x-1 : 0) || phase.SecondarySampleX!=(x ? x-1 : -1))) { return original; } }
+			}
+		}
 		_activeBackgrounds.Layers.clear();
 		if(backgrounds) { for(const auto& layer : *backgrounds) {
-			int cameraX, cameraY;
-			bool cameraValid = !layer.UseCpuCamera || !layer.FollowScroll || (layer.CameraX.Decode(frame.MemorySnapshot, cameraX) && layer.CameraY.Decode(frame.MemorySnapshot, cameraY));
-			if(layer.IsValid() && cameraValid && MetaMemoryCondition::Matches(layer.MemoryConditions, frame.MemorySnapshot)) { _activeBackgrounds.Layers.push_back(&layer); }
+			if(layer.IsActiveForFrame(frame)) { _activeBackgrounds.Layers.push_back(&layer); }
 		} }
 		bool applyForegroundBackgrounds = std::any_of(_activeBackgrounds.Layers.begin(), _activeBackgrounds.Layers.end(), [](const auto* layer) { return layer->CompositionPosition == 1; });
 		bool wsNeedsStages = frame.WsCapture && ((groups && !groups->empty())
@@ -972,7 +1005,7 @@ public:
 				}
 			}
 		}
-		if(stagedEffects) {
+		if(stagedEffects && !frame.SnesHiresSource) {
 			bool prepareSnesLayers = applySnesBackgrounds && frame.SnesBackgrounds.size() == frame.Pixels.size();
 			if(prepareSnesLayers) { _snesBackgroundRow.resize(width); }
 			auto* snesBackgroundRow = _snesBackgroundRow.data();
@@ -1140,7 +1173,7 @@ public:
 				outputPixels[(size_t)y * outputWidth + x] = ComposeGbaLayers(pixel, _activeBackgrounds, px, py, x % _outputScale, y % _outputScale, _outputScale, false, 0, 0, false, false, &objects);
 			} }
 		}
-		if(!snesCanvases.empty()) {
+		if(!snesCanvases.empty() && !frame.SnesHiresSource) {
 			struct ObjectSample { uint32_t Color; uint16_t Order; uint8_t Priority; bool Math; };
 			struct Outcome { SnesResolvedScreen Screen; double Weight; };
 			std::vector<ObjectSample> objects;
@@ -1244,6 +1277,108 @@ public:
 				outputPixels[(size_t)y * outputWidth + x] = result;
 			} }
 		}
+		if(frame.SnesHiresSource) {
+			const MetaSpriteFrame* source=frame.SnesHiresSource.get(); int fieldTag=0,idOffset=0;
+			struct PhaseObject { uint32_t Color; uint16_t Order; uint8_t Priority; bool Math,Artwork; };
+			struct PhaseOutcome { SnesResolvedScreen Screen; double Weight; };
+			std::vector<PhaseObject> objects;
+			std::vector<PhaseOutcome> primary,secondary,controlMain,controlSub;
+			auto replaced=[&](int id) { for(size_t i=0;i<candidates.size();i++) { if(consumed[i] && candidates[i].HardwareSprite==id) { return true; } } return false; };
+			auto readPlane=[&](int nx,int ny,bool mainPlane,int ordinaryPhase,int dy,uint32_t sx,uint32_t sy,std::vector<PhaseOutcome>& outcomes) {
+				const auto& raw=*source;
+				outcomes.clear(); const auto& pixel=raw.Pixels[(size_t)ny*raw.Width+nx];
+				int phase=!raw.SnesSubOutput.empty() && raw.SnesSubOutput[(size_t)ny*raw.Width+nx].Captured ? (mainPlane ? 1 : 0) : ordinaryPhase;
+				int px=nx*2+phase,py=ny*2+dy; bool changed=false; objects.clear();
+				auto order=[&](int id) { return (uint16_t)(128-((id-pixel.SnesFirstObject+128)&127)); };
+				if(mainPlane ? pixel.SnesObjectsMain : pixel.SnesObjectsSub) {
+					for(const auto& canvas : snesCanvases) {
+						if(candidates[canvas.Members.front()].SnesField!=fieldTag) { continue; }
+						const auto& image=canvas.Image;
+						int64_t ax=((int64_t)(px-canvas.Left*2)*_outputScale+sx)*image.ArtworkScale/(2*_outputScale);
+						int64_t ay=((int64_t)(py-canvas.Top*2)*_outputScale+sy)*image.ArtworkScale/(2*_outputScale);
+						if(px<canvas.Left*2 || py<canvas.Top*2 || ax<0 || ay<0 || ax>=image.ArtworkWidth || ay>=image.ArtworkHeight) { continue; }
+						auto distance=[&](size_t index) { const auto& m=candidates[index]; int64_t dx=std::max({(int64_t)m.X-nx,(int64_t)nx-m.X-m.Width+1,int64_t(0)}),ddy=std::max({(int64_t)m.Y-ny,(int64_t)ny-m.Y-m.Height+1,int64_t(0)}); return dx*dx+ddy*ddy; };
+						auto member=*std::min_element(canvas.Members.begin(),canvas.Members.end(),[&](size_t a,size_t b) { auto da=distance(a),db=distance(b); return da!=db ? da<db : order(candidates[a].HardwareSprite)>order(candidates[b].HardwareSprite); });
+						const auto& m=candidates[member]; if(m.SnesPriorityCode>3) { continue; } objects.push_back({image.Artwork[ay*image.ArtworkWidth+ax],order(m.HardwareSprite),pixel.SnesObjectPriorities[m.SnesPriorityCode],pixel.SnesObjectMath && m.SnesPalette>3,true}); changed=true;
+					}
+					bool sampled=false;
+					for(const auto& object : pixel.SnesNativeObjects) {
+						if(object.Sprite<0 || object.PriorityCode>3 || object.Palette>7) { continue; }
+						sampled|=object.Sprite==pixel.SnesObjectSprite;
+						if(replaced(object.Sprite+idOffset)) { changed=true; continue; }
+						objects.push_back({Rgb555(object.Color),order(object.Sprite),pixel.SnesObjectPriorities[object.PriorityCode],pixel.SnesObjectMath && object.Palette>3,false});
+					}
+					if(!sampled && pixel.SnesObjectSprite>=0 && pixel.SnesObjectPriorityCode<=3) {
+						if(replaced(pixel.SnesObjectSprite+idOffset)) { changed=true; }
+						else { objects.push_back({Rgb555(pixel.SnesObjectColor),order(pixel.SnesObjectSprite),pixel.SnesObjectPriorities[pixel.SnesObjectPriorityCode],pixel.SnesObjectMath && pixel.SnesObjectPalette>3,false}); }
+					}
+				}
+				std::stable_sort(objects.begin(),objects.end(),[](const auto& a,const auto& b) { return a.Order>b.Order; });
+				MetaSnesBackgroundPixel mapped; SnesPreparedScreen prepared; bool backgroundsCaptured=false;
+				if(raw.SnesBackgrounds.size()==raw.Pixels.size()) {
+					mapped=raw.SnesBackgrounds[(size_t)ny*raw.Width+nx]; backgroundsCaptured=mapped.Captured;
+					mapped.MainPriority=mainPlane ? mapped.MainPriority : mapped.SubPriority;
+					for(auto& layer : mapped.Layers) {
+						bool separate=layer.SeparateSub,enabled=mainPlane ? layer.Main : layer.Sub;
+						if(!mainPlane && separate) { layer.Sample=layer.SubSample; layer.Color=layer.SubColor; layer.Opaque=layer.SubOpaque; }
+						layer.Main=enabled; layer.Sub=false; layer.SeparateSub=false;
+						layer.Sample.PixelScaleX=separate ? 1 : 2; layer.Sample.PixelScaleY=2; layer.Sample.PixelOffsetX=separate ? 0 : (uint8_t)phase; layer.Sample.PixelOffsetY=(uint8_t)dy;
+						if(!enabled || !layer.Sample.Valid) { continue; }
+						changed|=_activeBackgrounds.HidesNativeLayer(layer.Sample.Layer,py);
+						for(const auto& png : _activeBackgrounds) { uint32_t color; if(png.Layer==layer.Sample.Layer && png.CompositionPosition!=1 && _activeBackgrounds.Sample(png,layer.Sample,px,py,sx,sy,_outputScale,color,png.CompositionPosition==3)) { changed=true; } }
+					}
+					prepared=PrepareSnesBackgroundScreen(mapped);
+				}
+				auto resolve=[&](const PhaseObject* object) {
+					if(backgroundsCaptured) { return ComposeSnesBackgroundScreen(prepared,_activeBackgrounds,true,px,py,sx,sy,_outputScale,object!=nullptr,object ? object->Color|0xFF000000 : 0,object ? object->Priority : 0,object && object->Math,object && object->Artwork); }
+					SnesResolvedScreen fallback {Rgb555(mainPlane ? pixel.SnesFallbackMainColor : pixel.SnesFallbackSubColor),(uint8_t)(mainPlane ? pixel.SnesFallbackMainFlags&15 : pixel.SnesFallbackSubPriority),mainPlane && (pixel.SnesFallbackMainFlags&0x80)};
+					return object && object->Priority>fallback.Priority ? SnesResolvedScreen {object->Color|0xFF000000,object->Priority,object->Math,object->Artwork} : fallback;
+				};
+				double remainder=1;
+				for(const auto& object : objects) { uint32_t alpha=object.Color>>24; if(alpha) { outcomes.push_back({resolve(&object),remainder*alpha/255.0}); } remainder*=(255-alpha)/255.0; if(!remainder) { break; } }
+				if(remainder>0) { outcomes.push_back({resolve(nullptr),remainder}); } return changed;
+			};
+			auto applyMath=[&](uint32_t main,uint32_t other,const SnesColorState& state,bool artwork) {
+				if(artwork) { return ApplySnesColorEffect(main,other,state); }
+				uint32_t result=0xFF000000,operand=state.SnesUseSubscreen ? other : Rgb555(state.SnesFixedColor);
+				for(int shift : {0,8,16}) { int c=state.SnesClip ? 0 : ((main>>shift)&255)>>3; if(state.SnesMathEnabled) { int b=((operand>>shift)&255)>>3; c=state.SnesSubtract ? std::max(0,c-b) : c+b; if(state.SnesHalf) { c/=2; } c=std::min(31,c); } c=c*std::min<int>(15,state.Brightness)/15; result|=(uint32_t)((c<<3)|(c>>2))<<shift; } return result;
+			};
+			for(uint32_t y=0;y<height*_outputScale;y++) { for(uint32_t x=0;x<outputWidth;x++) {
+				int px=(int)(x/_outputScale)+cropLeft,py=(int)(y/_outputScale)+cropTop;
+				const auto& projected=framePixels[(size_t)py*frame.Width+px]; if(!projected.SnesFallbackCaptured) { continue; }
+				source=frame.SnesHiresOddSource && (py&1) ? frame.SnesHiresOddSource.get() : frame.SnesHiresSource.get();
+				fieldTag=frame.SnesHiresOddSource ? ((py&1) ? 2 : 1) : 0; idOffset=fieldTag==2 ? 128 : 0;
+				const auto& raw=*source;
+				int sourceY=py+projected.SnesOutputSampleOffsetY-frame.SnesOutputOffsetY;
+				if(sourceY<0) { continue; } int nx=px/2,ny=sourceY/2,dy=sourceY&1;
+				if(nx>=(int)raw.Width || ny>=(int)raw.Height || !raw.Pixels[(size_t)ny*raw.Width+nx].SnesFallbackCaptured) { continue; }
+				MetaSnesSubOutputPhase ordinary; const auto& phase=raw.SnesSubOutput.empty() ? ordinary : raw.SnesSubOutput[(size_t)ny*raw.Width+nx]; bool subPhase=!(px&1) && phase.Captured;
+				uint32_t sx=x%_outputScale,sy=y%_outputScale; bool changed=readPlane(nx,ny,!subPhase,px&1,dy,sx,sy,primary);
+				if(subPhase) {
+					changed|=readPlane(phase.MathControlX,ny,true,1,dy,sx,sy,controlMain);
+					changed|=readPlane(phase.MathControlX,ny,false,0,dy,sx,sy,controlSub);
+				} else { changed|=readPlane(nx,ny,false,px&1,dy,sx,sy,secondary); }
+				if(!changed) { continue; } double channels[3]={};
+				auto compose=[&](const PhaseOutcome& a,const PhaseOutcome& b,const PhaseOutcome& control,double weight) {
+					SnesColorState state(subPhase ? static_cast<const MetaSpritePixelState&>(phase) : static_cast<const MetaSpritePixelState&>(raw.Pixels[(size_t)ny*raw.Width+nx]));
+					state.SnesMathEnabled=(subPhase ? b.Screen.Math : a.Screen.Math) && (subPhase ? phase.SnesWindowMathAllowed : raw.Pixels[(size_t)ny*raw.Width+nx].SnesWindowMathAllowed);
+					bool half=subPhase ? phase.SnesHalfRequested : raw.Pixels[(size_t)ny*raw.Width+nx].SnesHalfRequested;
+					bool addSub=subPhase ? phase.SnesAddSubscreen : raw.Pixels[(size_t)ny*raw.Width+nx].SnesAddSubscreen;
+					state.SnesUseSubscreen=addSub && control.Screen.Priority>0;
+					state.SnesHalf=half && (!addSub || state.SnesUseSubscreen);
+					uint32_t operand=subPhase && phase.SecondarySampleX<0 ? 0xFF000000 : b.Screen.Color;
+					uint32_t color=applyMath(a.Screen.Color,operand,state,a.Screen.Artwork || (state.SnesUseSubscreen && !(subPhase && phase.SecondarySampleX<0) && b.Screen.Artwork));
+					for(int c=0;c<3;c++) { channels[c]+=((color>>(c*8))&255)*weight; }
+				};
+				if(subPhase && phase.SecondarySampleX<0 && phase.MathControlX==nx) {
+					// At the left edge, primary and priority control are the same
+					// subscreen outcome, not independent alpha draws.
+					for(const auto& a : primary) { for(const auto& b : controlMain) { compose(a,b,a,a.Weight*b.Weight); } }
+				} else if(subPhase) { for(const auto& a : primary) { for(const auto& b : controlMain) { for(const auto& c : controlSub) { compose(a,b,c,a.Weight*b.Weight*c.Weight); } } } }
+				else { for(const auto& a : primary) { for(const auto& b : secondary) { compose(a,b,b,a.Weight*b.Weight); } } }
+				uint32_t color=0xFF000000; for(int c=0;c<3;c++) { color|=(uint32_t)std::clamp((int)(channels[c]+0.5),0,255)<<(c*8); } outputPixels[(size_t)y*outputWidth+x]=color;
+			} }
+		}
 		// Source alpha must not select the winner between replacement canvases.
 		// Only unreplaced hardware sprites retain their captured occlusion.
 		std::vector<int> replacedOrders;
@@ -1279,12 +1414,12 @@ public:
 			for(int y = yBegin; y < yEnd; y++) { for(int x = xBegin; x < xEnd; x++) {
 				int px = x + cropLeft, py = y + cropTop;
 				const auto& pixel = framePixels[py * frame.Width + px];
-				bool hiddenBackground = pixel.BackgroundSample.Valid && _activeBackgrounds.HidesNativeLayer(pixel.BackgroundSample.Layer);
+				bool hiddenBackground = pixel.BackgroundSample.Valid && _activeBackgrounds.HidesNativeLayer(pixel.BackgroundSample.Layer,py);
 				if(expansion.Native && !hiddenBackground && !std::binary_search(replacedOrders.begin(), replacedOrders.end(), pixel.ExpandedSpriteOccluder)) { continue; }
 				uint8_t eligibleClasses = hiddenBackground ? pixel.ExpandedSpriteClassesWithoutBackground : pixel.ExpandedSpriteClasses;
 				if(hiddenBackground && frame.BackgroundUnderlays.size() == frame.Pixels.size()) {
 					const auto& lower = frame.BackgroundUnderlays[py * frame.Width + px];
-					if(lower.SpriteEligibilityCaptured && lower.Sample.Valid && !_activeBackgrounds.HidesNativeLayer(lower.Sample.Layer)) {
+					if(lower.SpriteEligibilityCaptured && lower.Sample.Valid && !_activeBackgrounds.HidesNativeLayer(lower.Sample.Layer,py)) {
 						eligibleClasses &= lower.SpriteEligibleClasses;
 					}
 				}
@@ -1394,14 +1529,14 @@ public:
 						};
 						auto aboveBehind = [&](uint32_t color) {
 							color = overlay(5, color);
-							if(pixel.BackgroundColorIndex && !_activeBackgrounds.HidesNativeLayer(0)) { color = backgroundColor(pixel.BackgroundColor); }
-							return overlay(6, overlay(0, color));
+							if(pixel.BackgroundColorIndex && !_activeBackgrounds.HidesNativeLayer(0,py)) { color = backgroundColor(pixel.BackgroundColor); }
+							return overlay(6,overlay(0,color));
 						};
 						uint32_t empty = aboveBehind(overlay(4, backgroundColor(pixel.NativeBackdropColor)));
 						auto priorityBackgroundOutcome = [&](uint32_t spriteColor, uint8_t spriteClass) {
-							bool hidden = pixel.BackgroundSample.Valid && _activeBackgrounds.HidesNativeLayer(pixel.BackgroundSample.Layer);
+							bool hidden = pixel.BackgroundSample.Valid && _activeBackgrounds.HidesNativeLayer(pixel.BackgroundSample.Layer,py);
 							const auto* lower = hidden && frame.BackgroundUnderlays.size() == frame.Pixels.size() ? &frame.BackgroundUnderlays[(size_t)py * frame.Width + px] : nullptr;
-							bool lowerVisible = lower && lower->Sample.Valid && !_activeBackgrounds.HidesNativeLayer(lower->Sample.Layer);
+							bool lowerVisible = lower && lower->Sample.Valid && !_activeBackgrounds.HidesNativeLayer(lower->Sample.Layer,py);
 							uint8_t eligible = hidden ? (lowerVisible && lower->SpriteEligibilityCaptured ? lower->SpriteEligibleClasses : 3) : pixel.ExpandedSpriteClasses;
 							bool spriteVisible = spriteClass && (eligible & spriteClass);
 							uint32_t nativeColor = backgroundColor(hidden ? lowerVisible ? lower->Color : pixel.NativeBackdropColor : pixel.BackgroundColor);
@@ -1438,12 +1573,12 @@ public:
 							auto nativePng = [&](const MetaBackgroundSample& sample) {
 								for(const auto& layer : _activeBackgrounds) { uint32_t artwork; if(_activeBackgrounds.Sample(layer, sample, px, py, sx, sy, _outputScale, artwork)) { result = CompositeAlpha(artwork, result, artwork >> 24); } }
 							};
-							if(pair.Sample.Valid && !_activeBackgrounds.HidesNativeLayer(pair.Sample.Layer)) { result = backgroundColor(pair.Color); }
+							if(pair.Sample.Valid && !_activeBackgrounds.HidesNativeLayer(pair.Sample.Layer,py)) { result = backgroundColor(pair.Color); }
 							nativePng(pair.Sample);
 							result = overlay(4, result);
 							if(spriteClass & 10) { result = spriteColor; }
 							result = overlay(5, result);
-							if(pair.ForegroundOpaque && !_activeBackgrounds.HidesNativeLayer(pair.ForegroundSample.Layer)) { result = backgroundColor(pair.ForegroundColor); }
+							if(pair.ForegroundOpaque && !_activeBackgrounds.HidesNativeLayer(pair.ForegroundSample.Layer,py)) { result = backgroundColor(pair.ForegroundColor); }
 							nativePng(pair.ForegroundSample);
 							result = overlay(6, result);
 							if(spriteClass & 5) { result = spriteColor; }

@@ -209,6 +209,8 @@ void PceVpc::ProcessScanlineStart(PceVdc* vdc, uint16_t scanline)
 			_metaFrame = !_vdc2 && vdc->IsMetaSpriteCaptureEnabled()
 				? _metaFramePool.Acquire(PceConstants::MaxScreenWidth, PceConstants::ScreenHeight) : nullptr;
 			if(_metaFrame) { _metaFrame->PceCapture = true; }
+			if(_metaFrame) { _metaFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask(); }
+			vdc->SetTextMask(_metaFrame ? _metaFrame->TextLayerMask : 0);
 		}
 
 		//Store clock dividers for each row at the end of the buffer
@@ -305,6 +307,7 @@ void PceVpc::ProcessScanlineEnd(PceVdc* vdc, uint16_t scanline, uint16_t* rowBuf
 		memcpy(_currentOutBuffer + offset, rowBuffer, PceConstants::MaxScreenWidth * sizeof(uint16_t));
 		if(_metaFrame && scanline >= 14 && scanline < 256) {
 			std::copy(vdc->GetMetaSpriteRow(), vdc->GetMetaSpriteRow() + PceConstants::MaxScreenWidth, _metaFrame->Pixels.begin() + offset);
+			if(_metaFrame->TextLayerMask) { for(uint32_t x=0;x<PceConstants::MaxScreenWidth;x++) { _metaFrame->CaptureText(0,x,scanline-14,vdc->GetTextRow()[x],_metaFrame->Pixels[offset+x].BackgroundSample); } }
 			if(vdc->GetMetaPictureX() >= 0) {
 				for(auto row : vdc->GetMetaSpriteGraphics()) {
 					row.X += vdc->GetMetaPictureX();

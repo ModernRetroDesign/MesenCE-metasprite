@@ -111,6 +111,8 @@ void VideoDecoder::UpdateVideoFilter()
 
 void VideoDecoder::DecodeFrame(bool forRewind)
 {
+	auto previewLock = _textPreviewLock.AcquireSafe();
+	_textPreviewSource = nullptr;
 	UpdateVideoFilter();
 	if(_resetBlendHistory.exchange(false)) { _videoFilter->ResetFrameBlendHistory(); }
 
@@ -156,7 +158,7 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 		if(gbFilter || smsFilter || nesFilter || (snesFilter && snesFilter->SupportsMetaSprites()) || (gbaFilter && gbaFilter->SupportsMetaSprites()) || (wsFilter && wsFilter->SupportsMetaSprites())) {
 			metaCompatible = true;
 			outputBuffer = _metaSpriteCompositor.Apply(outputBuffer, frameSize.Width, frameSize.Height, *_frame.MetaSprites, overscan.Left, overscan.Top,
-				[gbFilter, smsFilter, wsFilter, nesFilter](uint16_t color) { return gbFilter ? gbFilter->GetNativeColor(color) : smsFilter ? smsFilter->GetNativeColor(color) : wsFilter ? wsFilter->GetNativeColor(color) : nesFilter ? nesFilter->GetNativeColor(color) : 0; });
+				[gbFilter, smsFilter, wsFilter, nesFilter, gbaFilter, snesFilter](uint16_t color) { return gbFilter ? gbFilter->GetNativeColor(color) : smsFilter ? smsFilter->GetNativeColor(color) : wsFilter ? wsFilter->GetNativeColor(color) : nesFilter ? nesFilter->GetNativeColor(color) : gbaFilter ? gbaFilter->GetNativeColor(color) : snesFilter ? snesFilter->GetNativeColor(color) : 0; });
 			metaOutputScale = _metaSpriteCompositor.GetOutputScale();
 			frameSize.Width *= metaOutputScale;
 			frameSize.Height *= metaOutputScale;
@@ -164,6 +166,16 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	}
 
 	_videoFilter->FinishFrameBlend(outputBuffer, frameSize.Width * frameSize.Height);
+	_textPreviewSource = outputBuffer;
+	_textPreviewSourceSize = frameSize;
+	_textPreviewNativeSize = { _frame.Width, _frame.Height };
+	if(metaCompatible && _frame.MetaSprites) { _textPreviewNativeSize={_frame.MetaSprites->Width,_frame.MetaSprites->Height}; }
+	_textPreviewCrop = { (uint32_t)std::max(0, metaCropLeft), overscan.Right, (uint32_t)std::max(0, metaCropTop), overscan.Bottom };
+	if(metaCompatible) {
+		_textPreviewCrop.Right=(uint32_t)std::max(0,int(_textPreviewNativeSize.Width)-metaCropLeft-int(frameSize.Width/metaOutputScale));
+		_textPreviewCrop.Bottom=(uint32_t)std::max(0,int(_textPreviewNativeSize.Height)-metaCropTop-int(frameSize.Height/metaOutputScale));
+	}
+	if(_textPreviewRequested.exchange(false)) { CaptureTextPreview(); }
 
 	const auto& videoConfig = _emu->GetSettings()->GetVideoConfig();
 	_decorativeAspectRatio.store(0.0);
@@ -382,7 +394,7 @@ void VideoDecoder::StartThread()
 
 void VideoDecoder::StopThread()
 {
-	_metaSpriteCompositor.SetGroups({});
+	_metaSpriteCompositor.SetAllReplacements({},{},{});
 	_metaSpriteCompositor.SetBackgroundLayers({});
 	auto lock = _stopStartLock.AcquireSafe();
 	_stopFlag = true;
@@ -397,6 +409,26 @@ void VideoDecoder::StopThread()
 		//Clear whole screen
 		_emu->GetVideoRenderer()->ClearFrame();
 	}
+	{ auto previewLock = _textPreviewLock.AcquireSafe(); _textPreviewRequested = false; _textPreviewSource = nullptr; _textPreviewPixels.clear(); _textPreviewSize = {}; }
+}
+
+void VideoDecoder::CaptureTextPreview()
+{
+	uint32_t width = _textPreviewNativeSize.Width, height = _textPreviewNativeSize.Height;
+	if(!_textPreviewSource || !width || !height || (uint64_t)width * height > 4096 * 4096) { return; }
+	int visibleWidth = (int)width - _textPreviewCrop.Left - _textPreviewCrop.Right;
+	int visibleHeight = (int)height - _textPreviewCrop.Top - _textPreviewCrop.Bottom;
+	if(visibleWidth <= 0 || visibleHeight <= 0 || !_textPreviewSourceSize.Width || !_textPreviewSourceSize.Height) { return; }
+	_textPreviewSize = { width, height };
+	_textPreviewPixels.assign(width * height, 0xFF202020);
+	for(uint32_t y = 0; y < height; y++) { for(uint32_t x = 0; x < width; x++) {
+		int sx = (int)x - _textPreviewCrop.Left, sy = (int)y - _textPreviewCrop.Top;
+		if(sx >= 0 && sy >= 0 && sx < visibleWidth && sy < visibleHeight) {
+			uint32_t px = (uint32_t)((uint64_t)sx * _textPreviewSourceSize.Width / visibleWidth);
+			uint32_t py = (uint32_t)((uint64_t)sy * _textPreviewSourceSize.Height / visibleHeight);
+			_textPreviewPixels[y * width + x] = _textPreviewSource[py * _textPreviewSourceSize.Width + px] | 0xFF000000;
+		}
+	} }
 }
 
 bool VideoDecoder::IsRunning()

@@ -69,6 +69,11 @@ namespace Mesen.Debugger.Windows
 			_model.Config.ShowSettingsPanel = !_model.Config.ShowSettingsPanel;
 		}
 		private async void OnReplaceMetaBackground(object? sender, RoutedEventArgs e) => await _model.BackgroundEditor.ReplaceBackgroundPng(this);
+		private async void OnEditTextReplacement(object? sender,RoutedEventArgs e)
+		{
+			try { await new TextReplacementWindow(_model.CreateTextReplacementEditor()).ShowDialog(this); }
+			catch(Exception ex) { _model.BackgroundEditor.MetaStatus="Could not open text editor: "+ex.Message; }
+		}
 		private async void OnEditBackgroundAnimation(object? sender,RoutedEventArgs e) { var model=_model.BackgroundEditor.CreateAnimationEditor(); if(model!=null) { await new PngAnimationWindow(model).ShowDialog(this); } }
 		private async void OnImportMetaBackground(object? sender, RoutedEventArgs e)
 		{

@@ -73,6 +73,7 @@ private:
 	uint32_t _bgShifters[4] = {};
 	MetaBackgroundSample _metaBgFetch;
 	MetaBackgroundSample _metaBgSamples[24] = {};
+	MetaTextPixel _textFetch, _textSamples[24] = {};
 	uint32_t _bgPriority = 0;
 	uint32_t _bgPalette = 0;
 	uint16_t _bgTileAddr = 0;

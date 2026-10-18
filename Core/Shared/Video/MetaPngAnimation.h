@@ -69,6 +69,19 @@ public:
 	}
 };
 
+// Resource IDs refer only to earlier inline buffers in the same packet.
+class MetaPngPacketResources
+{
+	std::vector<std::shared_ptr<const std::vector<uint32_t>>> _pixels;
+public:
+	std::shared_ptr<const std::vector<uint32_t>> Resolve(uint32_t id,size_t pixelCount) const
+	{
+		if(id<1 || id>_pixels.size() || _pixels[id-1]->size()!=pixelCount) { throw std::runtime_error("Invalid PNG pixel-resource reference"); }
+		return _pixels[id-1];
+	}
+	void Add(const std::shared_ptr<const std::vector<uint32_t>>& pixels) { _pixels.push_back(pixels); }
+};
+
 struct MetaPngArtworkFrame
 {
 	int OriginX = 0, OriginY = 0, Width = 0, Height = 0;

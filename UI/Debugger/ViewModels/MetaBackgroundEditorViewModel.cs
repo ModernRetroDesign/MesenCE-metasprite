@@ -160,7 +160,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
    var latest = MetaSpritePack.Load(_metaPackPath, _metaPack.RomHash, _cpuType.ToString());
    MetaStatus = MetaSpriteRuntimeLoader.Apply(latest, _metaPackPath) ? "Background definitions saved and applied." : "Saved; could not apply for this console layout.";
 			if(_cpuType == CpuType.Snes && latest.BackgroundLayers.Any(layer => layer.Enabled)) {
-				MetaStatus += " SNES requires the default filter and neutral color settings. Hires and interlaced replacements currently require color math to be disabled. OBJ-interlace support is experimental. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
+				MetaStatus += " SNES uses the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and interlaced rewind replacements remain pending. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
 			}
   } catch(Exception ex) { MetaStatus = "Saved; could not apply backgrounds: " + ex.Message; }
  }

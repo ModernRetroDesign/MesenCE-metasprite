@@ -72,6 +72,8 @@ private:
 	uint16_t _rowBuffer[PceConstants::MaxScreenWidth] = {};
 	std::atomic<bool> _metaCaptureRequested{false};
 	MetaSpritePixel _metaRow[PceConstants::MaxScreenWidth] = {};
+	MetaTextPixel _textRow[PceConstants::MaxScreenWidth] = {};
+	uint8_t _textMask=0;
 	std::vector<MetaSpriteDecodedRow> _metaSpriteRows;
 	int _metaPictureX = -1;
 
@@ -213,6 +215,8 @@ public:
 	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
 	bool IsMetaSpriteCaptureEnabled() const { return _metaCaptureRequested.load(); }
 	const MetaSpritePixel* GetMetaSpriteRow() const { return _metaRow; }
+	const MetaTextPixel* GetTextRow() const { return _textRow; }
+	void SetTextMask(uint8_t mask) { _textMask=mask; }
 	const std::vector<MetaSpriteDecodedRow>& GetMetaSpriteGraphics() const { return _metaSpriteRows; }
 	int GetMetaPictureX() const { return _metaPictureX; }
 	void ResetMetaPicturePosition() { _metaPictureX = -1; }

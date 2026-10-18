@@ -11,6 +11,125 @@ static void Check(bool condition, string message)
 
 static MetaSpriteMember Sprite(int x, int y, uint color) => new() { X = x, Y = y, Width = 1, Height = 1, Pixels = new[] { color } };
 
+MetaTextTests.Run(args.Length>0 ? args[0] : null);
+
+// Exercise the same forward-only stream used by both native packet formats.
+{
+	string? spill=null;
+	using(var packet=new MetaReplacementPacketStream(64,8)) {
+		packet.Write(new byte[] {1,2,3}); Check(packet.SpillPath==null,"Small packet builders must remain in memory.");
+		packet.Write(new byte[] {4,5,6,7,8}); Check(packet.SpillPath==null && packet.Length==8,"Exact spill threshold must remain in memory.");
+		packet.WriteByte(9); spill=packet.SpillPath;
+		Check(spill!=null && packet.Length==9 && packet.Position==9,"The next byte must spill without changing stream position.");
+		Check(packet.ToArray().SequenceEqual(Enumerable.Range(1,9).Select(v => (byte)v)),"Spill copy must preserve existing bytes and append order.");
+		using(var writer=new BinaryWriter(packet,System.Text.Encoding.UTF8,true)) { MetaReplacementPacketStream.WritePixels(writer,new[] {0x80ABCDEFu,0x01020304u}); }
+		byte[] bytes=packet.ToArray();
+		Check(bytes.Skip(9).SequenceEqual(new byte[] {0xEF,0xCD,0xAB,0x80,4,3,2,1}),"Bulk RGBA transport must preserve little-endian bytes and straight alpha.");
+		packet.Write(new byte[64-bytes.Length]); Check(packet.Length==64,"Exact packet limit must be accepted.");
+		bool rejected=false; try { packet.WriteByte(1); } catch(InvalidDataException) { rejected=true; }
+		Check(rejected && packet.Length==64 && packet.ToArray().Length==64,"Over-limit writes must fail before publishing or growing storage.");
+	}
+	Check(!File.Exists(spill),"Spilled packet temporary file must be removed on disposal.");
+	string? failedSpill=null;
+	try {
+		using var packet=new MetaReplacementPacketStream(16,0); packet.WriteByte(1); failedSpill=packet.SpillPath;
+		packet.Write(new byte[16]); throw new Exception("Over-limit packet was accepted.");
+	} catch(InvalidDataException) { }
+	Check(failedSpill!=null && !File.Exists(failedSpill),"Failed packet construction must also clean its temporary file.");
+	using(var bounded=new MetaReplacementPacketStream(3,8)) {
+		bounded.Write(new byte[] {1,2,3}); bool rejected=false;
+		try { bounded.Write(new byte[] {4,5}); } catch(InvalidDataException) { rejected=true; }
+		Check(rejected && bounded.SpillPath==null && bounded.ToArray().SequenceEqual(new byte[] {1,2,3}),"Limit checks must also protect in-memory builders.");
+	}
+	using var golden=new MemoryStream(); using var reference=new BinaryWriter(golden,System.Text.Encoding.UTF8,true);
+	using var actual=new MetaReplacementPacketStream(1024,7); using var actualWriter=new BinaryWriter(actual,System.Text.Encoding.UTF8,true);
+	foreach(var writer in new[] {reference,actualWriter}) { writer.Write(0x3550534Du); writer.Write(-4096); writer.Write("packet"); MetaReplacementPacketStream.WritePixels(writer,new[] {0u,0x80FFFFFFu}); }
+	Check(actual.ToArray().SequenceEqual(golden.ToArray()),"Spilled output must match existing BinaryWriter packet encoding exactly.");
+	using(var capacity=new MetaReplacementPacketStream()) {
+		capacity.Write(new byte[3*1024*1024]); capacity.WriteByte(1);
+		Check(capacity.MemoryCapacity<=4*1024*1024,"Non-power-of-two writes must not cause the RAM builder to double past its threshold.");
+	}
+	Console.WriteLine("PASS: packet spill thresholds, append/readback, exact/over limits, cleanup after success/failure and bulk little-endian pixel compatibility.");
+}
+
+// Force hash collisions and cache eviction; only exact packet bytes may share.
+{
+	using var stream=new MetaReplacementPacketStream(1024,1); using var writer=new BinaryWriter(stream,System.Text.Encoding.UTF8,true);
+	var resources=new MetaPngPacketResources(stream,2,_ => "collision");
+	resources.Write(writer,new[] {1u,2u}); resources.Write(writer,new[] {1u,3u}); resources.Write(writer,new[] {1u,2u});
+	resources.Write(writer,new[] {9u}); resources.Write(writer,new[] {1u,3u});
+	byte[] packet=stream.ToArray();
+	Check(packet.Length==48 && BitConverter.ToUInt32(packet,0)==0 && BitConverter.ToUInt32(packet,12)==0
+		&& BitConverter.ToUInt32(packet,24)==1 && BitConverter.ToUInt32(packet,28)==0 && BitConverter.ToUInt32(packet,36)==0,
+		"Resource collisions must compare complete bytes and evicted resources must be safely re-inlined.");
+	Check(resources.Count==2,"Resource metadata must remain bounded independently of decoded pixels.");
+	writer.Write(0x12345678u); Check(stream.ToArray().TakeLast(4).SequenceEqual(new byte[] {0x78,0x56,0x34,0x12}),"Resource comparisons must restore the append position.");
+	using var largeStream=new MetaReplacementPacketStream(1024*1024,16); using var largeWriter=new BinaryWriter(largeStream,System.Text.Encoding.UTF8,true);
+	var largeResources=new MetaPngPacketResources(largeStream,2,_ => "collision"); uint[] image=new uint[32769]; image[^1]=0x80ABCDEF;
+	largeResources.Write(largeWriter,image); long firstEnd=largeStream.Length;
+	largeResources.Write(largeWriter,(uint[])image.Clone()); Check(largeStream.Length==firstEnd+4,"Multi-block spilled comparison must recognize identical pixels.");
+	var changed=(uint[])image.Clone(); changed[^1]^=1; largeResources.Write(largeWriter,changed);
+	Check(largeStream.Length==firstEnd*2+4,"A mismatch after multiple compare blocks must remain an inline image.");
+	Console.WriteLine("PASS: bounded pixel-resource metadata, exact collision-safe sharing, spill-backed multi-block comparisons and safe re-inline after eviction.");
+}
+
+// A detached file is sealed/readable until native parsing finishes, then removed.
+{
+	string? ownedPath=null;
+	using(var builder=new MetaReplacementPacketStream(1024,8,fileLease:true)) {
+		builder.Write(new byte[] {1,2,3,4,5,6,7,8,9});
+		using(var owned=builder.DetachFile()) {
+			ownedPath=owned.Path;
+			Check(File.ReadAllBytes(owned.Path).SequenceEqual(Enumerable.Range(1,9).Select(v => (byte)v)),"Detached packet must preserve bytes and permit independent readers.");
+			bool denied=false; try { using var writer=File.OpenWrite(owned.Path); } catch(IOException) { denied=true; }
+			if(OperatingSystem.IsWindows()) { Check(denied,"Sealed handoff must deny another writer."); }
+			Check(!builder.CanWrite,"Detached builders must not retain write ownership.");
+		}
+	}
+	Check(ownedPath!=null && !File.Exists(ownedPath),"File handoff must remove its owned temporary file after parsing.");
+	string? failedPath=null;
+	try {
+		using var builder=new MetaReplacementPacketStream(8,0,fileLease:true); builder.WriteByte(1); failedPath=builder.SpillPath;
+		builder.Write(new byte[8]);
+	} catch(InvalidDataException) { }
+	Check(failedPath!=null && !File.Exists(failedPath),"Failed file-mode construction must clean its unleased file.");
+	Console.WriteLine("PASS: sealed direct-file packet ownership, independent read access, write exclusion and cleanup after success/failure.");
+}
+
+// Decode cache bounds are independent of PNG contents and packet construction.
+{
+	var loads=new Dictionary<string,int>(); MetaPngDecodeCache? cache=null;
+	cache=new MetaPngDecodeCache(32,2,(path,reserve) => {
+		string name=Path.GetFileName(path); int count=name=="large.png" ? 12 : 4;
+		reserve(count*4L);
+		Check(cache!.RetainedBytes<=32-count*4L || (count*4L>32 && cache.Count==0),"Eviction must happen before allocating the next frame.");
+		loads[name]=loads.GetValueOrDefault(name)+1;
+		if(name=="failed.png") { throw new InvalidDataException("Synthetic decode failure"); }
+		return (count,1,Enumerable.Repeat(0x80ABCDEFu,count).ToArray());
+	});
+	string root=Path.Combine(Path.GetTempPath(),"decode-cache-tests");
+	var first=cache.Get(Path.Combine(root,"a.png")); cache.Get(Path.Combine(root,"b.png"));
+	Check(ReferenceEquals(first.Pixels,cache.Get(Path.Combine(root,".","a.png")).Pixels),"Canonical path hits must reuse exact straight-alpha pixels.");
+	cache.Get(Path.Combine(root,"c.png"));
+	Check(loads["a.png"]==1 && cache.Count==2 && cache.RetainedBytes==32,"LRU retention must honor the byte budget.");
+	cache.Get(Path.Combine(root,"a.png")); cache.Get(Path.Combine(root,"b.png"));
+	Check(loads["b.png"]==2 && loads["a.png"]==1,"A cache hit must protect the recently used frame from eviction.");
+	cache.Get(Path.Combine(root,"large.png")); cache.Get(Path.Combine(root,"large.png"));
+	Check(cache.Count==0 && cache.RetainedBytes==0 && loads["large.png"]==2,"Single oversized frames must evict retained buffers and bypass caching.");
+	try { cache.Get(Path.Combine(root,"failed.png")); } catch(InvalidDataException) { }
+	Check(cache.Count==0 && cache.RetainedBytes==0,"A failed decode must not publish a partial entry.");
+	cache.Get(Path.Combine(root,"a.png"));
+	Check(cache.Count==1 && first.Pixels[0]==0x80ABCDEF,"Eviction must preserve external frame ownership and partial-alpha values.");
+	var tiny=new MetaPngDecodeCache(1024,2,(_,reserve) => { reserve(4); return (1,1,new[] {1u}); });
+	for(int n=0;n<1000;n++) { tiny.Get(Path.Combine(root,n+".png")); Check(tiny.Count<=2 && tiny.RetainedBytes<=8,"Entry count must also bound tiny images."); }
+	foreach(bool reserveWrong in new[] {false,true}) {
+		var invalid=new MetaPngDecodeCache(16,2,(_,reserve) => { if(reserveWrong) { reserve(8); } return (1,1,new[] {1u}); });
+		bool rejected=false; try { invalid.Get(Path.Combine(root,"invalid.png")); } catch(InvalidDataException) { rejected=true; }
+		Check(rejected && invalid.Count==0,"Missing or inconsistent decoder reservations must be rejected.");
+	}
+	Console.WriteLine("PASS: bounded decode cache LRU, canonical reuse, preallocation eviction, oversized bypass, tiny-entry limits, straight alpha and failed-decode isolation.");
+}
+
 var animation = new MetaPngAnimation { Enabled = true, RestartOnActivation = true, Frames = new() {
 	new() { Path = "a.png", Duration = 2 }, new() { Path = "b.png", Duration = 3, OriginX = -2, OriginY = 7 }, new() { Path = "c.png", Duration = 1 }
 } };
@@ -79,6 +198,11 @@ byte[] activationPacket=MetaSpriteRuntimePacket.Create(animationPack,_ => (2,1,n
 		"blue.png" => new[] {0xFF0000FFu,0xFF0000FFu}, _ => new[] {0xFFFFFFFFu,0xFFFFFFFFu}
 	}));
 if(args.Length>0) { File.WriteAllBytes(args[0]+".activated",activationPacket); }
+if(args.Length>0) { File.WriteAllBytes(args[0]+".activated.shared",MetaSpriteRuntimePacket.Create(animationPack,_ => (2,1,new[] {0xFFFF0000u,0xFFFF0000u}),
+	_ => (2,1,new[] {0xFF0000FFu,0xFF0000FFu}), (frame,_) => (2,1,frame.Path switch {
+		"a.png" => new[] {0xFF00FF00u,0xFF00FF00u}, "b.png" => new[] {0u,0x80FFFF00u},
+		"blue.png" => new[] {0xFF0000FFu,0xFF0000FFu}, _ => new[] {0xFFFFFFFFu,0xFFFFFFFFu}
+	}),sharedFrames:true)); }
 Console.WriteLine("PASS: MSP5 default/conditional alternate animation frame transport with inherited scale, optional origins and PNG alpha.");
 var animatedBackgroundPack = new MetaSpritePack { System="Gameboy", BackgroundLayers=new() { new() {
 	Id=1,Enabled=true,ArtworkPath="background.png",ArtworkWidth=1,ArtworkHeight=1,HideOriginalLayer=true,
@@ -94,7 +218,47 @@ animatedBackgroundPack.BackgroundLayers[0].Animation.RestartOnActivation=true;
 byte[] activatedBackgroundPacket=MetaBackgroundRuntimePacket.Create(animatedBackgroundPack,_ => (1,1,new[] {0xFF000000u}),
 	(frame,_) => frame.Path=="bg-a.png" ? (2,1,new[] {0xFF00FF00u,0xFF00FF00u}) : (3,1,new[] {0u,0x80FFFF00u,0xFFFFFFFFu}));
 if(args.Length>0) { File.WriteAllBytes(args[0]+".background.activated",activatedBackgroundPacket); }
+if(args.Length>0) { File.WriteAllBytes(args[0]+".background.activated.shared",MetaBackgroundRuntimePacket.Create(animatedBackgroundPack,_ => (1,1,new[] {0xFF000000u}),
+	(frame,_) => frame.Path=="bg-a.png" ? (2,1,new[] {0xFF00FF00u,0xFF00FF00u}) : (3,1,new[] {0u,0x80FFFF00u,0xFFFFFFFFu}),sharedFrames:true)); }
 Console.WriteLine("PASS: MBGH background sequence transport preserves RAM conditions, hide-native settings, changing dimensions and origins.");
+
+// Cross the production spill threshold through the actual MSP5/MBGH writers.
+{
+	uint[] pixels=new uint[1024*256]; pixels[0]=0x80ABCDEF; pixels[^1]=0x10203040;
+	var spillAnimation=new MetaPngAnimation {Enabled=true};
+	for(int i=0;i<5;i++) { spillAnimation.Frames.Add(new() {Path="shared.png",Duration=i+1}); }
+	var spillPack=new MetaSpritePack {System="Gameboy",Groups=new() {new() {Id=1,Enabled=true,Width=1,Height=1,ReplacementPath="base.png",Members=new() {Sprite(0,0,0xFFFF0000)},Animation=spillAnimation}},
+		BackgroundLayers=new() {new() {Id=1,Enabled=true,ArtworkPath="base.png",ArtworkWidth=1,ArtworkHeight=1,MemoryConditions=new() {new() {Address=7,Mask=0}},Animation=spillAnimation}}};
+	byte[] spriteSpill=MetaSpriteRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),null,(_,_) => (1024,256,pixels));
+	byte[] bgSpill=MetaBackgroundRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,pixels));
+	Check(spriteSpill.Length>4*1024*1024 && bgSpill.Length>4*1024*1024,"Production animation fixtures must exercise actual packet spilling.");
+	if(args.Length>0) { File.WriteAllBytes(args[0]+".spilled",spriteSpill); File.WriteAllBytes(args[0]+".background.spilled",bgSpill); }
+	Console.WriteLine("PASS: actual MSP5/MBGH multi-megabyte animation packet construction crosses the production spill threshold.");
+	for(int i=0;i<spillAnimation.Frames.Count;i++) { spillAnimation.Frames[i].OriginX=i; spillAnimation.Frames[i].OriginY=-i; }
+	byte[] sharedSprite=MetaSpriteRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),null,(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true);
+	byte[] sharedBg=MetaBackgroundRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true);
+	Check(BitConverter.ToUInt32(sharedSprite)==MetaSpriteRuntimePacket.SharedAnimationMagic && BitConverter.ToUInt32(sharedBg)==MetaBackgroundRuntimePacket.SharedAnimationMagic,"Shared animation transport must select MSP6/MBGI.");
+	Check(sharedSprite.Length<spriteSpill.Length/4 && sharedBg.Length<bgSpill.Length/4,"Repeated independent decoded buffers must be transmitted once.");
+	spillPack.Groups[0].AlternateArtwork.Add(new() {Path="alternate.png",MemoryConditions=new() {new() {Address=7,Mask=0}},Animation=spillAnimation});
+	spillPack.Groups.Add(new() {Id=2,Enabled=true,Width=1,Height=1,ReplacementPath="base.png",Members=new() {Sprite(0,0,0xFFFF0000)},Animation=spillAnimation});
+	spillPack.BackgroundLayers.Add(new() {Id=2,Enabled=true,ArtworkPath="base.png",ArtworkWidth=1,ArtworkHeight=1,MemoryConditions=new() {new() {Address=7,Mask=0}},Animation=spillAnimation});
+	byte[] multiple=MetaSpriteRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true);
+	byte[] multipleBg=MetaBackgroundRuntimePacket.Create(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true);
+	Check(multiple.Length<sharedSprite.Length+1024 && multipleBg.Length<sharedBg.Length+1024,"Resource references must cross alternate/default/group/layer sequence boundaries.");
+	if(args.Length>0) {
+		File.WriteAllBytes(args[0]+".shared",sharedSprite); File.WriteAllBytes(args[0]+".background.shared",sharedBg);
+		File.WriteAllBytes(args[0]+".shared-multiple",multiple); File.WriteAllBytes(args[0]+".background.shared-multiple",multipleBg);
+	}
+	string spriteFilePath,bgFilePath;
+	using(var spriteFile=MetaSpriteRuntimePacket.CreateFile(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true))
+	using(var bgFile=MetaBackgroundRuntimePacket.CreateFile(spillPack,_ => (1,1,new[] {0xFFFFFFFFu}),(_,_) => (1024,256,(uint[])pixels.Clone()),sharedFrames:true)) {
+		spriteFilePath=spriteFile.Path; bgFilePath=bgFile.Path;
+		Check(File.ReadAllBytes(spriteFile.Path).SequenceEqual(multiple) && File.ReadAllBytes(bgFile.Path).SequenceEqual(multipleBg),"Direct-file MSP6/MBGI output must exactly match byte-array encoding.");
+	}
+	Check(!File.Exists(spriteFilePath) && !File.Exists(bgFilePath),"Both packet leases must clean up after application.");
+	Console.WriteLine($"PASS: content-shared MSP6/MBGI transport reduces repeated-frame packets from {spriteSpill.Length}/{bgSpill.Length} to {sharedSprite.Length}/{sharedBg.Length} bytes with independent origins and shared resources across sequences.");
+
+}
 
 var memoryConditions = new System.Collections.Generic.List<MetaMemoryCondition> {
 	new() { Address = 0xC000, Value = 3, Mask = 15 }, new() { Address = 0xC001, Value = 7 }
@@ -644,4 +808,12 @@ if(args.Length >= 2 && args[1] == "--matcher-benchmark") { MatcherBenchmark.Run(
 
 if(args.Length>=3 && args[1]=="--animation-state") {
 	GameplayFixture.RunAnimationStateSuite(Path.GetFullPath(args[2]),Path.GetFullPath(args[0]));
+}
+
+if(args.Length>=3 && args[1]=="--animation-state-shared") {
+	GameplayFixture.RunAnimationStateSuite(Path.GetFullPath(args[2]),Path.GetFullPath(args[0]),shared:true);
+}
+
+if(args.Length>=3 && args[1]=="--animation-gameplay") {
+	GameplayFixture.RunAnimationGameplaySuite(Path.GetFullPath(args[2]));
 }

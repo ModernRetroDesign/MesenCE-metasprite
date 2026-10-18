@@ -38,6 +38,14 @@ private:
 	FrameInfo _baseFrameSize = {};
 	FrameInfo _lastFrameSize = {};
 	RenderedFrame _frame = {};
+	atomic<bool> _textPreviewRequested { false };
+	SimpleLock _textPreviewLock;
+	vector<uint32_t> _textPreviewPixels;
+	FrameInfo _textPreviewSize = {};
+	uint32_t* _textPreviewSource = nullptr; // Valid until the next decode, protected by _textPreviewLock.
+	FrameInfo _textPreviewSourceSize = {}, _textPreviewNativeSize = {};
+	OverscanDimensions _textPreviewCrop = {};
+	void CaptureTextPreview();
 	MetaSpriteCompositor _metaSpriteCompositor;
 	DecorativeWidescreen _decorativeWidescreen;
 
@@ -51,10 +59,20 @@ private:
 	void DecodeThread();
 
 public:
+	void RequestTextPreview() { auto lock = _textPreviewLock.AcquireSafe(); _textPreviewPixels.clear(); if(_textPreviewSource) { CaptureTextPreview(); } else { _textPreviewRequested = true; } }
+	uint32_t ReadTextPreview(uint32_t* pixels, uint32_t capacity, FrameInfo& size) {
+		auto lock = _textPreviewLock.AcquireSafe(); size = _textPreviewSize;
+		uint32_t count = (uint32_t)_textPreviewPixels.size();
+		if(pixels && capacity >= count) { std::copy(_textPreviewPixels.begin(), _textPreviewPixels.end(), pixels); }
+		return count;
+	}
 	void SetMetaSpriteGroups(std::vector<MetaSpriteReplacement> groups) { _metaSpriteCompositor.SetGroups(std::move(groups)); }
 	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
 	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
 	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
+	bool HasMetaTextProfiles() { return _metaSpriteCompositor.HasTextProfiles(); }
+	uint8_t GetMetaTextLayerMask() { return _metaSpriteCompositor.TextLayerMask(); }
+	void SetAllMetaReplacements(std::vector<MetaSpriteReplacement> groups,std::vector<MetaBackgroundReplacement> layers,std::vector<MetaTextReplacement> texts) { _metaSpriteCompositor.SetAllReplacements(std::move(groups),std::move(layers),std::move(texts)); }
 	void CaptureMetaSpriteMemory(const MetaSpriteFrame& frame, const std::function<bool(uint32_t,uint8_t&)>& readByte, bool timing = true) { _metaSpriteCompositor.CaptureMemorySnapshot(frame,readByte,timing); }
 	void SerializeReplacementAnimation(Serializer& s);
 	void ResetReplacementAnimation() { _metaSpriteCompositor.RestoreAnimationState({}); }

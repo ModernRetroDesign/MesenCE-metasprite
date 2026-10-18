@@ -137,6 +137,7 @@ private:
 	int _metaOamRead = 0, _metaOamWrite = 1;
 	GbaPixelData _layerOutput[4][GbaConstants::ScreenWidth] = {};
 	MetaBackgroundSample _metaBgSamples[4][GbaConstants::ScreenWidth] = {};
+	MetaTextPixel _textSamples[4][GbaConstants::ScreenWidth] = {};
 	int _metaBgMapXBase[4] = {}, _metaBgMapY[4] = {}, _metaBgMapWidthMask[4] = {};
 
 	uint8_t _oamWindow[GbaConstants::ScreenWidth] = {};

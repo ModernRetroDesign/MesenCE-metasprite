@@ -1,0 +1,103 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:vm="using:Mesen.Debugger.ViewModels" xmlns:c="using:Mesen.Controls" xmlns:d="using:Mesen.Debugger.Controls"
+ x:Class="Mesen.Debugger.Windows.TextReplacementWindow" x:DataType="vm:TextReplacementViewModel"
+ Title="TrueType Text Replacement" Width="820" Height="800" MinWidth="600" MinHeight="500">
+ <DockPanel Margin="12">
+  <StackPanel DockPanel.Dock="Bottom" Spacing="6" Margin="0 8 0 0">
+   <TextBlock Text="{Binding Status}" TextWrapping="Wrap" />
+   <StackPanel Orientation="Horizontal" Spacing="8">
+    <Button Name="textSave" Content="Save profiles" Click="Save" /><Button Name="textApply" Content="Save and apply" Click="Apply" IsEnabled="{Binding CanApply}" /><Button Content="Close" Click="Cancel" />
+   </StackPanel>
+  </StackPanel>
+  <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+   <StackPanel Spacing="8">
+    <TextBlock Text="Cached font overlays draw above the game and background PNG replacements. Original tiles remain; use a replacement PNG or the optional cell fill to cover old text. Source cells are made from 8×8 tiles. Gameplay supports native tile backgrounds: NES; GB/GBC BG/window; SMS Mode 4; PCE VDC1; GBA regular backgrounds; SNES normal-resolution tile modes; and WonderSwan backgrounds. Affine/bitmap, mosaic and SNES hires/interlace text capture remain guarded." TextWrapping="Wrap" />
+    <Grid ColumnDefinitions="*,Auto,Auto">
+     <ComboBox Name="textProfiles" ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile}" HorizontalAlignment="Stretch" />
+     <Button Grid.Column="1" Content="+" Click="Add" Width="32" ToolTip.Tip="Add text profile" />
+     <Button Grid.Column="2" Content="−" Click="Remove" Width="32" IsEnabled="{Binding HasProfile}" ToolTip.Tip="Remove selected profile; font files are retained" />
+    </Grid>
+    <StackPanel IsEnabled="{Binding HasProfile}" Spacing="8">
+     <TextBox PlaceholderText="Profile name" Text="{Binding SelectedProfile.Name}" />
+     <CheckBox Content="Enable font overlay profile" IsChecked="{Binding SelectedProfile.Enabled}" />
+     <Grid ColumnDefinitions="*,*">
+      <StackPanel Margin="0 0 8 0"><TextBlock Text="Hardware layer" /><ComboBox ItemsSource="{Binding LayerNames}" SelectedIndex="{Binding SelectedProfile.NativeLayer, Mode=TwoWay}" HorizontalAlignment="Stretch" /></StackPanel>
+      <StackPanel Grid.Column="1"><TextBlock Text="Match tiles by" /><c:EnumComboBox SelectedItem="{Binding SelectedProfile.MatchKind}" /></StackPanel>
+     </Grid>
+     <TextBlock Text="Graphics addresses follow the tile's graphics location; indices follow its number. Bank/content disambiguation will be added with gameplay capture." TextWrapping="Wrap" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Import font…" Click="Import" /><TextBlock Text="{Binding SelectedProfile.FontPath}" TextWrapping="Wrap" VerticalAlignment="Center" /></StackPanel>
+     <Grid ColumnDefinitions="*,*,*,*">
+      <StackPanel><TextBlock Text="Font size" /><NumericUpDown Value="{Binding SelectedProfile.FontSize}" Minimum="1" Maximum="128" /></StackPanel>
+      <StackPanel Grid.Column="1"><TextBlock Text="Raster scale" /><NumericUpDown Value="{Binding SelectedProfile.RasterScale}" Minimum="1" Maximum="8" /></StackPanel>
+      <StackPanel Grid.Column="2"><TextBlock Text="Source cell width" /><NumericUpDown Value="{Binding SelectedProfile.CellWidth}" Minimum="8" Maximum="128" Increment="8" /></StackPanel>
+      <StackPanel Grid.Column="3"><TextBlock Text="Source cell height" /><NumericUpDown Value="{Binding SelectedProfile.CellHeight}" Minimum="8" Maximum="128" Increment="8" /></StackPanel>
+     </Grid>
+     <TextBlock Text="Font size uses native pixels; it may exceed the source tile size. Raster scale controls cached font detail. Proportional layout uses real font advances and kerning for left-to-right text. Larger glyphs and effects extend beyond source cells and clip only at the screen/display region." TextWrapping="Wrap" />
+     <CheckBox Name="textProportional" Content="Proportional text runs with font kerning" IsChecked="{Binding SelectedProfile.Proportional}" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><TextBlock Text="Source grid origin X / Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginX}" Minimum="0" Maximum="120" Increment="8" Width="90" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginY}" Minimum="0" Maximum="120" Increment="8" Width="90" /></StackPanel>
+     <TextBlock Text="Source cells can be 8×8, 8×16, 16×16 or other multiples of 8 up to 128×128. The grid origin is the tilemap offset within one cell (for example Y=8 when 8×16 letters start on an odd tile row). Capturing a complete cell sets this origin automatically. Different source sizes use separate profiles." TextWrapping="Wrap" />
+     <StackPanel Orientation="Horizontal" Spacing="8">
+      <TextBlock Text="Line height (0 = font default)" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.LineHeight}" Minimum="0" Maximum="512" Width="85" />
+      <TextBlock Text="Letter spacing" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.LetterSpacing}" Minimum="-8" Maximum="32" Increment="0.25" Width="90" />
+     </StackPanel>
+     <StackPanel Orientation="Horizontal" Spacing="8">
+      <TextBlock Text="Offset X / Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.OffsetX}" Minimum="-256" Maximum="256" Width="110" /><NumericUpDown Value="{Binding SelectedProfile.OffsetY}" Minimum="-256" Maximum="256" Width="110" />
+     </StackPanel>
+     <CheckBox Content="Inherit native palette color (preview uses white)" IsChecked="{Binding SelectedProfile.UsePaletteColor}" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><TextBlock Text="Palette ink entry (1–3)" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.PaletteInkIndex}" Minimum="1" Maximum="3" Width="90" /></StackPanel>
+     <TextBox PlaceholderText="Custom color: RRGGBBAA" Text="{Binding SelectedProfile.Color}" />
+     <CheckBox Name="textFillEnabled" Content="Fill behind text (display region, or matched source cells)" IsChecked="{Binding SelectedProfile.FillEnabled}" />
+     <TextBox Name="textFillColor" PlaceholderText="Fill color: RRGGBBAA" Text="{Binding SelectedProfile.FillColor}" IsEnabled="{Binding SelectedProfile.FillEnabled}" />
+     <TextBlock Text="Fill defaults off. With a display region it fills that rectangle; otherwise it covers mapped source cells, including mapped spaces. Font glyphs, effects and kerning are cached when applied." TextWrapping="Wrap" />
+     <CheckBox Name="textOutlineEnabled" Content="Outline" IsChecked="{Binding SelectedProfile.OutlineEnabled}" />
+     <StackPanel Orientation="Horizontal" Spacing="8" IsEnabled="{Binding SelectedProfile.OutlineEnabled}">
+      <TextBlock Text="Width" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.OutlineWidth}" Minimum="0" Maximum="8" Increment="0.25" Width="90" /><TextBox Name="textOutlineColor" Text="{Binding SelectedProfile.OutlineColor}" PlaceholderText="RRGGBBAA" Width="150" />
+     </StackPanel>
+     <CheckBox Name="textShadowEnabled" Content="Drop shadow" IsChecked="{Binding SelectedProfile.ShadowEnabled}" />
+     <StackPanel Orientation="Horizontal" Spacing="8" IsEnabled="{Binding SelectedProfile.ShadowEnabled}">
+      <TextBlock Text="X / Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.ShadowX}" Minimum="-32" Maximum="32" Increment="0.25" Width="85" /><NumericUpDown Value="{Binding SelectedProfile.ShadowY}" Minimum="-32" Maximum="32" Increment="0.25" Width="85" /><TextBox Name="textShadowColor" Text="{Binding SelectedProfile.ShadowColor}" PlaceholderText="RRGGBBAA" Width="150" />
+     </StackPanel>
+     <CheckBox Name="textDisplayRegion" Content="Place text inside a display region (gameplay screen pixels)" IsChecked="{Binding SelectedProfile.UseDisplayRegion}" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Refresh gameplay snapshot" Click="RefreshGameplay" /><Button Content="Match source size / position" Click="MatchSource" /><ToggleButton Content="Draw new region" IsChecked="{Binding #textDisplayPicker.DrawMode, Mode=TwoWay}" /></StackPanel>
+     <TextBlock Name="gameplaySnapshotStatus" Text="Orange: display region. Drag outside to draw, inside to move, or use the edge/corner handles to resize." TextWrapping="Wrap" />
+     <d:TextRegionSelector Name="textDisplayPicker" Height="280" CanvasWidth="256" CanvasHeight="240" Region="{Binding DisplayRegion, Mode=TwoWay}" Overlay="{Binding Preview}" ShowOverlay="{Binding SelectedProfile.UseDisplayRegion}" />
+     <Grid ColumnDefinitions="*,*,*,*" IsEnabled="{Binding SelectedProfile.UseDisplayRegion}">
+      <StackPanel><TextBlock Text="Display X" /><NumericUpDown Value="{Binding SelectedProfile.DisplayX}" Minimum="-4096" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="1"><TextBlock Text="Display Y" /><NumericUpDown Value="{Binding SelectedProfile.DisplayY}" Minimum="-4096" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="2"><TextBlock Text="Display width" /><NumericUpDown Value="{Binding SelectedProfile.DisplayWidth}" Minimum="1" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="3"><TextBlock Text="Display height" /><NumericUpDown Value="{Binding SelectedProfile.DisplayHeight}" Minimum="1" Maximum="4096" /></StackPanel>
+     </Grid>
+     <CheckBox Content="Wrap text at the display region edge" IsChecked="{Binding SelectedProfile.WrapText}" IsEnabled="{Binding SelectedProfile.UseDisplayRegion}" />
+     <TextBlock Text="The display region places and clips the overlay independently of source tile positions. Source rows become text lines; map spaces too. Kerning supports up to 256 distinct characters/profile. Ligatures and right-to-left shaping are not included." TextWrapping="Wrap" />
+     <CheckBox Content="Limit matching to source tilemap region" IsChecked="{Binding SelectedProfile.UseRegion}" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Use selection from Tilemap Viewer" Click="UseViewerSelection" /><ToggleButton Content="Draw new region" IsChecked="{Binding #textSourcePicker.DrawMode, Mode=TwoWay}" /></StackPanel>
+     <TextBlock Text="Cyan: source capture, snapped to 8×8 tiles. Draw, move or resize the rectangle below. Arrow keys move; Ctrl+arrows resize; Shift uses larger steps. Coordinates stay synchronized with both selectors." TextWrapping="Wrap" />
+     <TextBlock Text="{Binding SourcePreviewInfo}" TextWrapping="Wrap" />
+     <d:TextRegionSelector Name="textSourcePicker" Height="300" Image="{Binding SourcePreview}" CanvasWidth="{Binding SourceWidth}" CanvasHeight="{Binding SourceHeight}" Snap="8" Region="{Binding SourceRegion, Mode=TwoWay}" />
+     <WrapPanel><Button Content="Cell size from selection" Click="SelectionCellSize" /><Button Content="Add selected source cell as character" Click="CaptureSelectedCell" /></WrapPanel>
+     <TextBlock Text="To map a multi-tile character: select one complete letter, take its cell size from the selection, enter its character below, then add the selected source cell. Repeat for other letters. Afterwards select the full dialogue source region, or turn off the region limit. A palette-specific pattern requires the same palette on every tile; use * for mixed palettes." TextWrapping="Wrap" />
+     <Grid ColumnDefinitions="*,*,*,*" IsEnabled="{Binding SelectedProfile.UseRegion}">
+      <StackPanel><TextBlock Text="Region X" /><NumericUpDown Value="{Binding SelectedProfile.X}" Minimum="0" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="1"><TextBlock Text="Region Y" /><NumericUpDown Value="{Binding SelectedProfile.Y}" Minimum="0" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="2"><TextBlock Text="Width" /><NumericUpDown Value="{Binding SelectedProfile.Width}" Minimum="1" Maximum="4096" /></StackPanel>
+      <StackPanel Grid.Column="3"><TextBlock Text="Height" /><NumericUpDown Value="{Binding SelectedProfile.Height}" Minimum="1" Maximum="4096" /></StackPanel>
+     </Grid>
+     <TextBlock Text="{Binding CapturedTileInfo}" TextWrapping="Wrap" />
+     <StackPanel Orientation="Horizontal" Spacing="8">
+      <TextBox Text="{Binding CaptureCharacter}" Width="65" PlaceholderText="Letter" />
+      <CheckBox Content="Match captured palette" IsChecked="{Binding CapturePalette}" />
+      <Button Content="Add captured source cell" Click="Capture" />
+     </StackPanel>
+     <TextBlock Text="Character mappings: comma-separated hexadecimal tiles in reading order (left to right, then top to bottom), followed by optional palette. Example for 8×16: 0010,0020 * = A. Every tile in a source cell must match; one character is emitted. Use U+0020 for a space. Exact palette entries take precedence over *." TextWrapping="Wrap" />
+     <TextBox Name="textMappings" Text="{Binding MappingText}" AcceptsReturn="True" MinHeight="120" MaxHeight="230" FontFamily="monospace" />
+     <TextBlock Text="RAM conditions (all must match): hexadecimal ADDRESS OP VALUE / MASK. Operators: == != &gt; &lt; &gt;= &lt;=. Leave empty for unconditional text." TextWrapping="Wrap" />
+     <TextBox Text="{Binding ConditionsText}" AcceptsReturn="True" MinHeight="65" MaxHeight="160" FontFamily="monospace" />
+     <TextBox Text="{Binding PreviewText}" PlaceholderText="Preview text" />
+     <Button Content="Refresh font preview" Click="Preview" />
+     <Border Background="#404040" Padding="8"><Image Source="{Binding Preview}" Stretch="Uniform" MaxHeight="240" /></Border>
+     <TextBlock Text="Saving merges text profiles into the current ROM pack. Cancel/close keeps imported font files but discards unsaved profile edits." TextWrapping="Wrap" />
+    </StackPanel>
+   </StackPanel>
+  </ScrollViewer>
+ </DockPanel>
+</Window>

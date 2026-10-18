@@ -22,7 +22,7 @@ public class PngAnimationWindow : MesenWindow
 		_timer.Tick+=(_,_) => _model.AdvancePreview(); Opened+=(_,_) => _timer.Start();
 		Closed+=(_,_) => { _timer.Stop(); _model.Dispose(); };
 	}
-	private async void Add(object? sender,RoutedEventArgs e) { string? path=await FileDialogHelper.OpenFile(_model.DirectoryPath,this,FileDialogHelper.PngExt); if(path!=null) { _model.AddFrame(path); } }
+	private async void Add(object? sender,RoutedEventArgs e) { var paths=await FileDialogHelper.OpenFiles(_model.DirectoryPath,this,FileDialogHelper.PngExt); if(paths.Count>0) { _model.AddFrames(paths); } }
 	private void Remove(object? sender,RoutedEventArgs e) => _model.RemoveFrame();
 	private void Previous(object? sender,RoutedEventArgs e) => _model.Browse(-1);
 	private void Next(object? sender,RoutedEventArgs e) => _model.Browse(1);

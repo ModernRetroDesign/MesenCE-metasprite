@@ -1,29 +1,24 @@
 #pragma once
+#include "MetaReplacementPacketReader.h"
 #include "MetaBackgroundReplacement.h"
 #include <stdexcept>
 #include <set>
 
 class MetaBackgroundPacket
 {
-	const uint8_t* _data;
-	size_t _length, _offset = 0;
+	MetaReplacementPacketReader _reader;
 	MetaPngPixelPool _localPool;
 	MetaPngPixelPool* _pixelPool;
-	uint32_t Read()
-	{
-		if(_length - _offset < 4) { throw std::runtime_error("Truncated background packet"); }
-		uint32_t value = uint32_t(_data[_offset]) | (uint32_t(_data[_offset + 1]) << 8)
-			| (uint32_t(_data[_offset + 2]) << 16) | (uint32_t(_data[_offset + 3]) << 24);
-		_offset += 4;
-		return value;
-	}
+	MetaPngPacketResources _animationResources;
+	uint32_t Read() { return _reader.Read(); }
 public:
-	MetaBackgroundPacket(const uint8_t* data, size_t length, MetaPngPixelPool* pool = nullptr) : _data(data), _length(length), _pixelPool(pool ? pool : &_localPool) {}
+	MetaBackgroundPacket(const uint8_t* data, size_t length, MetaPngPixelPool* pool = nullptr) : _reader(data,length), _pixelPool(pool ? pool : &_localPool) {}
+	explicit MetaBackgroundPacket(const std::string& file, MetaPngPixelPool* pool = nullptr) : _reader(file), _pixelPool(pool ? pool : &_localPool) {}
 	std::vector<MetaBackgroundReplacement> Parse()
 	{
-		if(!_data || _length > 536870912) { throw std::runtime_error("Invalid background packet"); }
+		if(!_reader.IsValid() || _reader.Length() > 536870912) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t magic = Read();
-		if(((magic < 0x3147424D || magic > 0x3947424D) && (magic < 0x4147424D || magic > 0x4847424D)) || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
+		if(((magic < 0x3147424D || magic > 0x3947424D) && (magic < 0x4147424D || magic > 0x4947424D)) || (magic & 0xFFFFFF) != 0x47424D) { throw std::runtime_error("Invalid background packet"); }
 		uint32_t count = Read();
 		if(count > 128) { throw std::runtime_error("Too many background layers"); }
 		std::set<int> ids;
@@ -81,7 +76,7 @@ public:
 			if(magic >= 0x4447424D) { uint32_t position = Read(); if(position > (magic >= 0x4747424D ? 6u : magic >= 0x4647424D ? 3u : magic >= 0x4547424D ? 2u : 1u)) { throw std::runtime_error("Invalid PNG composition position"); } layer.CompositionPosition = position; }
 			if(magic >= 0x4547424D) { uint32_t priority = Read(); if(priority > 3) { throw std::runtime_error("Invalid GBA PNG priority"); } layer.GbaPriority = priority; }
 			if(magic >= 0x4647424D) { uint32_t priority = Read(); if(priority < 1 || priority > 15) { throw std::runtime_error("Invalid SNES PNG priority"); } layer.SnesPriority = priority; }
-			if(pixels > (_length - _offset) / 4) { throw std::runtime_error("Invalid background pixels"); }
+			if(pixels > (_reader.Remaining()) / 4) { throw std::runtime_error("Invalid background pixels"); }
 			layer.Artwork.reserve(pixels);
 			for(size_t p = 0; p < pixels; p++) { layer.Artwork.push_back(Read()); }
 			if(magic != 0x3147424D) {
@@ -95,7 +90,7 @@ public:
 					layer.MemoryConditions.push_back({address, static_cast<uint8_t>(value), static_cast<uint8_t>(mask), static_cast<uint8_t>(comparison)});
 				}
 			}
-			if(magic == 0x4847424D) {
+			if(magic >= 0x4847424D) {
 				uint32_t animationCount=Read(); if(animationCount>256) { throw std::runtime_error("Too many background animation frames"); }
 				if(animationCount) {
 					uint32_t mode=Read(), restart=Read(); if(mode>2 || restart>1) { throw std::runtime_error("Unsupported background animation settings"); }
@@ -107,10 +102,17 @@ public:
 						image.OriginX=(int32_t)Read(); image.OriginY=(int32_t)Read();
 						uint32_t w=Read(), h=Read();
 						if(image.OriginX < -4096 || image.OriginX > 4096 || image.OriginY < -4096 || image.OriginY > 4096
-							|| w<1 || w>8192 || h<1 || h>8192 || w%scale || h%scale || (size_t)w*h > (_length-_offset)/4) { throw std::runtime_error("Invalid background animation canvas"); }
-						image.Width=w; image.Height=h; std::vector<uint32_t> animationPixels; animationPixels.reserve((size_t)w*h);
-						for(size_t p=0;p<(size_t)w*h;p++) { animationPixels.push_back(Read()); }
-						image.Pixels=_pixelPool->Intern(std::move(animationPixels));
+							|| w<1 || w>8192 || h<1 || h>8192 || w%scale || h%scale) { throw std::runtime_error("Invalid background animation canvas"); }
+						image.Width=w; image.Height=h;
+						uint32_t resource=magic==0x4947424D ? Read() : 0;
+						if(resource) { image.Pixels=_animationResources.Resolve(resource,(size_t)w*h); }
+						else {
+							if((size_t)w*h > (_reader.Remaining())/4) { throw std::runtime_error("Truncated background animation pixels"); }
+							std::vector<uint32_t> animationPixels; animationPixels.reserve((size_t)w*h);
+							for(size_t p=0;p<(size_t)w*h;p++) { animationPixels.push_back(Read()); }
+							image.Pixels=_pixelPool->Intern(std::move(animationPixels));
+							if(magic==0x4947424D) { _animationResources.Add(image.Pixels); }
+						}
 						layer.Animation.Frames.push_back(std::move(image));
 					}
 					layer.Animation.Timeline=MetaPngTimeline((MetaPngPlayback)mode,durations);
@@ -118,8 +120,8 @@ public:
 			}
 			result.push_back(std::move(layer));
 		}
-		if(_offset != _length) { throw std::runtime_error("Trailing background data"); }
-		auto identity=MetaPngPacketIdentity(_data,_length);
+		if(_reader.Remaining() != 0) { throw std::runtime_error("Trailing background data"); }
+		auto identity=_reader.Identity();
 		for(auto& layer : result) { layer.Animation.SourceIdentity=identity; }
 		return result;
 	}

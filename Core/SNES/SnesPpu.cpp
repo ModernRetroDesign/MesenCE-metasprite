@@ -255,6 +255,10 @@ void SnesPpu::GetChrData(uint8_t layerIndex, uint8_t column, uint8_t plane)
 	}
 
 	uint16_t tileStart = config.ChrAddress + tileIndex * 4 * bpp;
+	if constexpr(!hiResMode) { if(_metaFrame && (_metaFrame->TextLayerMask&(1<<layerIndex)) && plane==0 && column<33) {
+		auto& text=_textTiles[layerIndex][column]; text={}; text.Valid=!IsDoubleHeight() && !(_state.MosaicEnabled&(1<<layerIndex));
+		text.TileIndex=tileIndex; text.GraphicsAddress=(tileStart&0x7FFF)*2; text.Palette=(tilemapData>>10)&7;
+	} }
 
 	uint8_t baseYOffset = (realY + tileData.VScroll) & 0x07;
 
@@ -534,6 +538,7 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t& hClock)
 			_metaFrame = !_skipRender && _metaCaptureRequested.load() ? _metaFramePool.Acquire(256, 239) : nullptr;
 			if(_metaFrame) {
 				_metaFrame->SnesColorEffects = true;
+				_metaFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask();
 				if(_emu->GetVideoDecoder()->HasMetaBackgroundLayers()) { _metaFrame->SnesBackgrounds.resize(256 * 239); }
 			}
 			_spc->SetSpcState(true);
@@ -1237,6 +1242,17 @@ void SnesPpu::RenderTilemap()
 		}
 
 		uint8_t paletteIndex = (tilemapData >> 10) & 0x07;
+		if constexpr(!hiResMode && !applyMosaic) { if(_metaFrame && (_metaFrame->TextLayerMask&(1<<layerIndex)) && lookupIndex<33) {
+			uint32_t y=_overscanFrame ? _scanline-1 : _scanline+6;
+			auto text=_textTiles[layerIndex][lookupIndex]; text.LocalX=metaSample.X&7; text.LocalY=metaSample.Y&7;
+			text.Palette=(bpp==8 ? 0 : paletteIndex)+(_state.BgMode==0 ? layerIndex*8 : 0);
+			// Palette capture must not modify the PPU's internal CGRAM address latch.
+			uint16_t saved=_state.InternalCgramAddress;
+			for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=GetRgbColor<bpp,directColorMode,basePaletteOffset>(paletteIndex,ink); }
+			_state.InternalCgramAddress=saved; auto sample=metaSample;
+			sample.Valid &= ((drawMain && !ProcessMaskWindow<layerIndex>(mainWindowCount,x)) || (drawSub && !ProcessMaskWindow<layerIndex>(subWindowCount,x))) && !_useHighResOutput;
+			_metaFrame->CaptureText(layerIndex,x,y,text,sample);
+		} }
 		uint8_t priority = (tilemapData & 0x2000) ? highPriority : normalPriority;
 
 		if constexpr(applyMosaic) {
@@ -1557,19 +1573,7 @@ void SnesPpu::ApplyColorMath()
 			if(subCapture) {
 				const auto& current = captureRow[x];
 				const auto& previous = captureRow[prevX];
-				static_cast<MetaSpritePixelState&>(*subCapture) = current;
-				subCapture->MathControlX = prevX; subCapture->Captured = !_state.ForcedBlank;
-				subCapture->VisibleSprite = current.SecondarySprite;
-				subCapture->SecondarySprite = x > 0 ? previous.VisibleSprite : -1;
-				subCapture->SpriteColor = subPixel; subCapture->SecondaryColor = prevMainPixel;
-				subCapture->SnesFallbackMainColor = current.SnesFallbackSubColor;
-				subCapture->SnesFallbackSubColor = x > 0 ? previous.SnesFallbackMainColor : 0;
-				subCapture->SnesFallbackMainFlags = current.SnesFallbackSubPriority | (previous.SnesFallbackMainFlags & PixelFlags::AllowColorMath);
-				subCapture->SnesFallbackSubPriority = x > 0 ? previous.SnesFallbackMainFlags & 15 : 0;
-				subCapture->SnesFallbackMainLayer = current.SnesFallbackSubLayer;
-				subCapture->SnesFallbackSubLayer = x > 0 ? previous.SnesFallbackMainLayer : 0xFF;
-				subCapture->BackgroundSample = current.SnesSubBackgroundSample;
-				subCapture->SnesSubBackgroundSample = x > 0 ? previous.BackgroundSample : MetaBackgroundSample{};
+				*subCapture=MetaSnesCapture::CaptureSubOutputPhase(current,previous,x,subPixel,prevMainPixel,!_state.ForcedBlank);
 			}
 			ApplyColorMathToPixel(_subScreenBuffer[x], prevMainPixel, prevX, isInsideWindow, subCapture);
 
@@ -1841,7 +1845,12 @@ void SnesPpu::SendFrame()
 		const auto& previous = _metaInterlaceFields[_oddFrame ? 0 : 1];
 		if(previous && previous->FrameNumber + 1 == _frameCount) {
 			auto output = _metaOutputFramePool.Acquire(width, height);
-			if(MetaSnesCapture::WeaveFieldsWithoutMath(*_metaInterlaceFields[0], *_metaInterlaceFields[1], *output)) { frame.MetaSprites = output; }
+			if(MetaSnesCapture::WeaveFieldsWithoutMath(*_metaInterlaceFields[0], *_metaInterlaceFields[1], *output,true,true)) {
+				if(MetaSnesCapture::RequiresHiresMathSource(*_metaInterlaceFields[0]) || MetaSnesCapture::RequiresHiresMathSource(*_metaInterlaceFields[1])) {
+					output->SnesHiresSource=_metaInterlaceFields[0]; output->SnesHiresOddSource=_metaInterlaceFields[1];
+				}
+				frame.MetaSprites=output;
+			}
 		}
 	} else {
 		_metaInterlaceFields[0].reset(); _metaInterlaceFields[1].reset();
@@ -1849,14 +1858,20 @@ void SnesPpu::SendFrame()
 			&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
 			_metaFrame->FrameNumber = _frameCount;
 			auto output = _metaOutputFramePool.Acquire(width, height);
-			if(MetaSnesCapture::MapFieldWithoutMath(*_metaFrame, *output, _oddFrame)) { frame.MetaSprites = output; }
+			if(MetaSnesCapture::MapFieldWithoutMath(*_metaFrame, *output, _oddFrame,true,true)) {
+				if(MetaSnesCapture::RequiresHiresMathSource(*_metaFrame)) { output->SnesHiresSource=_metaFrame; }
+				frame.MetaSprites=output;
+			}
 		}
 		if(_metaFrame && _interlacedFrame && !isRewinding
 			&& (_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Bob
 				|| _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::BobBlend)) {
 			_metaFrame->FrameNumber = _frameCount;
 			auto output = _metaOutputFramePool.Acquire(width, height);
-			if(MetaSnesCapture::MapBobWithoutMath(*_metaFrame, *output, _oddFrame, _overscanFrame ? 0 : 7)) { frame.MetaSprites = output; }
+			if(MetaSnesCapture::MapBobWithoutMath(*_metaFrame, *output, _oddFrame, _overscanFrame ? 0 : 7,true,true)) {
+				if(MetaSnesCapture::RequiresHiresMathSource(*_metaFrame)) { output->SnesHiresSource=_metaFrame; }
+				frame.MetaSprites=output;
+			}
 		}
 	}
 	if(_metaFrame && !_interlacedFrame) {
@@ -1865,6 +1880,10 @@ void SnesPpu::SendFrame()
 		else if(MetaSnesCapture::CanExpandWithoutMath(*_metaFrame)) {
 			auto output = _metaOutputFramePool.Acquire(width, height);
 			if(MetaSnesCapture::ExpandWithoutMath(*_metaFrame, *output)) { frame.MetaSprites = output; }
+		}
+		else if(MetaSnesCapture::CanExpandHiresMath(*_metaFrame)) {
+			auto output=_metaOutputFramePool.Acquire(width,height);
+			if(MetaSnesCapture::ExpandWithoutMath(*_metaFrame,*output,true)) { output->SnesHiresSource=_metaFrame; frame.MetaSprites=output; }
 		}
 	}
 	if(_interlacedFrame) {

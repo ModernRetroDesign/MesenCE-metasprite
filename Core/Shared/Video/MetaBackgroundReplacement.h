@@ -113,6 +113,16 @@ struct MetaBackgroundReplacement
 		return SampleValidated(source, screenX, screenY, subX, subY, outputScale, color);
 	}
 	// The caller must validate the immutable layer before entering its pixel loop.
+	bool IsActive(const MetaMemorySnapshot& memory) const
+	{
+		int x,y;
+		return IsValid() && MetaMemoryCondition::Matches(MemoryConditions,memory)
+			&& (!UseCpuCamera || !FollowScroll || (CameraX.Decode(memory,x) && CameraY.Decode(memory,y)));
+	}
+	bool IsActiveForFrame(const MetaSpriteFrame& frame) const
+	{
+		return frame.SnesFieldMemoryCaptured ? IsActive(frame.SnesFieldMemory[0]) || IsActive(frame.SnesFieldMemory[1]) : IsActive(frame.MemorySnapshot);
+	}
 	bool SampleValidated(const MetaBackgroundSample& source, int screenX, int screenY,
 		int subX, int subY, int outputScale, uint32_t& color, const MetaPngArtworkFrame* image = nullptr) const
 	{
@@ -152,7 +162,9 @@ struct MetaBackgroundView
 {
 	std::vector<const MetaBackgroundReplacement*> Layers;
 	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> RasterReferences;
-	std::unordered_map<const MetaBackgroundReplacement*, MetaBackgroundSample> CameraReferences;
+	std::unordered_map<const MetaBackgroundReplacement*, std::array<MetaBackgroundSample,2>> CameraReferences;
+	std::unordered_map<const MetaBackgroundReplacement*, uint8_t> ActiveFields;
+	std::array<uint8_t,2> HiddenNativeFieldLayers = {};
 	std::unordered_map<const MetaBackgroundReplacement*, std::array<const MetaPngArtworkFrame*,2>> AnimationFrames;
 	bool WovenAnimation = false;
 	bool RasterPrepared = false;
@@ -163,22 +175,27 @@ struct MetaBackgroundView
 		return false;
 	}
 	uint8_t HiddenNativeLayers = 0;
-	bool HidesNativeLayer(int layer) const {
+	bool HidesNativeLayer(int layer, int y = 0) const {
 		if(layer < 0 || layer > 7) { return false; }
-		if(RasterPrepared) { return HiddenNativeLayers & (1 << layer); }
+		if(RasterPrepared) { return (WovenAnimation ? HiddenNativeFieldLayers[y & 1] : HiddenNativeLayers) & (1 << layer); }
 		for(const auto* background : Layers) { if(background->Layer == layer && background->HideOriginalLayer && background->IsValid()) { return true; } }
 		return false;
 	}
 	void PrepareRasterReferences(const MetaSpriteFrame& frame)
 	{
 		RasterReferences.clear();
-		CameraReferences.clear();
+		CameraReferences.clear(); ActiveFields.clear(); HiddenNativeFieldLayers = {};
 		AnimationFrames.clear(); WovenAnimation = frame.SnesFieldMemoryCaptured;
 		RasterPrepared = true;
 		HiddenNativeLayers = 0;
 		SnesIndependentPriority = false;
 		if(frame.Pixels.size() != (uint64_t)frame.Width * frame.Height) { return; }
-		for(const auto* layer : Layers) {
+        for(const auto* layer : Layers) {
+			uint8_t active=3;
+			if(WovenAnimation) {
+				active=(layer->IsActive(frame.SnesFieldMemory[0]) ? 1 : 0) | (layer->IsActive(frame.SnesFieldMemory[1]) ? 2 : 0);
+				ActiveFields.emplace(layer,active);
+			}
 			if(!layer->Animation.Frames.empty()) {
 				std::array<const MetaPngArtworkFrame*,2> selected;
 				for(int field=0;field<2;field++) { selected[field]=layer->Animation.Select(WovenAnimation ? frame.SnesFieldFrameNumber[field] : frame.FrameNumber, WovenAnimation ? frame.SnesFieldAnimationTiming[field].get() : frame.AnimationTiming.get()); }
@@ -186,12 +203,19 @@ struct MetaBackgroundView
 			}
 			SnesIndependentPriority |= layer->CompositionPosition == 3;
 			if(layer->UseCpuCamera && layer->FollowScroll) {
-				MetaBackgroundSample camera;
-				camera.Valid = layer->CameraX.Decode(frame.MemorySnapshot, camera.ScrollX) && layer->CameraY.Decode(frame.MemorySnapshot, camera.ScrollY);
-				CameraReferences.emplace(layer, camera);
-				if(!camera.Valid) { continue; }
+				std::array<MetaBackgroundSample,2> cameras;
+				for(int field=0;field<2;field++) {
+					const auto& memory=WovenAnimation ? frame.SnesFieldMemory[field] : frame.MemorySnapshot;
+					auto& camera=cameras[field]; camera.Valid=layer->CameraX.Decode(memory,camera.ScrollX) && layer->CameraY.Decode(memory,camera.ScrollY);
+					if(!camera.Valid) { active &= (uint8_t)~(1<<field); }
+				}
+				CameraReferences.emplace(layer,cameras);
+				if(!active) { continue; }
 			}
-			if(layer->HideOriginalLayer && layer->IsValid()) { HiddenNativeLayers |= (uint8_t)(1 << layer->Layer); }
+			if(layer->HideOriginalLayer && layer->IsValid() && active) {
+				HiddenNativeLayers |= (uint8_t)(1 << layer->Layer);
+				for(int field=0;field<2;field++) { if(active & (1<<field)) { HiddenNativeFieldLayers[field] |= (uint8_t)(1<<layer->Layer); } }
+			}
 			if(!layer->IgnoreRasterScroll || !layer->FollowScroll || layer->ScrollReferenceScanline < 0 || (uint32_t)layer->ScrollReferenceScanline >= frame.Height) { continue; }
 			for(uint32_t x = 0; x < frame.Width; x++) {
 				const auto& sample = frame.Pixels[(size_t)layer->ScrollReferenceScanline * frame.Width + x].BackgroundSample;
@@ -202,6 +226,8 @@ struct MetaBackgroundView
 	bool Sample(const MetaBackgroundReplacement& layer, const MetaBackgroundSample& source, int x, int y, int sx, int sy, int scale, uint32_t& color, bool independent = false) const
 	{
 		if(layer.CompositionPosition != 0 && !independent) { color = 0; return false; }
+		int field=WovenAnimation ? (y & 1) : 0;
+		if(WovenAnimation) { auto active=ActiveFields.find(&layer); if(active==ActiveFields.end() || !(active->second & (1<<field))) { color=0; return false; } }
 		const MetaPngArtworkFrame* image=nullptr;
 		if(!layer.Animation.Frames.empty()) {
 			auto selected=AnimationFrames.find(&layer);
@@ -209,9 +235,9 @@ struct MetaBackgroundView
 		}
 		if(layer.UseCpuCamera && layer.FollowScroll) {
 			auto reference = CameraReferences.find(&layer);
-			if(reference == CameraReferences.end() || !reference->second.Valid) { color = 0; return false; }
+			if(reference == CameraReferences.end() || !reference->second[field].Valid) { color = 0; return false; }
 			MetaBackgroundSample camera = source;
-			camera.ScrollX = reference->second.ScrollX; camera.ScrollY = reference->second.ScrollY;
+			camera.ScrollX = reference->second[field].ScrollX; camera.ScrollY = reference->second[field].ScrollY;
 			auto floorDivide = [](int value, int divisor) { return value / divisor - (value % divisor < 0 ? 1 : 0); };
 			camera.X = floorDivide(x, std::max(1, (int)source.PixelScaleX)) + camera.ScrollX;
 			camera.Y = floorDivide(y, std::max(1, (int)source.PixelScaleY)) + camera.ScrollY;
@@ -265,7 +291,7 @@ public:
 		for(uint32_t y = 0; y < frame.Height; y++) {
 			for(uint32_t x = 0; x < frame.Width; x++) {
 				const auto& pixel = frame.Pixels[static_cast<size_t>(y) * frame.Width + x];
-				uint32_t color = convertColor(pixel.NativeBackdropCaptured && pixel.BackgroundSample.Valid && layers.HidesNativeLayer(pixel.BackgroundSample.Layer) ? pixel.NativeBackdropColor : pixel.BackgroundColor);
+				uint32_t color = convertColor(pixel.NativeBackdropCaptured && pixel.BackgroundSample.Valid && layers.HidesNativeLayer(pixel.BackgroundSample.Layer,(int)y+screenTop) ? pixel.NativeBackdropColor : pixel.BackgroundColor);
 				for(int sy = 0; sy < outputScale; sy++) {
 					for(int sx = 0; sx < outputScale; sx++) { fallback[(static_cast<size_t>(y) * outputScale + sy) * width + x * outputScale + sx] = color; }
 				}
@@ -305,10 +331,10 @@ private:
 								result = blended;
 							}
 						};
-						if(pair->Sample.Valid) { if(!prepared.HidesNativeLayer(pair->Sample.Layer)) { result = convertColor(pair->Color); } overlay(pair->Sample); }
+						if(pair->Sample.Valid) { if(!prepared.HidesNativeLayer(pair->Sample.Layer,(int)y+screenTop)) { result = convertColor(pair->Color); } overlay(pair->Sample); }
 						bool nativeObject = preserveSprites && pixel.VisibleSprite >= 0;
 						if(nativeObject && pixel.NativeVisibleSpriteClass == 2) { result = convertColor(pixel.SpriteColor); }
-						if(pair->ForegroundOpaque && !prepared.HidesNativeLayer(pair->ForegroundSample.Layer)) { result = convertColor(pair->ForegroundColor); }
+						if(pair->ForegroundOpaque && !prepared.HidesNativeLayer(pair->ForegroundSample.Layer,(int)y+screenTop)) { result = convertColor(pair->ForegroundColor); }
 						overlay(pair->ForegroundSample);
 						if(nativeObject && pixel.NativeVisibleSpriteClass != 2) { result = convertColor(pixel.SpriteColor); }
 						outputPixels[offset] = result;
@@ -319,12 +345,12 @@ private:
 				for(int sy = 0; sy < outputScale; sy++) {
 					for(int sx = 0; sx < outputScale; sx++) {
 						size_t offset = (static_cast<size_t>(y) * outputScale + sy) * outputWidth + x * outputScale + sx;
-						if(convertColor && pixel.NativeBackdropCaptured && prepared.HidesNativeLayer(pixel.BackgroundSample.Layer)) {
+						if(convertColor && pixel.NativeBackdropCaptured && prepared.HidesNativeLayer(pixel.BackgroundSample.Layer,(int)y+screenTop)) {
 							outputPixels[offset] = convertColor(pixel.NativeBackdropColor);
 							if(frame.BackgroundUnderlays.size() == frame.Pixels.size()) {
 								const auto& lower = frame.BackgroundUnderlays[(size_t)y * frame.Width + x];
 								if(lower.Sample.Valid) {
-									if(!prepared.HidesNativeLayer(lower.Sample.Layer)) { outputPixels[offset] = convertColor(lower.Color); }
+									if(!prepared.HidesNativeLayer(lower.Sample.Layer,(int)y+screenTop)) { outputPixels[offset] = convertColor(lower.Color); }
 									for(const auto& layer : layers) {
 										uint32_t artwork;
 										if(!layer.IsValid() || !prepared.Sample(layer, lower.Sample, x + screenLeft, y + screenTop, sx, sy, outputScale, artwork)) { continue; }

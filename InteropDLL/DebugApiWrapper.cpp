@@ -40,6 +40,7 @@
 #include "Core/SNES/SnesConsole.h"
 #include "Core/SNES/SnesPpu.h"
 #include "Core/Shared/Video/VideoDecoder.h"
+#include "Core/Shared/Video/MetaTextPacket.h"
 #include "Core/Shared/Video/MetaSpritePacket.h"
 #include "Core/Shared/Video/MetaBackgroundPacket.h"
 #include "Utilities/StringUtilities.h"
@@ -72,6 +73,8 @@ void WrapDebuggerCall(std::function<void(Debugger* debugger)> func)
 
 extern "C"
 {
+	DllExport void __stdcall RequestTextPreview() { auto lock = _emu->AcquireLock(); _emu->GetVideoDecoder()->WaitForAsyncFrameDecode(); _emu->GetVideoDecoder()->RequestTextPreview(); }
+	DllExport uint32_t __stdcall ReadTextPreview(uint32_t* pixels, uint32_t capacity, FrameInfo& size) { return _emu->GetVideoDecoder()->ReadTextPreview(pixels, capacity, size); }
 	DllExport bool __stdcall SetMetaBackgroundReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
 	{
 		try {
@@ -109,7 +112,7 @@ extern "C"
 			return true;
 		} catch(...) { return false; }
 	}
-	static bool ApplyMetaReplacements(const char* romHash, const uint8_t* packet, uint32_t length, const uint8_t* backgroundPacket, uint32_t backgroundLength, bool combined)
+	static bool ApplyMetaReplacements(const char* romHash, const uint8_t* packet, uint32_t length, const uint8_t* backgroundPacket, uint32_t backgroundLength, bool combined, const char* spriteFile = nullptr, const char* backgroundFile = nullptr, const char* textFile = nullptr)
 	{
 		try {
 			auto console = _emu->GetConsole();
@@ -120,14 +123,23 @@ extern "C"
 			auto ws = dynamic_cast<WsConsole*>(console.get());
 			auto nes = dynamic_cast<NesConsole*>(console.get());
 			auto snes = dynamic_cast<SnesConsole*>(console.get());
-			if(snes && _emu->GetRomInfo().Format != RomFormat::Sfc) { return false; }
-			if(nes && (!dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) || nes->GetVsMainConsole() || nes->GetVsSubConsole())) { return false; }
-			if(!romHash || (!gameboy && !sms && !pce && !gba && !ws && !nes && !snes) || (gameboy && (gameboy->IsSgb() || gameboy->GetLinkedConsole()))
-				|| (pce && pce->IsSuperGrafx()) || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			auto compatible=[&]() {
+				return (gameboy || sms || pce || gba || ws || nes || snes)
+					&& (!snes || _emu->GetRomInfo().Format==RomFormat::Sfc)
+					&& (!nes || (dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) && !nes->GetVsMainConsole() && !nes->GetVsSubConsole()))
+					&& (!gameboy || (!gameboy->IsSgb() && !gameboy->GetLinkedConsole())) && (!pce || !pce->IsSuperGrafx());
+			};
+			if(!romHash || !compatible() || _emu->GetHash(HashType::Sha1)!=romHash) { return false; }
 			MetaPngPixelPool animationPixels;
-			auto groups = MetaSpritePacket(packet, length, &animationPixels).Parse();
+			std::vector<MetaTextReplacement> texts;
+			if(textFile) {
+				texts=MetaTextPacket(std::string(textFile)).Parse();
+				if(std::any_of(texts.begin(),texts.end(),[&](const auto& p) { return p.Layer>(nes || sms || pce ? 0 : gameboy || ws ? 1 : 3); })) { return false; }
+			}
+			auto groups = spriteFile ? MetaSpritePacket(std::string(spriteFile), &animationPixels).Parse() : MetaSpritePacket(packet, length, &animationPixels).Parse();
+			std::vector<MetaBackgroundReplacement> layers;
 			if(combined) {
-				auto layers = MetaBackgroundPacket(backgroundPacket, backgroundLength, &animationPixels).Parse();
+				layers = backgroundFile ? MetaBackgroundPacket(std::string(backgroundFile), &animationPixels).Parse() : MetaBackgroundPacket(backgroundPacket, backgroundLength, &animationPixels).Parse();
 				if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return false; }
 				if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return false; }
 				if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return false; }
@@ -135,8 +147,14 @@ extern "C"
 				// remains guarded by UseMode4 at rendering time.
 				if(!layers.empty() && !gameboy && !sms && !ws && !nes && !pce && !gba && !snes) { return false; }
 				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba || snes ? 3 : 1); })) { return false; }
-				_emu->GetVideoDecoder()->SetMetaReplacements(std::move(groups), std::move(layers));
-			} else { _emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups)); }
+			}
+			// Parsing does not pause emulation. Recheck the ROM/console under its
+			// lock before publishing both sets as one transaction.
+			auto emuLock = _emu->AcquireLock();
+			if(console != _emu->GetConsole() || !compatible() || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			if(textFile) { _emu->GetVideoDecoder()->SetAllMetaReplacements(std::move(groups),std::move(layers),std::move(texts)); }
+			else if(combined) { _emu->GetVideoDecoder()->SetMetaReplacements(std::move(groups), std::move(layers)); }
+			else { _emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups)); }
 			bool enabled = _emu->GetVideoDecoder()->HasMetaReplacements();
 			if(gameboy) { gameboy->GetPpu()->SetMetaSpriteCapture(enabled); }
 			if(sms) { sms->GetVdp()->SetMetaSpriteCapture(enabled); }
@@ -155,6 +173,16 @@ extern "C"
 	DllExport bool __stdcall SetMetaReplacements(const char* romHash, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
 	{
 		return ApplyMetaReplacements(romHash, sprites, spriteLength, backgrounds, backgroundLength, true);
+	}
+	DllExport bool __stdcall SetMetaReplacementFiles(const char* romHash, const char* sprites, const char* backgrounds)
+	{
+		if(!sprites || !backgrounds) { return false; }
+		return ApplyMetaReplacements(romHash,nullptr,0,nullptr,0,true,sprites,backgrounds);
+	}
+	DllExport bool __stdcall SetMetaReplacementFilesWithText(const char* romHash,const char* sprites,const char* backgrounds,const char* texts)
+	{
+		if(!sprites || !backgrounds || !texts) { return false; }
+		return ApplyMetaReplacements(romHash,nullptr,0,nullptr,0,true,sprites,backgrounds,texts);
 	}
 	DllExport bool __stdcall SetMusicReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
 	{

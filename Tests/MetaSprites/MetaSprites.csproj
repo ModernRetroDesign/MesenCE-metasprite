@@ -9,5 +9,10 @@
   <ItemGroup>
     <Compile Include="../../UI/Debugger/Utilities/MetaSpritePack.cs" Link="MetaSpritePack.cs" />
     <Compile Include="../../UI/Debugger/Utilities/MetaPngAnimation.cs" Link="MetaPngAnimation.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaTextReplacement.cs" Link="MetaTextReplacement.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaTextRuntimePacket.cs" Link="MetaTextRuntimePacket.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaPngDecodeCache.cs" Link="MetaPngDecodeCache.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaReplacementPacketStream.cs" Link="MetaReplacementPacketStream.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaPngPacketResources.cs" Link="MetaPngPacketResources.cs" />
   </ItemGroup>
 </Project>

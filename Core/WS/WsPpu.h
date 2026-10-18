@@ -56,6 +56,7 @@ private:
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 	MetaSpriteFramePool _metaFramePool;
+	MetaTextPixel _textSamples[2][2][WsConstants::ScreenWidth] = {};
 
 	uint16_t _screenHeight = 0;
 	uint16_t _screenWidth = 0;
@@ -136,6 +137,12 @@ public:
 					pixel.BackgroundColor = bg.Priority ? GetPixelRgbColor(_state.Mode, bg.Color, bg.Palette) : GetBgColor();
 					pixel.NativeBackdropColor = GetBgColor(); pixel.NativeBackdropCaptured = true;
 					pixel.BackgroundSample = _metaBackgroundSamples[rowIndex][_state.Cycle];
+					if(_metaFrame->TextLayerMask) { for(int layer=0;layer<2;layer++) {
+						auto text=_textSamples[layer][rowIndex][_state.Cycle];
+						for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=GetPixelRgbColor(_state.Mode,ink,text.Palette); }
+						const auto& sample=layer==0 ? _metaLowerBackgroundSamples[rowIndex][_state.Cycle] : _metaForegroundBackgroundSamples[rowIndex][_state.Cycle];
+						_metaFrame->CaptureText(layer,_state.Cycle,_state.Scanline-1,text,sample);
+					} }
 					pixel.BackgroundOverlayOccludesClasses = pixel.BackgroundSample.Layer == 1 ? 10 : 0;
 					pixel.NativeVisibleSpriteClass = pixel.VisibleSprite >= 0 ? (data.Priority >= 2 ? 1 : 2) : 0;
 					if(!_metaFrame->BackgroundUnderlays.empty()) {

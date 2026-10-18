@@ -21,7 +21,7 @@
      <ComboBoxItem Content="Loop" /><ComboBoxItem Content="Ping-pong" /><ComboBoxItem Content="Play once (hold last frame)" />
     </ComboBox>
     <WrapPanel>
-     <Button Content="+" Width="32" Click="Add" ToolTip.Tip="Add a PNG frame; files outside the pack are copied into its folder." />
+     <Button Content="+" Width="32" Click="Add" ToolTip.Tip="Add one or more PNG frames in picker order; files outside the pack are copied into its folder. Use Earlier/Later to reorder." />
      <Button Content="−" Width="32" Click="Remove" IsEnabled="{Binding HasFrame}" />
      <Button Name="animationPrevious" Content="Previous" Click="Previous" IsEnabled="{Binding HasFrame}" /><Button Name="animationNext" Content="Next" Click="Next" IsEnabled="{Binding HasFrame}" />
      <Button Content="Earlier" Click="Earlier" IsEnabled="{Binding HasFrame}" /><Button Content="Later" Click="Later" IsEnabled="{Binding HasFrame}" />
@@ -39,11 +39,11 @@
      <TextBlock Text="X" VerticalAlignment="Center" /><NumericUpDown Value="{Binding FrameOriginX}" Minimum="-4096" Maximum="4096" Width="130" />
      <TextBlock Text="Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding FrameOriginY}" Minimum="-4096" Maximum="4096" Width="130" />
     </StackPanel>
-    <TextBlock Text="Click the PNG preview to set this frame's origin." TextWrapping="Wrap" />
+    <TextBlock Text="Click the PNG preview to set this frame's origin. Playback aligns all frames at this origin so different canvas sizes stay in place." TextWrapping="Wrap" />
     <Border Background="#404040" MinHeight="180" Padding="4">
      <ScrollViewer MaxHeight="300" HorizontalScrollBarVisibility="Auto">
       <Canvas Width="{Binding PreviewWidth}" Height="{Binding PreviewHeight}" Background="Transparent" PointerPressed="Origin">
-       <Image Source="{Binding Preview}" Width="{Binding PreviewWidth}" Height="{Binding PreviewHeight}" />
+       <Image Source="{Binding Preview}" Width="{Binding PreviewImageWidth}" Height="{Binding PreviewImageHeight}" Canvas.Left="{Binding PreviewImageLeft}" Canvas.Top="{Binding PreviewImageTop}" />
        <Border Background="Red" Width="1" Height="{Binding PreviewHeight}" Canvas.Left="{Binding PreviewOriginX}" IsHitTestVisible="False" />
        <Border Background="Red" Height="1" Width="{Binding PreviewWidth}" Canvas.Top="{Binding PreviewOriginY}" IsHitTestVisible="False" />
       </Canvas>

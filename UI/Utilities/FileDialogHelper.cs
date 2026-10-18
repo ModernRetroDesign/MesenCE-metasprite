@@ -44,6 +44,15 @@ namespace Mesen.Utilities
 
 		public static async Task<string?> OpenFile(string? initialFolder, Window? parent, params string[] extensions)
 		{
+			var files=await OpenFilesCore(initialFolder,parent,false,extensions);
+			return files.Count>0 ? files[0] : null;
+		}
+
+		public static Task<IReadOnlyList<string>> OpenFiles(string? initialFolder, Window? parent, params string[] extensions)
+			=> OpenFilesCore(initialFolder,parent,true,extensions);
+
+		private static async Task<IReadOnlyList<string>> OpenFilesCore(string? initialFolder, Window? parent, bool multiple, string[] extensions)
+		{
 			if(!((parent ?? ApplicationHelper.GetMainWindow()) is Window wnd)) {
 				throw new Exception("Invalid parent window");
 			}
@@ -89,17 +98,17 @@ namespace Mesen.Utilities
 
 				IReadOnlyList<IStorageFile> files = await wnd.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions() {
 					SuggestedStartLocation = initialFolder != null ? await wnd.StorageProvider.TryGetFolderFromPathAsync(initialFolder) : null,
-					AllowMultiple = false,
+					AllowMultiple = multiple,
 					FileTypeFilter = filter
 				});
 
-				if(files.Count > 0) {
-					return files[0].Path.LocalPath;
-				}
+				var paths=new List<string>(files.Count);
+				foreach(var file in files) { paths.Add(file.Path.LocalPath); }
+				return paths;
 			} catch(Exception ex) {
 				await MesenMsgBox.ShowException(ex);
 			}
-			return null;
+			return Array.Empty<string>();
 		}
 
 		public static async Task<string?> SaveFile(string? initialFolder, string? initialFile, Window? parent, params string[] extensions)

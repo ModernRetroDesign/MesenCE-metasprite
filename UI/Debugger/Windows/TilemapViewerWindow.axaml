@@ -43,6 +43,7 @@
 
 		<ScrollViewer DockPanel.Dock="Right" MaxWidth="320" HorizontalScrollBarVisibility="Disabled" IsVisible="{Binding Config.ShowSettingsPanel}">
 			<StackPanel Margin="3">
+				<Button Content="TrueType text replacements…" Click="OnEditTextReplacement" Margin="0 0 0 6" />
 				<Grid RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,Auto" IsVisible="{Binding IsTilemapInfoVisible}">
 					<TextBlock Text="{l:Translate lblDisplayMode}" />
 					<c:EnumComboBox

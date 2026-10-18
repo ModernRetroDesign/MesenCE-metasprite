@@ -18,22 +18,25 @@ internal static class MetaSpriteRuntimeLoader
 	{
 		ValidateBackgroundSupport(pack);
 		string directory=Path.GetDirectoryName(path)!;
-		var decoded=new Dictionary<string,(int Width,int Height,uint[] Pixels)>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+		var decoded=new MetaPngDecodeCache(64L*1024*1024,128,(file,reserve) => DecodePng(file,1,reserve));
 		(int Width,int Height,uint[] Pixels) LoadCached(string relative,int scale) {
 			if(string.IsNullOrWhiteSpace(relative)) { throw new InvalidDataException("Replacement artwork requires a PNG."); }
+			MetaSpritePlacement.ValidateSpriteCanvas(1,1,scale); // Reject invalid scale before decoding any pixels.
 			string fullPath=Path.GetFullPath(Path.Combine(directory,relative));
-			if(!decoded.TryGetValue(fullPath,out var image)) { image=LoadPng(fullPath,scale); decoded.Add(fullPath,image); }
+			var image=decoded.Get(fullPath);
 			MetaSpritePlacement.ValidateSpriteCanvas(image.Width,image.Height,scale); return image;
 		}
-		byte[] packet = MetaSpriteRuntimePacket.Create(pack, group => LoadCached(group.ReplacementPath,group.ReplacementScale),
-			alternate => LoadCached(alternate.Path,alternate.Scale), (frame,scale) => LoadCached(frame.Path,scale));
-		byte[] backgrounds = MetaBackgroundRuntimePacket.Create(pack, layer => {
+		using var packet = MetaSpriteRuntimePacket.CreateFile(pack, group => LoadCached(group.ReplacementPath,group.ReplacementScale),
+			alternate => LoadCached(alternate.Path,alternate.Scale), (frame,scale) => LoadCached(frame.Path,scale), sharedFrames:true);
+		using var backgrounds = MetaBackgroundRuntimePacket.CreateFile(pack, layer => {
 			if(layer.ArtworkPath.Length == 0) { throw new InvalidDataException($"Background {layer.Id} has no PNG."); }
 			var artwork = LoadCached(layer.ArtworkPath, layer.ArtworkScale);
 			MetaSpritePlacement.ValidateCanvas(artwork.Width, artwork.Height, layer.ArtworkScale);
 			return artwork;
-		}, (frame,scale) => LoadCached(frame.Path,scale));
-		return DebugApi.SetMetaReplacements(pack.RomHash, packet, (uint)packet.Length, backgrounds, (uint)backgrounds.Length);
+		}, (frame,scale) => LoadCached(frame.Path,scale), sharedFrames:true);
+		var glyphBudget=new MetaTextRasterizer.Budget();
+		using var texts=MetaTextRuntimePacket.CreateFile(pack,p => glyphBudget.Rasterize(p,directory));
+		return DebugApi.SetMetaReplacementFilesWithText(pack.RomHash,packet.Path,backgrounds.Path,texts.Path);
 	}
 
 	public static void ValidateBackgroundSupport(MetaSpritePack pack)
@@ -114,10 +117,12 @@ internal static class MetaSpriteRuntimeLoader
 		MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width, codec.Info.Height, scale);
 	}
 
-	private static (int Width, int Height, uint[] Pixels) LoadPng(string path, int scale)
+	private static (int Width, int Height, uint[] Pixels) LoadPng(string path, int scale) => DecodePng(path,scale,null);
+	private static (int Width, int Height, uint[] Pixels) DecodePng(string path,int scale,Action<long>? reserve)
 	{
 		using SKCodec codec = SKCodec.Create(path) ?? throw new InvalidDataException("Could not decode replacement PNG.");
 		MetaSpritePlacement.ValidateSpriteCanvas(codec.Info.Width, codec.Info.Height, scale);
+		reserve?.Invoke((long)codec.Info.Width*codec.Info.Height*4);
 		// Decode straight alpha directly: a premultiplied UI bitmap round trip
 		// can change partial-alpha RGB values before gameplay composition.
 		var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul);

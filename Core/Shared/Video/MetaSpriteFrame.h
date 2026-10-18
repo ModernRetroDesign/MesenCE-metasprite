@@ -71,6 +71,16 @@ struct MetaBackgroundSample
 	bool NesRasterScroll = false;
 };
 
+// Optional fetched tile identities. Kept outside the common pixel structure so
+// packs without text replacement incur no per-pixel allocation or reset cost.
+struct MetaTextPixel
+{
+	uint32_t TileIndex=0, GraphicsAddress=0;
+	uint16_t InkColors[3]={};
+	uint8_t Palette=0, LocalX=0, LocalY=0;
+	bool Valid=false;
+};
+
 struct MetaGbaSpriteCoverage
 {
 	int16_t Sprite = -1;
@@ -221,6 +231,8 @@ struct MetaSnesSubOutputPhase : MetaSpritePixelState
 	// Color math reads main-screen flags and subscreen priority at this
 	// logical X, independently of where the primary output pixel is located.
 	int16_t MathControlX = -1;
+	// Unlike MathControlX, the color operand has no source at the left edge.
+	int16_t SecondarySampleX = -1;
 	bool Captured = false;
 };
 
@@ -291,6 +303,15 @@ struct MetaSpriteFrame
 	uint8_t SpriteCoordinateScale = 1;
 	uint8_t SnesOutputOffsetY = 0;
 	std::vector<MetaSpritePixel> Pixels;
+	std::vector<MetaTextPixel> TextPixels;
+	struct TextSample { MetaTextPixel Tile; int32_t X=0,Y=0; };
+	std::array<std::vector<TextSample>,4> TextLayers;
+	uint8_t TextLayerMask=0;
+	void CaptureText(uint8_t layer,uint32_t x,uint32_t y,const MetaTextPixel& tile,const MetaBackgroundSample& sample) {
+		if(layer>=4 || !(TextLayerMask&(1<<layer)) || x>=Width || y>=Height) { return; }
+		auto& plane=TextLayers[layer]; if(plane.empty()) { plane.resize(size_t(Width)*Height); }
+		auto& out=plane[size_t(y)*Width+x]; out.Tile=tile; out.Tile.Valid &= sample.Valid; out.X=sample.X; out.Y=sample.Y;
+	}
 	// Keep SNES layer capture separate so other systems pay no per-pixel cost.
 	std::vector<MetaSnesBackgroundPixel> SnesBackgrounds;
 	// Allocated by adapters that retain a native background below the winner.
@@ -299,6 +320,9 @@ struct MetaSpriteFrame
 	// controlled by the previous main pixel. Keep that phase independent of
 	// the current main pixel's state. Allocated only on double-width scanlines.
 	std::vector<MetaSnesSubOutputPhase> SnesSubOutput;
+	// Retain logical main/sub dependencies for noninterlaced hires math.
+	std::shared_ptr<const MetaSpriteFrame> SnesHiresSource;
+	std::shared_ptr<const MetaSpriteFrame> SnesHiresOddSource;
 	std::vector<MetaSpriteRow> Rows;
 	std::vector<MetaSpriteDecodedRow> DecodedRows;
 	// NES palettes contain PPU color indices/emphasis, rather than RGB555 values.
@@ -321,7 +345,8 @@ struct MetaSpriteFrame
 			static_cast<MetaSpritePixelState&>(pixels[i]) = blank;
 			pixels[i].GbaCoverage.clear(); pixels[i].GbaNativeObjects.clear(); pixels[i].SnesCoverage.clear(); pixels[i].SnesNativeObjects.clear();
 		}
-		SnesBackgrounds.clear(); BackgroundUnderlays.clear(); SnesSubOutput.clear(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+		TextPixels.clear(); SnesBackgrounds.clear(); BackgroundUnderlays.clear(); SnesSubOutput.clear(); SnesHiresSource.reset(); SnesHiresOddSource.reset(); Rows.clear(); DecodedRows.clear(); NesRows.clear(); MemorySnapshot.clear();
+		TextLayerMask=0; for(auto& plane:TextLayers) { plane.clear(); }
 		SnesFieldMemory[0].clear(); SnesFieldMemory[1].clear(); SnesFieldMemoryCaptured = false;
 		SnesFieldFrameNumber[0] = SnesFieldFrameNumber[1] = 0;
 		AnimationTiming.reset(); SnesFieldAnimationTiming[0].reset(); SnesFieldAnimationTiming[1].reset();
@@ -336,6 +361,9 @@ class MetaSpriteFramePool
 public:
 	std::shared_ptr<MetaSpriteFrame> Acquire(uint32_t width, uint32_t height)
 	{
+		// Retired expanded frames must not pin the logical source pool forever.
+		// Published frames still retain their source until their readers release it.
+		for(auto& retired : _frames) { if(retired && retired.use_count()==1) { retired->SnesHiresSource.reset(); retired->SnesHiresOddSource.reset(); } }
 		for(auto& frame : _frames) {
 			if(frame && frame.use_count() == 1 && frame->Width == width && frame->Height == height) {
 				frame->Reset(); return frame;

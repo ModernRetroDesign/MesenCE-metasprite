@@ -89,6 +89,7 @@ void WsPpu::ProcessEndOfScanline()
 		_state.Mode = _state.NextMode;
 		_state.Scanline = 0;
 		_metaFrame = _metaCaptureRequested.load() ? _metaFramePool.Acquire(WsConstants::ScreenWidth, WsConstants::ScreenHeight) : nullptr;
+		if(_metaFrame) { _metaFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask(); }
 		if(_metaFrame) { _metaFrame->WsCapture = true; }
 		if(_metaFrame && _emu->GetVideoDecoder()->HasMetaReplacements()) { _metaFrame->BackgroundUnderlays.resize(WsConstants::ScreenWidth * WsConstants::ScreenHeight); }
 		_emu->ProcessEvent(EventType::StartFrame, CpuType::Ws);
@@ -119,6 +120,7 @@ void WsPpu::DrawScanline()
 		std::fill(_metaForegroundBackground[rowIndex], _metaForegroundBackground[rowIndex] + WsConstants::ScreenWidth, PixelData {});
 		std::fill(_metaForegroundBackgroundSamples[rowIndex], _metaForegroundBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
 		std::fill(_metaBackgroundSamples[rowIndex], _metaBackgroundSamples[rowIndex] + WsConstants::ScreenWidth, MetaBackgroundSample {});
+		if(_metaFrame->TextLayerMask) { for(int layer=0;layer<2;layer++) { std::fill(std::begin(_textSamples[layer][rowIndex]),std::end(_textSamples[layer][rowIndex]),MetaTextPixel{}); } }
 		std::fill(_metaSpriteIds[rowIndex], _metaSpriteIds[rowIndex] + WsConstants::ScreenWidth, -1);
 		std::fill(_metaReplacementCoverage[rowIndex], _metaReplacementCoverage[rowIndex] + WsConstants::ScreenWidth, MetaCoverage{});
 		std::fill(_metaHighPriorityCoverage[rowIndex], _metaHighPriorityCoverage[rowIndex] + WsConstants::ScreenWidth, MetaCoverage{});
@@ -288,6 +290,10 @@ void WsPpu::DrawBackground()
 			}
 
 			//"In two bit per pixel modes: Palettes 0-3 and 8-11 are opaque. For these, index zero is treated as opaque."
+			if(_metaFrame && (_metaFrame->TextLayerMask&(1<<layerIndex))) {
+				auto& text=_textSamples[layerIndex][rowIndex][i]; text={}; text.Valid=true; text.TileIndex=tileIndex; text.GraphicsAddress=tilesetAddr+tileIndex*tileSize;
+				text.Palette=palette; text.LocalX=(x+i-cycle)&7; text.LocalY=y&7;
+			}
 			if constexpr(layerIndex == 0) {
 				if(_metaFrame) {
 					auto& sample = _metaLowerBackgroundSamples[rowIndex][i];

@@ -18,12 +18,16 @@ namespace Mesen.Interop
 	public class DebugApi
 	{
 		private const string DllPath = EmuApi.DllName;
+		[DllImport(DllPath)] public static extern void RequestTextPreview();
+		[DllImport(DllPath)] public static extern uint ReadTextPreview(IntPtr pixels, uint capacity, out FrameInfo size);
 		[DllImport(DllPath)] public static extern void InitializeDebugger();
 		[DllImport(DllPath)] public static extern void ReleaseDebugger();
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteFrameCapture([MarshalAs(UnmanagedType.I1)] bool enabled);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaSpriteReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaBackgroundReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] sprites, uint spriteLength, byte[] backgrounds, uint backgroundLength);
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaReplacementFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, [MarshalAs(UnmanagedType.LPUTF8Str)] string sprites, [MarshalAs(UnmanagedType.LPUTF8Str)] string backgrounds);
+		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMetaReplacementFilesWithText([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, [MarshalAs(UnmanagedType.LPUTF8Str)] string sprites, [MarshalAs(UnmanagedType.LPUTF8Str)] string backgrounds, [MarshalAs(UnmanagedType.LPUTF8Str)] string texts);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool SetMusicReplacements([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, byte[] packet, uint length);
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool ReplacementMusicCommand([MarshalAs(UnmanagedType.LPUTF8Str)] string romHash, uint action, uint track);
 		[DllImport(DllPath)] public static extern int GetReplacementMusicTrack();

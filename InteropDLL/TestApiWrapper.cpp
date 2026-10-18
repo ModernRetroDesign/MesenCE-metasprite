@@ -1,8 +1,10 @@
 #include "Common.h"
 #include "Core/Shared/RecordedRomTest.h"
 #include "Core/Shared/Emulator.h"
+#include "Core/Shared/RewindManager.h"
 #include "Core/Shared/Video/MetaSpritePacket.h"
 #include "Core/Shared/Video/MetaBackgroundPacket.h"
+#include "Core/Shared/Video/MetaTextPacket.h"
 #include "Core/Shared/Audio/MusicReplacement.h"
 #include "Core/Shared/Audio/SoundMixer.h"
 #include "Core/NES/NesMemoryManager.h"
@@ -111,6 +113,9 @@ public:
 	bool MeasureTiming = false;
 	vector<double> FrameIntervals;
 	uint32_t TimingFrame = 0, SkippedTimingFrames = 0;
+	bool RecordReplayFrames=false, CheckReplayFrames=false;
+	std::unordered_map<uint32_t,vector<uint32_t>> ReplayFrames;
+	uint32_t ReplayMatches=0, ReplayErrors=0, ReplayPrevious=UINT32_MAX;
 	std::chrono::steady_clock::time_point TimingPrevious;
 	void UpdateFrame(RenderedFrame& frame) override
 	{
@@ -118,6 +123,14 @@ public:
 		Width = frame.Width; Height = frame.Height; FrameNumber = frame.FrameNumber;
 		Pixels.assign((uint32_t*)frame.FrameBuffer, (uint32_t*)frame.FrameBuffer + Width * Height);
 		Capture = frame.MetaSprites;
+		if(RecordReplayFrames && ReplayFrames.size()<180) { ReplayFrames[FrameNumber]=Pixels; }
+		if(CheckReplayFrames && !Capture) {
+			auto expected=ReplayFrames.find(FrameNumber);
+			if(expected==ReplayFrames.end() || expected->second!=Pixels || FrameNumber>=ReplayPrevious) {
+				ReplayErrors++; std::cerr << "Rewind output mismatch at frame " << FrameNumber << " previous=" << ReplayPrevious << " recorded=" << (expected!=ReplayFrames.end()) << std::endl;
+			} else { ReplayMatches++; }
+			ReplayPrevious=FrameNumber;
+		}
 		if(RecordNextCapture && Capture) {
 			FirstCapturePixels = Pixels; FirstCaptureOffsetY = Capture->SnesOutputOffsetY;
 			RecordNextCapture = false;
@@ -633,7 +646,211 @@ extern "C"
 		return cfg.DecorativeWidescreen && cfg.DecorativeViewportPosition == 3 && cfg.DecorativeCustomWidths
 			&& cfg.DecorativeLeftWidth == 23 && cfg.DecorativeRightWidth == 71 && cfg.DecorativeSideBrightness == 37 && cfg.DecorativeFadeWidth == 12;
 	}
-	DllExport uint32_t __stdcall RunForegroundOverlayGameplayTest(const char* filename)
+	static uint32_t RunLiveAnimationProbe(Emulator* emu,MetaSpriteTestRenderer& renderer,MetaSpriteGraphic source,
+		int x,int y,uint32_t width,uint32_t height,uint32_t nativeColor)
+	{
+		emu->GetSettings()->ClearFlag(EmulationFlags::MaximumSpeed);
+		uint32_t address=0;
+		std::function<void(uint32_t,uint8_t)> write;
+		if(auto c=dynamic_cast<NesConsole*>(emu->GetConsole().get())) { address=0x700; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite((uint16_t)a,v); }; }
+		else if(auto c=dynamic_cast<Gameboy*>(emu->GetConsole().get())) { address=0xC100; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite((uint16_t)a,v); }; }
+		else if(auto c=dynamic_cast<GbaConsole*>(emu->GetConsole().get())) { address=0x203FFF0; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite(a,v); }; }
+		else if(auto c=dynamic_cast<PceConsole*>(emu->GetConsole().get())) { address=0x20F0; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite((uint16_t)a,v); }; }
+		else if(auto c=dynamic_cast<SmsConsole*>(emu->GetConsole().get())) { address=0xC1F0; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite((uint16_t)a,v); }; }
+		else if(auto c=dynamic_cast<SnesConsole*>(emu->GetConsole().get())) { address=0x7E1FF0; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->Write(a,v,MemoryOperationType::Write); }; }
+		else if(auto c=dynamic_cast<WsConsole*>(emu->GetConsole().get())) { address=0x3F00; write=[c](uint32_t a,uint8_t v) { c->GetMemoryManager()->DebugWrite(a,v); }; }
+		if(!write) { return 1; }
+		MetaPngPixelPool pixels;
+		uint64_t sequenceIdentity=0;
+		auto sequence=[&](int w,int h,MetaPngPlayback playback,const std::vector<uint32_t>& colors,const std::vector<uint32_t>& durations) {
+			MetaPngArtworkAnimation animation; animation.RestartOnActivation=true; animation.Timeline=MetaPngTimeline(playback,durations);
+			// Production packet parsers supply content identities. This direct native
+			// fixture also needs distinct nonzero identities for save-state matching.
+			animation.SourceIdentity={0x414E494D54455354ULL,++sequenceIdentity};
+			for(auto color : colors) { MetaPngArtworkFrame image; image.Width=w; image.Height=h; image.Pixels=pixels.Intern(std::vector<uint32_t>((size_t)w*h,color)); animation.Frames.push_back(std::move(image)); }
+			return animation;
+		};
+		MetaSpriteReplacement group; group.Id=1; group.ArtworkWidth=source.Width; group.ArtworkHeight=source.Height;
+		group.Artwork.assign((size_t)source.Width*source.Height,0xFFFF00FF); group.MemoryConditions={{address,1,0xFF}};
+		source.X=source.Y=0; source.HardwareSprite=-1; group.Members={source};
+		group.Animation=sequence(source.Width,source.Height,MetaPngPlayback::Loop,{0xFF00FF00,0xFFFF00FF,0xFF00FF00},{2,3,1});
+		MetaAlternateArtwork alternate; alternate.ArtworkWidth=source.Width; alternate.ArtworkHeight=source.Height; alternate.Artwork=group.Artwork;
+		alternate.MemoryConditions={{address+1,1,0xFF}};
+		alternate.Animation=sequence(source.Width,source.Height,MetaPngPlayback::PingPong,{0xFF0000FF,0xFFFFFFFF,0xFFFFFF00},{1,2,3}); group.AlternateArtwork={alternate};
+		MetaBackgroundReplacement background; background.Id=1; background.CompositionPosition=1; background.Width=background.Height=1;
+		background.WrapX=background.WrapY=true; background.Artwork={0}; background.MemoryConditions={{address,1,0xFF},{address+1,2,0xFF}};
+		constexpr uint32_t backgroundDuration=60;
+		background.Animation=sequence(1,1,MetaPngPlayback::PlayOnce,{0x800000FF,0},{backgroundDuration,7});
+		auto gates=[&](uint8_t enabled,uint8_t selection) { auto lock=emu->AcquireLock(); write(address,enabled); write(address+1,selection); };
+		{ auto lock=emu->AcquireLock(); write(address,1); write(address+1,0); emu->GetVideoDecoder()->SetMetaReplacements({group},{background}); }
+		uint32_t flags=1; uint64_t firstDefault=UINT64_MAX, secondDefault=UINT64_MAX;
+		// Expected colors/timeline visits are calculated independently of Select().
+		auto observe=[&](const char* stage,uint8_t enabled,uint8_t selection,uint64_t& start,bool withBackground,bool requireHold=false,bool requireSpeculative=false,uint64_t expectedBackgroundOrigin=UINT64_MAX,bool replayBackground=false) {
+			uint32_t seen=0, bgSeen=0, count=0, previous=UINT32_MAX; uint64_t backgroundStart=expectedBackgroundOrigin;
+			uint32_t backgroundMask=expectedBackgroundOrigin!=UINT64_MAX && !replayBackground ? (requireHold ? 6u : 2u) : (requireHold ? 7u : 3u);
+			bool sawSpeculative=false;
+			for(int attempt=0;attempt<3000;attempt++) {
+				sawSpeculative|=emu->IsRunAheadFrame();
+				{
+					std::lock_guard<std::mutex> lock(renderer.Mutex); const auto& capture=renderer.Capture;
+					if(capture && capture->FrameNumber!=previous && renderer.Width==width && renderer.Height==height) {
+						auto a=capture->MemorySnapshot.find(address), b=capture->MemorySnapshot.find(address+1);
+						if(a!=capture->MemorySnapshot.end() && b!=capture->MemorySnapshot.end() && a->second==enabled && b->second==selection && capture->AnimationTiming) {
+							if(capture->MemorySnapshot.size()!=2) { std::cerr << "Animation sampled unconfigured RAM: " << stage << std::endl; return false; }
+							if(capture->FrameNumber!=renderer.FrameNumber) { std::cerr << "Animation capture/presentation frame mismatch: " << stage << std::endl; return false; }
+							previous=capture->FrameNumber; uint64_t tick=0; uint32_t expected=nativeColor;
+							if(enabled) {
+								auto owners=std::static_pointer_cast<const std::vector<MetaSpriteReplacement>>(capture->AnimationTiming->Groups);
+								if(!owners || owners->size()!=1) { return false; }
+								const auto* animation=selection==1 ? &owners->front().AlternateArtwork.front().Animation : &owners->front().Animation;
+								auto elapsed=capture->AnimationTiming->Elapsed.find(animation); if(elapsed==capture->AnimationTiming->Elapsed.end()) { return false; }
+								tick=elapsed->second; if(tick>capture->FrameNumber) { return false; }
+								uint64_t origin=capture->FrameNumber-tick;
+								if(start==UINT64_MAX) { start=origin; } else if(start!=origin) { std::cerr << "Animation clock restarted unexpectedly: " << stage << std::endl; return false; }
+								if(selection==1) {
+									uint64_t visit=tick%8; uint32_t index=visit<1 ? 0 : visit<3 ? 1 : visit<6 ? 2 : 1;
+									expected=index==0 ? 0xFF0000FF : index==1 ? 0xFFFFFFFF : 0xFFFFFF00; seen|=1u<<index; if(visit>=6) { seen|=8; }
+								} else {
+									uint64_t visit=tick%6; uint32_t index=visit<2 ? 0 : visit<5 ? 1 : 2;
+									expected=index==1 ? 0xFFFF00FF : 0xFF00FF00; seen|=1u<<index;
+								}
+								if(withBackground) {
+									auto layers=std::static_pointer_cast<const std::vector<MetaBackgroundReplacement>>(capture->AnimationTiming->Backgrounds);
+									if(!layers || layers->size()!=1) { return false; }
+									auto bgElapsed=capture->AnimationTiming->Elapsed.find(&layers->front().Animation); if(bgElapsed==capture->AnimationTiming->Elapsed.end()) { return false; }
+									uint64_t bgTick=bgElapsed->second;
+									if(bgTick>capture->FrameNumber) { return false; }
+									uint64_t bgOrigin=capture->FrameNumber-bgTick;
+									if(backgroundStart==UINT64_MAX) { backgroundStart=bgOrigin; }
+									else if(backgroundStart!=bgOrigin) { std::cerr << "Background clock restarted unexpectedly: " << stage << std::endl; return false; }
+									if(bgTick<backgroundDuration) { expected=0xFF000080 | (((expected>>16)&255)*127/255<<16) | (((expected>>8)&255)*127/255<<8) | ((expected&255)*127/255); bgSeen|=1; }
+									else { bgSeen|=2; if(bgTick>=backgroundDuration+7) { bgSeen|=4; } }
+								}
+							}
+							if(!enabled) { for(const auto& elapsed : capture->AnimationTiming->Elapsed) { if(elapsed.second!=0) { return false; } } }
+							uint32_t actual=renderer.Pixels[(size_t)y*width+x];
+							if(actual!=expected) { std::cerr << "Animation pixel mismatch: " << stage << " frame=" << capture->FrameNumber << " tick=" << tick << " actual=" << std::hex << actual << " expected=" << expected << std::dec << std::endl; return false; }
+							count++;
+							if((!requireSpeculative || sawSpeculative) && (!enabled ? count>=3 : ((seen&(selection==1 ? 15u : 7u))==(selection==1 ? 15u : 7u) && (!withBackground || (bgSeen&backgroundMask)==backgroundMask)))) { return true; }
+						}
+					}
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			std::cerr << "Animation observation timed out: " << stage << " seen=" << seen << " bg=" << bgSeen << std::endl; return false;
+		};
+		if(!observe("default loop",1,0,firstDefault,false)) { return flags; } flags|=2;
+		uint64_t alternateStart=UINT64_MAX; gates(1,1);
+		if(!observe("alternate ping-pong",1,1,alternateStart,false)) { return flags; } flags|=4;
+		gates(1,0); if(!observe("default re-entry",1,0,secondDefault,false) || secondDefault<=firstDefault) { return flags; } flags|=8;
+		gates(1,2); if(!observe("background play-once/alpha",1,2,secondDefault,true,true)) { return flags; } flags|=16;
+		gates(1,0); if(!observe("background condition off",1,0,secondDefault,false)) { return flags; } flags|=32;
+		uint64_t unused=UINT64_MAX; gates(0,0); if(!observe("native restoration",0,0,unused,false)) { return flags; } flags|=64;
+		uint64_t reactivated=UINT64_MAX; gates(1,0); if(!observe("group reactivation",1,0,reactivated,false) || reactivated<=secondDefault) { return flags; } flags|=128;
+		emu->Pause();
+		uint32_t pausedFrame=0, pausedPixel=0;
+		{ auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode(); std::lock_guard<std::mutex> renderLock(renderer.Mutex); pausedFrame=renderer.FrameNumber; pausedPixel=renderer.Pixels[(size_t)y*width+x]; }
+		std::this_thread::sleep_for(std::chrono::milliseconds(60)); bool frozen;
+		{ std::lock_guard<std::mutex> lock(renderer.Mutex); frozen=renderer.FrameNumber==pausedFrame && renderer.Pixels[(size_t)y*width+x]==pausedPixel; }
+		emu->Resume(); if(!frozen) { return flags; } flags|=256;
+		{ auto lock=emu->AcquireLock(); emu->GetSettings()->GetEmulationConfig().EmulationSpeed=200; }
+		if(!observe("double-speed emulated timing",1,0,reactivated,false)) { return flags; } flags|=512;
+		for(uint32_t ahead : {1u,2u}) {
+			{ auto lock=emu->AcquireLock(); auto& config=emu->GetSettings()->GetEmulationConfig(); config.EmulationSpeed=100; config.RunAheadFrames=ahead; }
+			if(!observe("run-ahead default animation",1,0,reactivated,false,false,true)) { return flags; }
+			flags|=ahead==1 ? 2048 : 4096;
+		}
+		gates(1,2);
+		if(!observe("run-ahead background animation",1,2,reactivated,true,true,true)) { return flags; } flags|=8192;
+		std::stringstream runAheadSaved; uint32_t savedPresentation=0; uint64_t savedBackgroundOrigin=UINT64_MAX;
+		{
+			auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+			emu->Serialize(runAheadSaved,false,0);
+			std::lock_guard<std::mutex> renderLock(renderer.Mutex); savedPresentation=renderer.FrameNumber;
+			const auto& capture=renderer.Capture;
+			if(!capture || !capture->AnimationTiming) { return flags; }
+			auto owners=std::static_pointer_cast<const std::vector<MetaBackgroundReplacement>>(capture->AnimationTiming->Backgrounds);
+			if(!owners || owners->size()!=1) { return flags; }
+			auto elapsed=capture->AnimationTiming->Elapsed.find(&owners->front().Animation);
+			if(elapsed==capture->AnimationTiming->Elapsed.end() || elapsed->second>capture->FrameNumber) { return flags; }
+			savedBackgroundOrigin=capture->FrameNumber-elapsed->second;
+		}
+		if(!observe("run-ahead after save",1,2,reactivated,true,true,true,savedBackgroundOrigin)) { return flags; }
+		{
+			auto lock=emu->AcquireLock(); runAheadSaved.seekg(0);
+			if(emu->Deserialize(runAheadSaved,SaveStateManager::FileFormatVersion,false,std::nullopt,false)!=DeserializeResult::Success) { return flags; }
+		}
+		bool sawRestoredFrame=false;
+		for(int attempt=0;attempt<1000;attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.FrameNumber<=savedPresentation+2) { sawRestoredFrame=true; break; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		if(!sawRestoredFrame || !observe("run-ahead restored sprite/background phases",1,2,reactivated,true,true,true,savedBackgroundOrigin)) { return flags; } flags|=16384;
+		gates(1,0); if(!observe("background reset before early save",1,0,reactivated,false)) { return flags; }
+		gates(1,2); std::stringstream earlySaved; bool savedEarly=false;
+		for(int attempt=0;attempt<1000 && !savedEarly;attempt++) {
+			{
+				auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+				{
+					std::lock_guard<std::mutex> renderLock(renderer.Mutex); const auto& capture=renderer.Capture;
+					if(capture && capture->AnimationTiming && capture->MemorySnapshot.count(address+1) && capture->MemorySnapshot.at(address+1)==2) {
+						auto owners=std::static_pointer_cast<const std::vector<MetaBackgroundReplacement>>(capture->AnimationTiming->Backgrounds);
+						if(owners && owners->size()==1) {
+							auto elapsed=capture->AnimationTiming->Elapsed.find(&owners->front().Animation);
+							if(elapsed!=capture->AnimationTiming->Elapsed.end() && elapsed->second<backgroundDuration && elapsed->second<=capture->FrameNumber) {
+								savedPresentation=capture->FrameNumber; savedBackgroundOrigin=capture->FrameNumber-elapsed->second; savedEarly=true;
+							}
+						}
+					}
+				}
+				if(savedEarly) { emu->Serialize(earlySaved,false,0); }
+			}
+			if(!savedEarly) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+		}
+		if(!savedEarly || !observe("early background save then transition",1,2,reactivated,true,true,true,savedBackgroundOrigin,true)) { return flags; }
+		{ auto lock=emu->AcquireLock(); earlySaved.seekg(0); if(emu->Deserialize(earlySaved,SaveStateManager::FileFormatVersion,false,std::nullopt,false)!=DeserializeResult::Success) { return flags; } }
+		if(!observe("early background restored transition",1,2,reactivated,true,true,true,savedBackgroundOrigin,true)) { return flags; } flags|=32768;
+		{ auto lock=emu->AcquireLock(); emu->GetSettings()->GetEmulationConfig().RunAheadFrames=0; }
+		{
+			auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+			write(address,1); write(address+1,2); emu->GetVideoDecoder()->SetMetaReplacements({group},{background});
+			emu->GetSettings()->GetPreferences().RewindBufferSize=64; emu->GetRewindManager()->InitHistory();
+			std::lock_guard<std::mutex> renderLock(renderer.Mutex); renderer.ReplayFrames.clear(); renderer.RecordReplayFrames=true;
+		}
+		bool recorded=false;
+		// Rewind keeps a 30-frame preparation block. Record enough complete
+		// checkpoints to compare 110 reverse frames, including the first PNG phase.
+		for(int attempt=0;attempt<6000;attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.ReplayFrames.size()>=150) { recorded=true; break; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		if(!recorded) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "Rewind recording incomplete: " << renderer.ReplayFrames.size() << " frames" << std::endl; return flags; }
+		{
+			auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+			{ std::lock_guard<std::mutex> renderLock(renderer.Mutex); renderer.RecordReplayFrames=false; renderer.CheckReplayFrames=true; }
+			// Do not allow an unrecorded forward frame between the oracle and rewind.
+			emu->GetRewindManager()->StartRewinding();
+		}
+		bool replayed=false;
+		for(int attempt=0;attempt<6000;attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.ReplayErrors) { break; } if(renderer.ReplayMatches>=110) { replayed=true; break; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		{
+			auto lock=emu->AcquireLock();
+			{ std::lock_guard<std::mutex> renderLock(renderer.Mutex); renderer.CheckReplayFrames=false; renderer.ReplayFrames.clear(); }
+			emu->GetRewindManager()->StopRewinding(true,false);
+		}
+		if(!replayed) { std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr << "Rewind replay incomplete: matches=" << renderer.ReplayMatches << " errors=" << renderer.ReplayErrors << std::endl; return flags; } flags|=65536;
+		emu->GetVideoDecoder()->SetMetaReplacements({},{});
+		for(int attempt=0;attempt<1000;attempt++) {
+			{ std::lock_guard<std::mutex> lock(renderer.Mutex); if(renderer.Capture && renderer.Capture->MemorySnapshot.empty() && !renderer.Capture->AnimationTiming && renderer.Pixels[(size_t)y*width+x]==nativeColor) { flags|=1024; break; } }
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return flags;
+	}
+
+	static uint32_t RunForegroundOverlayGameplayTestImpl(const char* filename,bool animationOnly)
 	{
 		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
 		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
@@ -683,6 +900,10 @@ extern "C"
 					source = candidate; x = px - cropLeft; y = py; width = renderer.Width; height = renderer.Height; nativeColor = renderer.Pixels[(size_t)y * width + x]; return true;
 				} return false;
 			})) {
+                if(animationOnly) {
+                    flags=RunLiveAnimationProbe(emu.get(),renderer,source,x,y,width,height,nativeColor);
+                    emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Release(); return flags;
+                }
 				flags |= 1;
 				MetaBackgroundReplacement bg; bg.Id = 1; bg.CompositionPosition = 1; bg.Width = bg.Height = 1; bg.WrapX = bg.WrapY = true; bg.Artwork = {0xFF00FFFF}; bg.MemoryConditions = {{0, 0, 0}};
 				uint32_t afterFrame = 0;
@@ -1013,6 +1234,8 @@ extern "C"
 		}
 		emu->Release(); return flags;
 	}
+	DllExport uint32_t __stdcall RunForegroundOverlayGameplayTest(const char* filename) { return RunForegroundOverlayGameplayTestImpl(filename,false); }
+	DllExport uint32_t __stdcall RunAnimationGameplayTest(const char* filename) { return RunForegroundOverlayGameplayTestImpl(filename,true); }
 	DllExport uint32_t __stdcall RunSmsLegacyTextBackgroundTest(const char* filename)
 	{
 		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
@@ -1370,6 +1593,10 @@ extern "C"
 	}
 	bool __stdcall SetMetaReplacements(const char*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
 	bool __stdcall SetMetaBackgroundReplacements(const char*, const uint8_t*, uint32_t);
+	DllExport uint32_t __stdcall GetMetaReplacementDefinitionFlagsTest()
+	{
+		return (_emu->GetVideoDecoder()->HasMetaReplacements() ? 1u : 0u) | (_emu->GetVideoDecoder()->HasMetaBackgroundLayers() ? 2u : 0u);
+	}
 	DllExport uint32_t __stdcall RunMetaPackActivationTest(const char* filename, const uint8_t* sprites, uint32_t spriteLength, const uint8_t* backgrounds, uint32_t backgroundLength)
 	{
 		auto previous = std::move(_emu);
@@ -1405,6 +1632,106 @@ extern "C"
 		}
 		_emu->Release(); _emu = std::move(previous);
 		return flags;
+	}
+	DllExport uint32_t __stdcall RunMetaSpriteSnesHiresMathTest(const char* filename)
+	{
+		FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+		unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode); emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+		auto& cfg=emu->GetSettings()->GetSnesConfig(); cfg.DisableFrameSkipping=true; cfg.RamPowerOnState=RamState::AllZeros; cfg.ColorCorrection=SnesColorCorrectionMode::None;
+		MetaSpriteTestRenderer renderer; uint32_t flags=0;
+		bool both=string(filename).find("both-screens")!=string::npos,window=string(filename).find("window")!=string::npos,operand=string(filename).find("operand")!=string::npos;
+		bool currentField=string(filename).find("current-field")!=string::npos,bobBlend=string(filename).find("bob-blend-field")!=string::npos;
+		bool bobField=bobBlend || string(filename).find("bob-field")!=string::npos;
+		if(currentField) { cfg.DeinterlaceMode=SnesDeinterlaceMode::CurrentField; }
+		if(bobField) { cfg.DeinterlaceMode=SnesDeinterlaceMode::Bob; } // Capture the unblended even native reference first.
+		if(emu->LoadRom((VirtualFile)filename,VirtualFile())) {
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer); auto snes=dynamic_cast<SnesConsole*>(emu->GetConsole().get()); snes->GetPpu()->SetMetaSpriteCapture(true);
+			auto wait=[&](const std::function<bool()>& check) { for(int attempt=0;attempt<500;attempt++) { { std::lock_guard<std::mutex> lock(renderer.Mutex); if(check()) { return true; } } std::this_thread::sleep_for(std::chrono::milliseconds(10)); } return false; };
+			MetaSpriteGraphic source; vector<uint32_t> native; int nativeField=0;
+			if(wait([&]() {
+				if(renderer.Width!=512 || renderer.Height!=478 || !renderer.Capture || !renderer.Capture->SnesHiresSource) { return false; }
+				if((currentField || bobField) && renderer.FrameNumber<10) { return false; }
+				if(bobField && renderer.Capture->SnesOutputOffsetY!=0) { return false; }
+				for(const auto& graphic : MetaSpriteCompositor::BuildDecodedCandidates(*renderer.Capture)) {
+					if(graphic.HardwareSprite==0 && graphic.X==8 && graphic.Y==15 && graphic.Width==8 && graphic.Height==8 && graphic.SnesPalette==4) { source=graphic; native=renderer.Pixels; nativeField=currentField && !renderer.Capture->Pixels[30*512].SnesFallbackCaptured ? 1 : 0; return true; }
+				} return false;
+			})) {
+				flags=1; MetaSpriteReplacement group; group.Id=1; source.X=source.Y=0; source.HardwareSprite=-1; source.SnesField=0; group.Members={source}; group.ArtworkScale=2;
+				if(currentField) {
+					for(int y=0;y<478;y+=2) { for(int x=0;x<512;x++) { uint32_t color=native[(y+nativeField)*512+x]; native[y*512+x]=native[(y+1)*512+x]=color; } }
+				}
+				auto phase=[&]() { return currentField ? (renderer.Capture->Pixels[30*512].SnesFallbackCaptured ? 0 : 1) : bobField ? renderer.Capture->SnesOutputOffsetY : 0; };
+				auto present=[&](const vector<uint32_t>& full,int field) {
+					if(!currentField && !bobField) { return full; } vector<uint32_t> result(full.size(),0xFF000000);
+					for(int y=14;y<462;y++) { for(int x=0;x<512;x++) {
+						if(currentField) { if((y&1)==field) { result[y*512+x]=full[y*512+x]; } }
+						else {
+							int oddY=y==14 ? 14 : y-1; uint32_t a=full[y*512+x],b=full[oddY*512+x];
+							result[y*512+x]=bobBlend ? (((a^b)&0xFFFEFEFEu)>>1)+(a&b) : field ? b : a;
+						}
+					} } return result;
+				};
+				if(bobBlend) { auto lock=emu->AcquireLock(); cfg.DeinterlaceMode=SnesDeinterlaceMode::BobBlend; }
+				if(string(filename).find("mixed-raster")!=string::npos) {
+					group.ArtworkWidth=16; group.ArtworkHeight=400; group.MemoryConditions={{0,0,0}};
+					for(int y=0;y<400;y++) { for(int x=0;x<16;x++) { group.Artwork.push_back((x&1) ? 0xFFFFFFFF : 0xFF0000FF); } }
+					emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+					if(wait([&]() {
+						if(!renderer.Capture || !renderer.Capture->SnesHiresSource || renderer.Width!=512 || renderer.Height!=478) { return false; }
+						const auto& raw=*renderer.Capture->SnesHiresSource; bool sawHires=false,sawOrdinary=false;
+						for(int y=0;y<478;y++) { for(int x=0;x<512;x++) {
+							uint32_t expected=native[y*512+x];
+							if(y>=30 && y<430 && x>=16 && x<=32) {
+								bool hires=raw.SnesSubOutput[(y/2)*raw.Width+x/2].Captured; sawHires|=hires; sawOrdinary|=!hires;
+								expected=hires ? (x==16 ? 0xFF0000FFu : 0xFF7F7FFFu) : (x==32 || !(x&1) ? 0xFF0000FFu : 0xFFFFFFFFu);
+							}
+							if(renderer.Pixels[y*512+x]!=expected) { return false; }
+						} } return sawHires && sawOrdinary;
+					})) { flags|=2; }
+					emu->GetVideoDecoder()->SetMetaReplacements({},{}); if(wait([&]() { return renderer.Pixels==native; })) { flags|=4; }
+					emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Release(); return flags;
+				}
+				group.ArtworkWidth=group.ArtworkHeight=21; group.ArtworkOriginX=group.ArtworkOriginY=1; group.MemoryConditions={{0,0,0}};
+				for(int y=0;y<21;y++) { for(int x=0;x<21;x++) { uint32_t color=x%3==0 ? 0xFF0000u : x%3==1 ? 0x00FF00u : 0xFFFFFFu; uint32_t alpha=x%7==0 ? 0 : x%7==1 ? 128 : 255; group.Artwork.push_back(color|(alpha<<24)); } }
+				struct Sample { uint32_t Color; bool Math,Artwork; int Priority; double Weight; };
+				auto samples=[&](int x,int y,bool main) {
+					std::vector<Sample> values; int ax=x-14,ay=y-28; bool enabled=main ? !(window && x/2>=12 && x/2<=15) : both;
+					uint32_t color=enabled && ax>=0 && ax<21 && ay>=0 && ay<21 ? group.Artwork[ay*21+ax] : 0;
+					uint32_t alpha=color>>24; if(alpha) { values.push_back({color|0xFF000000,true,true,1,alpha/255.0}); }
+					if(alpha<255) { values.push_back({0xFF0000FF,false,false,0,(255-alpha)/255.0}); } return values;
+				};
+				auto colorMath=[&](uint32_t primary,uint32_t other,bool math,bool half,bool artwork) {
+					uint32_t color=0xFF000000; for(int shift : {0,8,16}) { int a=(primary>>shift)&255,b=(other>>shift)&255; if(!artwork) { a>>=3; b>>=3; }
+						if(math) { a+=b; if(half) { a/=2; } a=std::min(artwork ? 255 : 31,a); } if(!artwork) { a=(a<<3)|(a>>2); } color|=(uint32_t)a<<shift;
+					} return color;
+				};
+				vector<uint32_t> expected=native;
+				for(int y=28;y<49;y++) { for(int x=14;x<36;x++) {
+					int cell=x/2,control=cell ? cell-1 : 0; double channels[3]={};
+					auto primary=samples(x,y,(x&1)!=0);
+					auto secondary=samples((x&1) ? cell*2 : control*2+1,y,(x&1)==0);
+					auto priority=(x&1) ? std::vector<Sample>{{0,false,false,0,1}} : samples(control*2,y,false);
+					for(const auto& a : primary) { for(const auto& b : secondary) { for(const auto& p : priority) {
+						bool enabled=(x&1) ? a.Math : b.Math,useSub=operand && ((x&1) ? b.Priority : p.Priority)>0,half=!operand || useSub;
+						uint32_t other=useSub ? (!(x&1) && !cell ? 0xFF000000u : b.Color) : 0xFF0000FFu;
+						bool artwork=a.Artwork || (useSub && !(!(x&1) && !cell) && b.Artwork);
+						uint32_t color=colorMath(a.Color,other,enabled,half,artwork); double weight=a.Weight*b.Weight*p.Weight;
+						for(int c=0;c<3;c++) { channels[c]+=((color>>(c*8))&255)*weight; }
+					} } }
+					uint32_t color=0xFF000000; for(int c=0;c<3;c++) { color|=(uint32_t)(channels[c]+0.5)<<(c*8); } expected[y*512+x]=color;
+				} }
+				emu->GetVideoDecoder()->SetMetaSpriteGroups({group});
+				uint8_t seenFields=0;
+				if(wait([&]() {
+					if(renderer.Width!=512 || renderer.Height!=478 || !renderer.Capture || !renderer.Capture->SnesHiresSource) { return false; }
+					int field=phase(); if(renderer.Pixels!=present(expected,field)) { return false; } seenFields|=(uint8_t)(1<<field); return !(currentField || bobField) || seenFields==3;
+				})) { flags|=2; }
+				else { std::lock_guard<std::mutex> lock(renderer.Mutex); for(size_t i=0;i<expected.size() && i<renderer.Pixels.size();i++) { if(expected[i]!=renderer.Pixels[i]) { std::cerr << "Hires math mismatch " << filename << " x=" << i%512 << " y=" << i/512 << " actual=" << std::hex << renderer.Pixels[i] << " expected=" << expected[i] << std::dec << std::endl; break; } } }
+				emu->GetVideoDecoder()->SetMetaReplacements({},{}); if(wait([&]() { return renderer.Capture && renderer.Pixels==present(native,phase()); })) { flags|=4; }
+			}
+			emu->Stop(false); emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer);
+		}
+		emu->Release(); return flags;
 	}
 	DllExport uint32_t __stdcall RunMetaSpriteSnesHiresCaptureTest(const char* filename)
 	{
@@ -1656,15 +1983,22 @@ extern "C"
 							const auto& layer=animatedBackground->front();
 							if(waitForField([&]() {
 								if(!renderer.Capture || renderer.Width!=512 || renderer.Height!=478 || renderer.Capture->SnesBackgrounds.empty()) { return false; }
-								const auto& capture=*renderer.Capture;
+                                const auto& capture=*renderer.Capture;
+								if(string(filename).find("bg-fields")!=string::npos) {
+									if(!capture.SnesFieldMemoryCaptured || !capture.SnesFieldMemory[0].count(0) || !capture.SnesFieldMemory[0].count(1)
+										|| !capture.SnesFieldMemory[1].count(0) || !capture.SnesFieldMemory[1].count(1) || capture.SnesFieldMemory[0].at(0)==capture.SnesFieldMemory[1].at(0)) { return false; }
+								}
 								if(!capture.SnesBackgrounds[30*512+16].Layers[0].Sample.Valid) { return false; }
 								for(int y=0;y<478;y++) { for(int x=0;x<512;x++) {
 									uint32_t expected=y<14 || y>=462 ? 0xFF000000u : 0xFF0000FFu;
 									if(x>=16 && x<30 && y>=30 && y<38) { expected=(y & 1) ? 0xFF0000FFu : 0xFFFF0000u; }
 									auto image=layer.Animation.Select(capture.SnesFieldMemoryCaptured ? capture.SnesFieldFrameNumber[y & 1] : capture.FrameNumber);
 									if(!image) { return false; }
-									int ax=x/2-layer.X+image->OriginX, ay=y/2-layer.Y+image->OriginY;
-									if(y>=14 && y<462 && ax>=0 && ay>=0 && ax<image->Width && ay<image->Height) { expected=(*image->Pixels)[ay*image->Width+ax]; }
+                                    const auto& memory=capture.SnesFieldMemoryCaptured ? capture.SnesFieldMemory[y & 1] : capture.MemorySnapshot;
+									bool active=MetaMemoryCondition::Matches(layer.MemoryConditions,memory); int cameraX=0,cameraY=0;
+									if(layer.UseCpuCamera && layer.FollowScroll) { active &= layer.CameraX.Decode(memory,cameraX) && layer.CameraY.Decode(memory,cameraY); }
+									int ax=x/2+cameraX-layer.X+image->OriginX, ay=y/2+cameraY-layer.Y+image->OriginY;
+									if(active && y>=14 && y<462 && ax>=0 && ay>=0 && ax<image->Width && ay<image->Height) { expected=(*image->Pixels)[ay*image->Width+ax]; }
 									if(renderer.Pixels[y*512+x]!=expected) { return false; }
 								} } return true;
 							})) { flags|=2; }
@@ -1719,7 +2053,7 @@ extern "C"
 								}
 								if(x>=14 && x<38 && sourceY>=29 && sourceY<41) {
 									if(changingPoses && poseByField[y & 1]==1) { return sourceY==29 && x<16 ? 0xFF0000FFu : sourceY==29 && x<18 ? 0xFF80807Fu : 0xFFFFFF00u; }
-									return sourceY==29 && x<16 ? 0xFF0000FFu : sourceY==29 && x<18 ? 0xFF00807Fu : 0xFF00FF00u;
+									return sourceY==29 && x<16 ? 0xFF0000FFu : sourceY==29 && x<18 ? (math ? 0xFF0040BFu : 0xFF00807Fu) : (math ? 0xFF007F7Fu : 0xFF00FF00u);
 								} return 0xFF0000FFu;
 							};
 							for(int y=0;y<478;y++) { for(int x=0;x<512;x++) {
@@ -1731,7 +2065,7 @@ extern "C"
 						emu->GetVideoDecoder()->SetMetaReplacements({},{});
 						if(waitForField([&]() {
 							uint32_t native=renderer.Pixels[(verticalFlip ? (rectangular ? 39 : 31) : 30)*512+18];
-							return (native==(bobBlendField ? 0xFF7F007Fu : 0xFFFF0000u) || (changingPoses && native==0xFF00FF00)) && renderer.Pixels[40*512+36]==0xFF0000FF;
+							return (native==(math ? (bobBlendField ? 0xFF3D00BDu : 0xFF7B007Bu) : (bobBlendField ? 0xFF7F007Fu : 0xFFFF0000u)) || (changingPoses && native==0xFF00FF00)) && renderer.Pixels[40*512+36]==0xFF0000FF;
 						})) { flags|=4; }
 					}
 					std::cout << "SNES OBJ-interlace field capture/full-canvas replacement probe flags: " << flags << std::endl;
@@ -2167,8 +2501,180 @@ extern "C"
 	{
 		try {
 			auto layers=MetaBackgroundPacket(packet,length).Parse();
-			if(layers.size()!=1 || layers[0].Animation.Frames.size()!=2 || layers[0].CompositionPosition!=1 || layers[0].FollowScroll || layers[0].Scale!=1) { return 0; }
+			if(layers.size()!=1 || layers[0].Animation.Frames.size()!=2 || layers[0].CompositionPosition!=1 || (layers[0].FollowScroll && !layers[0].UseCpuCamera) || layers[0].Scale!=1) { return 0; }
 			return RunMetaSpriteSnesCaptureTestImpl(filename,nullptr,&layers);
+		} catch(...) { return 0; }
+	}
+	DllExport uint32_t __stdcall RunMetaTextSystemTest(const char* filename,const uint8_t* packet,uint32_t length)
+	{
+		unique_ptr<Emulator> emu(new Emulator()); uint32_t stage=1; MetaSpriteTestRenderer renderer;
+		try {
+			auto profiles=MetaTextPacket(packet,length).Parse(); if(profiles.size()!=1 || profiles[0].Glyphs.size()!=1) { return stage; }
+			auto p=profiles[0]; p.Mappings.clear(); p.Patterns.clear(); p.PatternStarts.clear(); p.Mappings[MetaTextReplacement::Key(UINT32_MAX,-1)]=0;
+			FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename)); emu->Initialize(false); emu->GetSettings()->SetFlag(EmulationFlags::TestMode); emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+			auto& gb=emu->GetSettings()->GetGameboyConfig(); gb.Model=string(filename).find(".gbc")!=string::npos ? GameboyModel::GameboyColor : GameboyModel::Gameboy; gb.BlendFrames=false; gb.GbcAdjustColors=false; gb.RamPowerOnState=RamState::AllZeros;
+			auto& gba=emu->GetSettings()->GetGbaConfig(); gba.SkipBootScreen=true; gba.DisableFrameSkipping=true; gba.BlendFrames=false; gba.GbaAdjustColors=false; gba.RamPowerOnState=RamState::AllZeros;
+			emu->GetSettings()->GetPcEngineConfig().DisableFrameSkipping=true; emu->GetSettings()->GetSmsConfig().RamPowerOnState=RamState::AllZeros;
+			auto& snes=emu->GetSettings()->GetSnesConfig(); snes.DisableFrameSkipping=true; snes.ColorCorrection=SnesColorCorrectionMode::None; snes.RamPowerOnState=RamState::AllZeros; snes.Overscan={};
+			auto& ws=emu->GetSettings()->GetWsConfig(); ws.UseBootRom=false; ws.LcdShowIcons=false; ws.BlendFrames=false; ws.LcdAdjustColors=false;
+			if(!emu->LoadRom((VirtualFile)filename,VirtualFile())) { throw std::runtime_error("load"); }
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			auto console=emu->GetConsole();
+			if(auto c=dynamic_cast<Gameboy*>(console.get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c=dynamic_cast<GbaConsole*>(console.get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c=dynamic_cast<PceConsole*>(console.get())) { c->GetVdc()->SetMetaSpriteCapture(true); }
+			if(auto c=dynamic_cast<SmsConsole*>(console.get())) { c->GetVdp()->SetMetaSpriteCapture(true); }
+			if(auto c=dynamic_cast<SnesConsole*>(console.get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			if(auto c=dynamic_cast<WsConsole*>(console.get())) { c->GetPpu()->SetMetaSpriteCapture(true); }
+			auto write=[&](uint8_t value) { uint32_t addr=p.Conditions[0].Address;
+				if(auto c=dynamic_cast<Gameboy*>(console.get())) { c->GetMemoryManager()->DebugWrite(addr,value); }
+				if(auto c=dynamic_cast<GbaConsole*>(console.get())) { c->GetMemoryManager()->DebugWrite(addr,value); }
+				if(auto c=dynamic_cast<PceConsole*>(console.get())) { c->GetMemoryManager()->DebugWrite(addr,value); }
+				if(auto c=dynamic_cast<SmsConsole*>(console.get())) { c->GetMemoryManager()->DebugWrite(addr,value); }
+				if(auto c=dynamic_cast<SnesConsole*>(console.get())) { c->GetMemoryManager()->GetMemoryMappings()->DebugWrite(addr,value); }
+				if(auto c=dynamic_cast<WsConsole*>(console.get())) { c->GetMemoryManager()->DebugWrite(addr,value); }
+			};
+			{ auto lock=emu->AcquireLock(); write(0); emu->GetVideoDecoder()->SetAllMetaReplacements({},{},{p}); }
+			auto wait=[&](const std::function<bool()>& check) { for(int n=0;n<500;n++) { { std::lock_guard<std::mutex> lock(renderer.Mutex); if(check()) { return true; } } std::this_thread::sleep_for(std::chrono::milliseconds(10)); } return false; };
+			std::vector<uint32_t> baseline,stablePixels; uint32_t width=0,height=0,stableFrame=UINT32_MAX; int stableFrames=0; stage=2;
+			if(!wait([&]() {
+				if(renderer.FrameNumber<12 || !renderer.Capture || renderer.Capture->TextLayers[p.Layer].empty()) { return false; }
+				const auto& f=*renderer.Capture; const auto& plane=f.TextLayers[p.Layer];
+				if(f.Rows.empty() && f.DecodedRows.empty()) { return false; } // Wait until the generated cartridge, rather than firmware, is drawing.
+				if(renderer.FrameNumber==stableFrame) { return false; } stableFrame=renderer.FrameNumber;
+				if(renderer.Pixels!=stablePixels) { stablePixels=renderer.Pixels; stableFrames=0; return false; }
+				if(++stableFrames<3) { return false; }
+				int left=dynamic_cast<PceConsole*>(console.get()) ? PceConstants::GetLeftOverscan(4) : 0;
+				for(uint32_t y=8;y+uint32_t(p.CellHeight)<f.Height;y++) { for(uint32_t x=uint32_t(left+8);x+uint32_t(p.CellWidth)<f.Width;x++) {
+					const auto& t=plane[y*f.Width+x]; if(!t.Tile.Valid || t.Tile.LocalX || t.Tile.LocalY) { continue; }
+					std::vector<uint32_t> ids; bool valid=true;
+					for(int dy=0;dy<p.CellHeight;dy+=8) { for(int dx=0;dx<p.CellWidth;dx+=8) {
+						const auto& part=plane[(y+dy)*f.Width+x+dx]; if(!part.Tile.Valid || part.X!=t.X+dx || part.Y!=t.Y+dy) { valid=false; }
+						ids.push_back(p.MatchKind ? part.Tile.GraphicsAddress : part.Tile.TileIndex);
+					} } if(!valid) { continue; }
+					p.X=t.X; p.Y=t.Y; p.Width=p.CellWidth; p.Height=p.CellHeight; p.UseRegion=true; p.CellOriginX=t.X%p.CellWidth; p.CellOriginY=t.Y%p.CellHeight;
+					p.Mappings.clear(); if(ids.size()==1) { p.Mappings[MetaTextReplacement::Key(ids[0],-1)]=0; }
+					else { p.Patterns={ {ids,-1,0} }; p.PatternStarts[MetaTextReplacement::Key(ids[0],-1)]={0}; }
+					baseline=renderer.Pixels; width=renderer.Width; height=renderer.Height; return true;
+				} } return false;
+			})) { throw std::runtime_error("capture"); }
+			{ auto lock=emu->AcquireLock(); write(0); emu->GetVideoDecoder()->SetAllMetaReplacements({},{},{p}); }
+			auto blend=[](uint32_t front,uint32_t back) { uint32_t a=front>>24,c=0xFF000000; if(!a) { return back; } if(a==255) { return front; } for(int ch=0;ch<3;ch++) { c|=((((front>>(8*ch))&255)*a+((back>>(8*ch))&255)*(255-a)+127)/255)<<(8*ch); } return c; };
+			int scale=p.Scale;
+			int displayLeft=p.DisplayX-(dynamic_cast<PceConsole*>(console.get()) ? PceConstants::GetLeftOverscan(4) : 0);
+			std::vector<uint32_t> expected(size_t(width)*height*scale*scale);
+			for(uint32_t y=0;y<height*scale;y++) { for(uint32_t x=0;x<width*scale;x++) { expected[size_t(y)*width*scale+x]=baseline[size_t(y/scale)*width+x/scale]; } }
+			if(p.FillEnabled) { for(int y=p.DisplayY*scale;y<(p.DisplayY+p.DisplayHeight)*scale;y++) { for(int x=std::max(0,displayLeft*scale);x<(displayLeft+p.DisplayWidth)*scale;x++) { auto& c=expected[size_t(y)*width*scale+x]; c=blend(p.FillColor,c); } } }
+			const auto& g=p.Glyphs[0]; for(int y=0;y<g.Height;y++) { for(int x=0;x<g.Width;x++) {
+				int dx=displayLeft*scale+g.OffsetX+x,dy=p.DisplayY*scale+g.OffsetY+y;
+				if(dx<std::max(0,displayLeft*scale) || dx>=(displayLeft+p.DisplayWidth)*scale || dy<p.DisplayY*scale || dy>=(p.DisplayY+p.DisplayHeight)*scale) { continue; }
+				size_t id=size_t(y)*g.Width+x; auto& color=expected[size_t(dy)*width*scale+dx]; if(!g.Decorations.empty()) { color=blend(g.Decorations[id],color); }
+				uint32_t a=((g.Pixels[id]>>24)*(p.Color>>24)+127)/255; color=blend((p.Color&0xFFFFFF)|(a<<24),color);
+			} }
+			stage=3; if(!wait([&]() { return renderer.Width==width*scale && renderer.Height==height*scale && renderer.Pixels==expected; })) {
+				std::lock_guard<std::mutex> lock(renderer.Mutex); std::cerr<<"TEXT dims "<<renderer.Width<<"x"<<renderer.Height<<" expected "<<width*scale<<"x"<<height*scale<<" region "<<p.X<<","<<p.Y<<std::endl;
+				if(renderer.Pixels.size()==expected.size()) { for(size_t i=0;i<expected.size();i++) { if(renderer.Pixels[i]!=expected[i]) { std::cerr<<"TEXT first difference "<<i<<" got "<<std::hex<<renderer.Pixels[i]<<" expected "<<expected[i]<<std::dec<<std::endl; break; } } }
+				throw std::runtime_error("render");
+			}
+			{ auto lock=emu->AcquireLock(); auto decoder=emu->GetVideoDecoder(); decoder->WaitForAsyncFrameDecode(); decoder->RequestTextPreview(); FrameInfo size;
+				uint32_t count=decoder->ReadTextPreview(nullptr,0,size); std::vector<uint32_t> snapshot(count); decoder->ReadTextPreview(snapshot.data(),count,size);
+				uint32_t left=dynamic_cast<PceConsole*>(console.get()) ? PceConstants::GetLeftOverscan(4) : 0;
+				if(size.Width<width+left || size.Height!=height) { throw std::runtime_error("snapshot dimensions"); }
+				for(uint32_t y=0;y<height;y++) { for(uint32_t x=0;x<width;x++) { if(snapshot[size_t(y)*size.Width+x+left]!=(expected[size_t(y*scale)*width*scale+x*scale]|0xFF000000)) { throw std::runtime_error("snapshot crop"); } } }
+			}
+			{ auto lock=emu->AcquireLock(); write(1); } stage=4; if(!wait([&]() { return renderer.Width==width && renderer.Pixels==baseline; })) { throw std::runtime_error("condition off"); }
+			{ auto lock=emu->AcquireLock(); write(0); } stage=5; if(!wait([&]() { return renderer.Width==width*scale && renderer.Pixels==expected; })) { throw std::runtime_error("condition on"); }
+			{ auto lock=emu->AcquireLock(); emu->GetVideoDecoder()->SetAllMetaReplacements({},{},{}); } stage=6;
+			if(!wait([&]() { return renderer.Width==width && renderer.Pixels==baseline && renderer.Capture && renderer.Capture->TextLayerMask==0; })) { throw std::runtime_error("clear"); }
+			emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Stop(false); emu->Release(); return 0;
+		} catch(const std::exception& e) { std::cerr<<"TEXT SYSTEM stage "<<stage<<": "<<e.what()<<std::endl; emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Stop(false); emu->Release(); return stage; }
+	}
+	DllExport uint32_t __stdcall RunMetaTextNesTest(const char* filename,const uint8_t* packet,uint32_t length)
+	{
+		try {
+			int scrollX=std::string(filename).find("-scroll")!=std::string::npos ? 5 : 0,scrollY=scrollX ? 3 : 0;
+			auto profiles=MetaTextPacket(packet,length).Parse();
+			if(profiles.size()!=1 || profiles[0].Glyphs.size()!=3 || profiles[0].Mappings.size()+profiles[0].Patterns.size()!=3 || profiles[0].Conditions.size()!=2) { return 0; }
+			FolderUtilities::SetHomeFolder(FolderUtilities::GetFolderName(filename));
+			unique_ptr<Emulator> emu(new Emulator()); emu->Initialize(false);
+			emu->GetSettings()->SetFlag(EmulationFlags::TestMode); emu->GetSettings()->SetFlag(EmulationFlags::MaximumSpeed);
+			auto& cfg=emu->GetSettings()->GetNesConfig(); cfg.IsFullColorPalette=true; cfg.RamPowerOnState=RamState::AllZeros;
+			for(int i=0;i<512;i++) { cfg.UserPalette[i]=(i&63)==1 ? 0xFFFF0000 : (i&63)==2 ? 0xFF0000FF : (i&63)==3 ? 0xFFFF00FF : (i&63)==4 ? 0xFFFFFF00 : 0xFF000000; }
+			MetaSpriteTestRenderer renderer; uint32_t flags=0;
+			if(!emu->LoadRom((VirtualFile)filename,VirtualFile())) { return 0; }
+			emu->GetVideoRenderer()->RegisterRenderingDevice(&renderer);
+			auto nes=dynamic_cast<NesConsole*>(emu->GetConsole().get());
+			nes->GetPpu()->SetMetaSpriteCapture(true);
+			auto wait=[&](const std::function<bool()>& check) {
+				for(int attempt=0;attempt<1000;attempt++) { { std::lock_guard<std::mutex> lock(renderer.Mutex); if(check()) { return true; } } std::this_thread::sleep_for(std::chrono::milliseconds(10)); } return false;
+			};
+			std::vector<uint32_t> baseline;
+			if(wait([&]() { if(renderer.Width!=256 || renderer.Height!=240 || !renderer.Capture || renderer.FrameNumber<6 || renderer.Pixels[(32-scrollY)*256+32-scrollX]!=0xFFFF0000 || renderer.Pixels[32*256+40]!=0xFFFF00FF) { return false; } baseline=renderer.Pixels; return true; })) { flags|=1; }
+			const auto& p=profiles[0]; int scale=p.Scale;
+			auto blend=[](uint32_t ink,uint32_t under,int alpha) { uint32_t color=0xFF000000; for(int c=0;c<3;c++) { color|=((((ink>>(c*8))&255)*alpha+((under>>(c*8))&255)*(255-alpha)+127)/255)<<(c*8); } return color; };
+			std::vector<uint32_t> runExpected;
+			if(flags==1 && p.Unclipped) {
+				int width=256*scale,height=240*scale;
+				runExpected.resize(size_t(width)*height); for(int y=0;y<height;y++) { for(int x=0;x<width;x++) { runExpected[y*width+x]=baseline[(y/scale)*256+x/scale]; } }
+				int left=std::max(0,p.DisplayX*scale),top=std::max(0,p.DisplayY*scale),right=std::min(width,(p.DisplayX+p.DisplayWidth)*scale),bottom=std::min(height,(p.DisplayY+p.DisplayHeight)*scale);
+				if(p.FillEnabled) { for(int y=top;y<bottom;y++) { for(int x=left;x<right;x++) { runExpected[y*width+x]=blend(p.FillColor,runExpected[y*width+x],p.FillColor>>24); } } }
+				for(int row=0;row<2;row+=p.CellHeight/8) {
+					int64_t cursor=int64_t(p.DisplayX)*64; uint32_t previous=UINT32_MAX;
+					for(int col=0;col<4;col+=p.CellWidth/8) {
+						bool b=(col+row)%2!=0; uint32_t id=b ? 1 : col>=2 ? 2 : 0;
+						if(previous!=UINT32_MAX) { auto pair=p.Kerning.find((uint64_t(previous)<<32)|id); if(pair!=p.Kerning.end()) { cursor+=pair->second; } }
+						const auto& glyph=p.Glyphs[id]; double originX=double(cursor)*scale/64+glyph.OffsetX,originY=(p.DisplayY+double((row/(p.CellHeight/8))*p.LineHeight64)/64)*scale+glyph.OffsetY;
+						uint32_t ink=p.PaletteColor ? col>=2 ? 0xFFFFFF00 : 0xFFFF0000 : p.Color;
+						for(int y=top;y<bottom;y++) { int sy=int(std::floor(y+0.5-originY)); if(sy<0 || sy>=glyph.Height) { continue; }
+						for(int x=left;x<right;x++) { int sx=int(std::floor(x+0.5-originX)); if(sx<0 || sx>=glyph.Width) { continue; }
+							size_t index=size_t(sy)*glyph.Width+sx; auto& color=runExpected[y*width+x];
+							if(!glyph.Decorations.empty()) { color=blend(glyph.Decorations[index],color,glyph.Decorations[index]>>24); }
+							color=blend(ink,color,((glyph.Pixels[index]>>24)*(ink>>24)+127)/255);
+						} }
+						cursor+=glyph.Advance64+p.LetterSpacing64; previous=id;
+					}
+				}
+			}
+			auto expected=[&]() {
+				if(renderer.Width!=uint32_t(256*scale) || renderer.Height!=uint32_t(240*scale) || !renderer.Capture || renderer.Capture->TextPixels.size()!=256*240
+					|| renderer.Capture->MemorySnapshot.size()!=2 || renderer.Capture->MemorySnapshot.at(0x652)!=8 || renderer.Capture->MemorySnapshot.at(0x760)!=4) { return false; }
+				if(p.Unclipped) { return renderer.Pixels==runExpected; }
+				for(int y=0;y<240*scale;y++) { for(int x=0;x<256*scale;x++) {
+					int px=x/scale,py=y/scale,wx=(px+scrollX)%512,wy=(py+scrollY)%480; uint32_t color=baseline[py*256+px];
+					if(wx>=32 && wx<64 && wy>=32 && wy<48) {
+						int col=(wx-32)/8,row=(wy-32)/8; bool b=(col+row)%2!=0; int glyph=b ? 1 : col>=2 ? 2 : 0;
+						uint32_t raw=p.Glyphs[glyph].Pixels[((wy%8)*scale+y%scale)*8*scale+(wx%8)*scale+x%scale];
+						uint32_t ink=p.PaletteColor ? col>=2 ? 0xFFFFFF00 : 0xFFFF0000 : p.Color;
+						int alpha=int(((raw>>24)*(ink>>24)+127)/255);
+						if(p.FillEnabled) { color=blend(p.FillColor,color,p.FillColor>>24); }
+						color=blend(ink,color,alpha);
+						const auto& tile=renderer.Capture->TextPixels[py*256+px];
+						if(!tile.Valid || tile.TileIndex!=uint32_t(b ? 2 : 1) || tile.GraphicsAddress!=uint32_t(b ? 32 : 16) || tile.LocalX!=(wx%8) || tile.LocalY!=(wy%8) || tile.Palette!=(col>=2 ? 1 : 0)) { return false; }
+					}
+					if(renderer.Pixels[y*256*scale+x]!=color) { return false; }
+				} } return true;
+			};
+			if(flags==1) {
+				{ auto emuLock=emu->AcquireLock(); emu->GetVideoDecoder()->SetAllMetaReplacements({},{},profiles); }
+				if(wait(expected)) { flags|=2; }
+				{ auto emuLock=emu->AcquireLock(); nes->GetMemoryManager()->DebugWrite(0x760,6); }
+				if(wait([&]() { return renderer.Width==256 && renderer.Pixels==baseline && renderer.Capture && renderer.Capture->MemorySnapshot.count(0x760) && renderer.Capture->MemorySnapshot.at(0x760)==6; })) { flags|=4; }
+				{ auto emuLock=emu->AcquireLock(); nes->GetMemoryManager()->DebugWrite(0x760,4); }
+				if(wait(expected)) { flags|=8; }
+				{ auto emuLock=emu->AcquireLock(); emu->GetVideoDecoder()->SetAllMetaReplacements({},{},{}); }
+				if(wait([&]() { return renderer.Width==256 && renderer.Pixels==baseline && renderer.Capture && renderer.Capture->MemorySnapshot.empty() && renderer.Capture->TextPixels.empty(); })) { flags|=16; }
+				if(flags==31) {
+					// Authoring snapshot must remain in gameplay coordinates even when presentation rotates/widens.
+					{ auto emuLock=emu->AcquireLock(); auto& video=emu->GetSettings()->GetVideoConfig(); video.DecorativeWidescreen=true; video.ScreenRotation=90; }
+					if(!wait([&]() { return renderer.Width==240 && renderer.Height>256; })) { return 0; }
+					auto emuLock=emu->AcquireLock(); auto decoder=emu->GetVideoDecoder(); decoder->WaitForAsyncFrameDecode(); decoder->RequestTextPreview();
+					FrameInfo size; uint32_t count=decoder->ReadTextPreview(nullptr,0,size); std::vector<uint32_t> preview(count);
+					decoder->ReadTextPreview(preview.data(),count,size);
+					if(size.Width!=256 || size.Height!=240 || preview!=baseline) { return 0; }
+				}
+			}
+			emu->GetVideoRenderer()->UnregisterRenderingDevice(&renderer); emu->Stop(false); emu->Release();
+			return flags;
 		} catch(...) { return 0; }
 	}
 	DllExport uint32_t __stdcall RunMetaSpriteNesCaptureTest(const char* filename)

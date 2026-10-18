@@ -113,6 +113,7 @@ void GbaPpu::ProcessEndOfScanline()
 	std::fill(_layerOutput[3], _layerOutput[3] + 240, GbaPixelData {});
 	if(_metaFrame) {
 		for(auto& samples : _metaBgSamples) { std::fill(std::begin(samples), std::end(samples), MetaBackgroundSample {}); }
+		if(_metaFrame->TextLayerMask) { for(auto& row:_textSamples) { std::fill(std::begin(row),std::end(row),MetaTextPixel{}); } }
 	}
 
 	if(_state.Scanline >= 2 && _state.Scanline < 162 && _triggerSpecialDma) {
@@ -174,6 +175,7 @@ void GbaPpu::ProcessEndOfScanline()
 		_metaFrame = !_skipRender && _metaCaptureRequested.load() && !_state.StereoscopicEnabled
 			? _metaFramePool.Acquire(GbaConstants::ScreenWidth, GbaConstants::ScreenHeight) : nullptr;
 		if(_metaFrame) { _metaFrame->GbaColorEffects = true; }
+		if(_metaFrame) { _metaFrame->TextLayerMask=_emu->GetVideoDecoder()->GetMetaTextLayerMask(); }
 	}
 
 	if(_state.ScanlineIrqEnabled && _state.Scanline == _state.Lyc) {
@@ -385,6 +387,11 @@ void GbaPpu::ProcessColorMath()
 				pixel.GbaBackgroundSamples[layer] = _metaBgSamples[layer][x];
 				pixel.GbaBackgroundSamples[layer].Valid &= _state.BgLayers[layer].Enabled
 					&& !_emu->GetSettings()->GetGbaConfig().HideBgLayers[layer] && _state.WindowActiveLayers[wnd][layer];
+				if(_metaFrame->TextLayerMask&(1<<layer)) {
+					auto text=_textSamples[layer][x]; int stride=_state.BgLayers[layer].Bpp8Mode ? 256 : 16;
+					for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=_paletteRam[(text.Palette*stride+ink)&255]&0x7FFF; }
+					_metaFrame->CaptureText(layer,x,_state.Scanline,text,pixel.GbaBackgroundSamples[layer]);
+				}
 			}
 			pixel.GbaCoverage.clear();
 			pixel.GbaNativeObjects.clear();
@@ -638,6 +645,11 @@ void GbaPpu::PushBgPixels(int renderX)
 				_metaBgSamples[i][renderX].ScrollY = _state.BgLayers[i].ScrollY;
 				_metaBgSamples[i][renderX].ScrollWrapX = _metaBgMapWidthMask[i] + 1;
 				_metaBgSamples[i][renderX].ScrollWrapY = _state.BgLayers[i].DoubleHeight ? 512 : 256;
+				if(_metaFrame->TextLayerMask&(1<<i)) {
+					auto& text=_textSamples[i][renderX]; text.Valid=!mosaic; text.TileIndex=data.TileIndex;
+					text.GraphicsAddress=(_state.BgLayers[i].TilesetAddr+data.TileIndex*(bpp8 ? 64 : 32))&0xFFFF;
+					text.Palette=data.PaletteIndex; text.LocalX=(_metaBgMapXBase[i]+sampleX)&7; text.LocalY=_metaBgMapY[i]&7;
+				}
 			}
 		}
 		tileData >>= bpp8 ? 8 : 4;

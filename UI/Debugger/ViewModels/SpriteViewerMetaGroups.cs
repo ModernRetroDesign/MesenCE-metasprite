@@ -387,6 +387,7 @@ public partial class SpriteViewerViewModel
   MetaSpriteRuntimeLoader.ValidateSpriteArtworkCanvases(_metaPack, _metaPackPath);
   _metaPack.BackgroundLayers = latest.BackgroundLayers;
   _metaPack.NextBackgroundId = latest.NextBackgroundId;
+  _metaPack.TextProfiles = latest.TextProfiles;
   _metaPack.Save(_metaPackPath);
   _savedSpriteDefinitions = _metaPack.GetSpriteDefinitionsSnapshot();
  }
@@ -456,7 +457,7 @@ public partial class SpriteViewerViewModel
 			if(CpuType == CpuType.Gba && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " GBA currently requires the default filter with color adjustment and frame blending disabled; NTSC and stereoscopic output are pending."; }
 			if(CpuType == CpuType.Ws && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " WonderSwan currently requires the default filter with frame blending and LCD icons disabled; other output modes are pending."; }
 			if(CpuType == CpuType.Nes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " NES currently requires the default filter and standard PPU; existing HD packs and VS dual-console layouts are excluded."; }
-			if(CpuType == CpuType.Snes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " SNES requires the default filter, neutral color settings, and no forced-resolution conversion. Hires and interlaced replacements currently require color math to be disabled. OBJ-interlace support is experimental."; }
+			if(CpuType == CpuType.Snes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " SNES uses the default filter, neutral color settings, and no forced-resolution conversion. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and interlaced rewind replacements remain pending."; }
 		} catch(Exception ex) { MetaStatus = "Could not apply replacements: " + ex.Message; }
 	}
 

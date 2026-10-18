@@ -1,4 +1,737 @@
+## Remaining text replacement goals - 2026-10-17
+
+The initial cached text overlay and regular tile-background adapters are implemented across all seven systems. The following work remains planned and is not marked complete:
+
+- [ ] Extend GBA recognition to affine/bitmap backgrounds and mosaic where a stable source-cell identity can be defined.
+- [ ] Add SMS legacy graphics/text modes.
+- [ ] Add SNES Mode 7, hires/interlace and mosaic support.
+- [ ] Assess and support compatible special hardware/presentation paths: SuperGrafx, SGB/linked consoles, WonderSwan LCD icons/blending and currently guarded video filters. Keep unsupported combinations explicitly guarded.
+- [ ] Add bank/content identity safeguards against unrelated tiles reusing mapped indices or graphics addresses; expand mapper, raster and dynamic-palette coverage.
+- [ ] Expand inherited palette ink beyond entries 1-3.
+- [ ] Validate save-state loading, rewind, run-ahead, presentation changes and real-game correctness/performance across the supported systems.
+- [ ] Add word-aware wrapping, ligatures and complex-script/RTL shaping.
+- [ ] Add sprite-based text recognition.
+- [ ] Include partially visible source cells in the existing cross-system screen-edge continuity work. This remains deferred.
+
+These items extend the existing text editor and cached overlay workflow. See docs/text-replacement.md for implemented behavior and the support matrix.
+
+## Cross-system TrueType gameplay adapters - 2026-10-17
+
+Initial cached-font gameplay adapters now cover GB/GBC background/window, GBA regular tile BG0-BG3, PCE VDC1 background, SMS Mode 4, normal-resolution SNES tile BG1-BG4/main and subscreen, and WonderSwan background/foreground with native windows. NES support remains available. Text capture is optional per selected layer and records fetched tile identities, graphics addresses, palette ink and source coordinates, including transparent source texels. Cached glyph atlases are shared rather than copied per frame. The overlay supports multiple text planes and different raster scales. Save and apply is enabled across all seven systems. SNES source capture handles 16x16 hardware tile quadrants/mirroring and mode-0 palette numbering. Native PCE preview dimensions/crop are corrected.
+
+Verified: 48 generated actual-font full-frame gameplay cases in both Debug and Release, covering DMG/CGB/window, SMS, PCE, GBA, all four SNES layers and WS BG/FG windows; 8x8/8x16 cells; index/address patterns; fill/effects/display regions; RAM off/on/clear; and requested native-coordinate snapshots. Each system's actual editor Save and apply/failed-asset retention/retry/disabled clearing is checked in a separate process. Managed transport, authoring, NES gameplay regressions and the full native compositor suite pass, including mixed-scale independent text planes and inherited ink. Debug/Release UI builds pass without warnings/errors.
+
+Guarded/future text work: GBA affine/bitmap and mosaic; SMS legacy graphics/text modes; SNES Mode 7, hires/interlace and mosaic; SuperGrafx, SGB/link variants and incompatible filters; broader bank/content/raster guards and real-game/state/rewind validation; palette ink entries beyond 1-3; complex-script shaping/ligatures/word-aware wrapping and sprite text. Cross-system screen-edge continuity remains deferred. See docs/text-replacement.md for the current support matrix and workflow. This supersedes older authoring-only statuses for these systems; the overall replacement goal remains unfinished.
+## Multi-tile TrueType source cells - 2026-10-17
+
+Implemented source-character cells in multiples of 8 pixels, from 8x8 through 128x128, with tile-aligned X/Y grid origins. Mappings store the complete row-major tile grid and emit one character only when every component matches. Shared top tiles are disambiguated by the remaining tiles. Exact palettes must match every component; wildcard patterns permit mixed palettes and inherit anchor ink. Index and graphics-address matching are supported. Existing single-tile pack mappings remain compatible; MXT4 transports patterns/origins and the native reader retains MXT1/MXT2/MXT3 support.
+
+The text editor can take a character cell's size/origin from the cyan selection and capture all tile identities from its frozen tilemap snapshot, or capture at the original Tilemap Viewer tile. Incomplete captures fail without changing mappings. Source cells and font display size remain independent. Use separate profiles for different character sizes; select the full dialogue region or disable the source-region limit after capturing individual letters. Gameplay remains NES-only; other system text adapters remain future work. Missing/offscreen component tiles are not inferred; cross-system screen-edge continuity is still deferred.
+
+Verified: managed pattern parsing/persistence/transport, native complete-pattern matching and malformed input handling, selected-cell capture, shared-top disambiguation, grid phase and palette checks, graphics-address patterns, arbitrary 24x16 cells and region completeness. All 24 generated NES mapper-0 actual-font gameplay cases pass in Debug and Release, including 8x16/16x8/16x16 cells, fine scrolling, fill, RAM restoration and paused/widened/rotated snapshot comparison. Full native compositor regression suite passes. Debug/Release UI builds have no warnings or errors.
+## Visual text capture and display selectors - 2026-10-17
+
+Implemented in the TrueType text editor: cyan tile-snapped source selection from a captured hardware tilemap, reuse of Tilemap Viewer's selected rectangle, and an orange gameplay display rectangle with a cached sample-text overlay. Both support drawing, moving, edge/corner resizing, synchronized numeric fields, arrow-key nudging, Ctrl+arrow resizing and Shift larger steps. Display selection uses native pixels; source selection uses 8x8 tiles. Match source size / position copies the source rectangle. Preview layout refresh is debounced during display-region edits.
+
+Gameplay snapshots are requested on demand, work while paused, preserve native gameplay coordinates through decorative widescreen and rotation, and represent cropped overscan with a dark border. No screenshot files or continuous frame-copy loop are required. Source preview captures the layer selected on editor opening; refresh/reopen after changing that layer. Editors opened before a tilemap refresh remain usable with an explicit unavailable-preview message. The sample text preview does not decode dialogue from the snapshot.
+
+Verified: visual-selector pointer and keyboard tests, bidirectional numeric bindings, reversed/zoomed drags and tile snapping; managed pack tests; all 18 live NES mapper-0 TrueType cases with requested paused/widescreen/rotation snapshot comparison in Debug and Release. Other systems retain text authoring/preview support; their gameplay text adapters remain unfinished.
+## Cached font overlays, proportional layout and effects - 2026-10-17
+
+At the user's request, text is now a cached overlay over the completed native/
+PNG image. It leaves original tiles intact. Optional alpha-capable fill covers
+the configured display region, or matched source cells without a display region.
+Replacement PNGs can cover old native text with fill left disabled. Font activation
+no longer forces full-screen native BG/OBJ reconstruction, and unmatched font
+profiles do not raise the output scale. Finished pixels are simply expanded when
+matched glyph detail requires it; blending is restricted to glyphs/fill.
+
+The editor adds proportional left-to-right text with real font advances and
+HarfBuzz-derived pair kerning; new profiles enable this, existing profiles retain
+their saved setting. Font size can exceed the 8x8 NES source-cell dimensions.
+Cached glyph bounds include overhang and effects, clipping at the gameplay/display
+region rather than the original tile. Display-region X/Y/width/height are separate
+from source tilemap matching regions. Source rows become lines, font metrics or
+a custom line height determine spacing, and optional character wrapping stays
+inside the display region. Letter spacing can be adjusted independently.
+
+Outline width/color and drop-shadow X/Y/color are independent controls, accepting
+RGBA colors and quarter-pixel adjustments. Coverage and effect layers are cached
+at activation; no font rasterization or shaping occurs on a gameplay frame.
+The preview uses the same glyphs/metrics/kerning/effect resources. Actual Arial
+A/V kerning, larger glyph bounds and separate red/blue effect colors are checked;
+a generated preview was visually inspected. MXT3 adds bounds, advances, layout,
+kerning and effect resources while retaining MXT1/MXT2 parsing. Each rendered
+frame retains one immutable sprite/background/text definition snapshot.
+
+Eighteen actual-font NES mapper-0 cases pass in Debug and Release, covering
+static/fine scroll, tile/address and palette selection, fill off/on, native-image
+retention, RAM reactivation/restoration, and larger proportional fonts moved to
+a display region with colored outline/shadow. Native tests verify clipping,
+kerning placement, glyph/effect overhang, wrapping, region fill, PNG layering,
+crops, missing RAM, no-match scaling bypass and legacy packets. The complete
+Release native suite and existing NES/SNES PNG authoring regressions pass.
+Debug/Release UI builds have zero warnings/errors. Release Mesen.exe is present
+with its matching packaged native core.
+
+A matching synthetic Release CPU benchmark (32 letters, eight native sprites)
+measures 4x fixed-cell overlay at 0.59 ms/frame and proportional overlay at
+0.58 ms/frame, compared with the prior tile-reconstruction path's 18.66 ms.
+Unmatched profiles cost 0.14-0.15 ms and leave output at 1x. These are compositor
+measurements, not a complete game FPS guarantee; background PNG composition
+and capture retain their own costs.
+
+Evidence: Tests/MetaSprites/obj/text-layout-managed.log,
+text-layout-native-{debug,release}.log, text-layout-live-{debug,release}.log,
+text-layout-viewer-debug.log, text-layout-{nes,snes}-authoring.log,
+text-layout-profile[-proportional]-release.log and build-text-layout-*.log.
+The earlier text tile-replacement behavior/performance proposal is superseded.
+
+NES gameplay remains initial coverage. Other system adapters, bank/content
+guards, broader dynamic palette/raster coverage, state/rewind/presentation,
+word-aware wrapping, complex-script/RTL/ligature shaping, multi-tile recognition
+and sprite text remain unfinished. The overall replacement goal stays active.
+Current workflow and scope: docs/text-replacement.md.
+## Initial NES TrueType gameplay replacement - 2026-10-17
+
+NES now captures optional fetched tile identities, logical graphics addresses,
+attribute palettes, local coordinates and output-time ink colors when text
+profiles are installed. Text definitions join the existing configured-address
+RAM snapshot; no full RAM or decoder-thread VRAM reads are introduced.
+
+TTF/OTF glyph coverage is rasterized once at activation, shared by repeated
+characters within each profile, budgeted to 64 MiB and published immutably.
+MXT1 packets support bounded file/array parsing. The new three-file activation
+parses sprites, backgrounds and text before committing them together under the
+emulator lock, rechecking console/ROM compatibility. Invalid files or glyphs
+leave previously installed definitions intact.
+
+NES composition removes matched native text across 8x8 cells, preserves native
+sprite order and background clipping, and handles inherited palette colors or
+custom alpha. Glyph transparency reveals native backdrop/behind sprites.
+Native-slot background PNGs draw beneath text, even with native-layer hiding;
+band-6/final overlays remain above it. The editor now offers Save and apply for
+NES. Other systems remain authoring/preview only and reject active gameplay
+text definitions rather than silently dropping them.
+
+Eight generated mapper-0 actual-font cases pass in Debug and Release: tile
+indices/graphics addresses, exact palette overrides, inherited/custom partial
+alpha colors, static/fine X/Y scrolling, two configured RAM bytes, reactivation
+and whole-frame disable restoration. Native Debug/Release suites and focused
+PNG/hide-layer interaction checks pass. Actual editor activation verifies
+three-file handoff, malformed/wrong-ROM retention, missing-glyph retry and
+all-disabled clearing. Existing NES/SNES authoring regressions pass. Managed
+transport tests, editor glyph-sharing/budget tests and zero-warning Debug/
+Release UI builds pass. Release Mesen.exe and the matching core are present.
+
+Evidence: Tests/MetaSprites/obj/text-runtime-managed.log,
+text-runtime-native-{debug,release}.log, text-runtime-png-{debug,release}.log,
+text-runtime-live-{debug,release}.log, text-runtime-viewer-debug.log,
+text-runtime-{nes,snes}-authoring.log and build-text-runtime-*.log.
+
+Remaining: other system adapters, bank/content disambiguation, dynamic palette/
+raster combinations, broader mapper coverage, text state/rewind/run-ahead and
+presentation checks, multi-tile characters and proportional/sprite text. The
+overall goal remains incomplete. Workflow and scope: docs/text-replacement.md.
+## TrueType text authoring started - 2026-10-17
+
+TrueType text replacement is now active work, superseding its earlier deferred
+status. The Tilemap Viewer opens a dedicated TrueType text replacement editor
+for hardware background maps. It supports named profiles, imported TTF/OTF
+fonts, tile-index or graphics-address mappings, Unicode characters, exact or
+wildcard palettes, native cell/font sizes, raster scale, offsets, inherited or
+custom RRGGBBAA colors, tilemap regions and existing RAM comparison conditions.
+A captured viewer tile can seed a character mapping. Actual font rasterization
+provides a tile-aligned preview. Native palette preview currently uses white.
+
+Profiles persist in the existing ROM pack as TextProfiles. Legacy packs still
+load. Saves merge unrelated pack edits, preserve text profiles through sprite
+and background saves, reject stale game/editor contexts, and retain prior files
+on save failure. Font files already at the pack root are reused; external font
+name collisions use short numeric suffixes. Unsaved drafts remain isolated.
+
+Managed mapping/Unicode/path/condition/persistence checks and actual hidden
+Avalonia window/font/import/save tests pass. The existing SnesObj authoring
+regression passes with independently saved text profiles present, including
+sprite/background save preservation. It also verifies new animation frames'
+eight-frame default. Debug/Release UI builds pass with zero warnings/errors.
+Evidence: Tests/MetaSprites/obj/text-authoring-managed.log,
+text-authoring-viewer.log, text-authoring-sprite-background-regression.log and
+build-text-authoring-ui-{debug,release}.log.
+
+This increment does not replace text in gameplay on any system. Next: reusable
+glyph resources, fetched tile/bank/content capture, RAM-gated native-layer
+composition and a generated NES mapper-0 dialog fixture, then the remaining
+system adapters. Priority/clipping, native text removal, palette inheritance,
+state/rewind/presentation and memory budgets require runtime verification.
+See docs/text-replacement.md for the workflow, format and implementation stages.
+The overall replacement goal remains incomplete.
+## SNES hires interlaced field color math - 2026-10-17
+
+Hires math now retains independent logical sources for woven even/odd fields.
+The compositor selects the matching field, preserves its OAM identity space,
+artwork/RAM snapshot and background gates, and maps current-field/bob rows
+through their real source Y (including bob's first-picture-row adjustment).
+An ordinary field can share a weave with a hires field. Retired output frames
+release both source references while published captures keep them alive.
+
+Native Debug/Release suites pass independent per-field alternate artwork/RAM,
+background RAM activation, mixed field resolution, current/bob placement and
+dual-source retirement checks. Six new live LoROM fixtures exercise mode 5/6
+and pseudo-hires math through weave/current-field/bob/bob-blend, including
+whole-frame PNG alpha/window expectations, both field phases and native
+restoration. All 46 live SNES cases pass in Debug and Release. The hidden
+SnesObj PNG/camera/animation authoring regression suite passes as well.
+
+UI help now identifies hires OBJ-interlace math (full-source row-step 2) and
+interlaced rewind as the remaining guarded paths. This change handles ordinary
+OBJ sampling in hires interlaced output; it does not claim row-step-2 support.
+Debug/Release UI builds pass with zero warnings/errors.
+Evidence: Tests/MetaSprites/obj/snes-hires-fields-native-{debug,release}.log,
+snes-hires-fields-live-{debug,release}.log, snes-hires-fields-viewer-release.log
+and build-snes-hires-fields-*.log.
+
+## SNES mixed-raster PNG column fix - 2026-10-17
+
+Fixed an observed hires-math compositor bug: ordinary samples inside a hires
+frame used phase zero for both physical columns, repeating the left PNG texel.
+Sampling now passes the destination phase for ordinary pixels while retaining
+explicit main/sub phases for true/pseudo-hires dependencies. This applies to
+sprite canvases and background sample offsets.
+
+A native regression failed before the fix (snes-mixed-math-before.log), then
+passed with independent columns at sprite artwork scales 2/4 and background
+scale 2. Complete Debug/Release native suites pass. A new real LoROM fixture
+switches pseudo-hires off after 80 horizontal blanks. Its 400-pixel-tall PNG
+spans both regions, requiring hires blend colors above the switch and distinct
+ordinary PNG columns below it, with whole-frame/native-restoration checks.
+All 16 Debug and Release hires fixtures pass, including this new case.
+
+Release UI rebuild passes with zero warnings/errors. This fixes mixed-raster
+sampling; hires interlaced math and interlaced rewind remain open.
+Evidence: Tests/MetaSprites/obj/snes-mixed-math-native-{debug,release}.log,
+snes-mixed-math-live-{debug,release}.log and build-snes-mixed-math-*.log.
+
+## SNES noninterlaced hires color-math composition - 2026-10-17
+
+Mode 5/6 and pseudo-hires PNG replacement now support color math without
+interlace. Each phase resolves its own main/subscreen sprites and backgrounds.
+The sub phase uses the previous main pixel for color/math identity and the
+previous subscreen priority for operand/half selection. At the left edge the
+color operand is black while control remains pixel zero; identical primary
+and priority outcomes share alpha rather than being counted independently.
+PNG colors retain 8-bit effects; native-only outcomes retain 5-bit rounding.
+The path preserves OBJ windows, OAM ordering, palette exemptions, full canvases
+and PNG alpha. Background phase samples and independent priorities use their
+own logical source positions. Configured CPU conditions/timing stay on the
+published frame; no additional RAM dumps or reads are introduced.
+
+Expanded hires frames retain their immutable logical source. Retired output
+frames release that reference before pool reuse, avoiding unnecessary source
+allocations while keeping published captures alive. Native tests exercise
+30-frame pool reuse, malformed phase references, 32 math combinations, alpha,
+palette exemption, previous-pixel sampling and separate background phases.
+Both complete native Debug/Release suites pass.
+
+Six new live LoROM fixtures cover mode 5/6 and pseudo-hires, fixed/subscreen
+operands, main/sub OBJ planes and windows, with independent whole-frame PNG
+expectations and native restoration. All 15 Debug hires cases and all 39
+Release hires/interlace cases pass. The hidden SnesObj authoring/camera/PNG
+animation suite also passes. UI capability help and Debug/Release builds are
+updated; hires interlaced math, interlaced rewind and broader live effect/mode
+combinations remain unfinished.
+
+Evidence: Tests/MetaSprites/obj/snes-hires-math-native-{debug,release}.log,
+snes-hires-math-live-{debug,release}.log, snes-hires-math-viewer-release.log
+and build-snes-hires-math-*.log.
+
+## Explicit SNES hires phase-source capture - 2026-10-17
+
+Extracted the production sub-output metadata construction into the shared
+MetaSnesCapture::CaptureSubOutputPhase helper. It keeps current subscreen
+primary data, previous main-screen color/sprite/background operands and math
+control distinct. SecondarySampleX now explicitly records the previous color
+coordinate; at the left edge it is -1 while MathControlX remains zero. This
+avoids treating the black edge operand as pixel zero when implementing phase
+composition. Current rendered behavior and hires-math guards are unchanged.
+
+Native Debug/Release suites verify left/adjacent/right edges, active/blank
+captures, sprite identities, raw colors, priority/math flags, layer/sample
+coordinates and preserved clip/subtract/half settings. Both cores build; all
+nine Debug hires fixtures and all 33 Release hires/interlace cases pass.
+General hires color-math composition still needs independent primary/secondary
+object/background sampling and math-control priority resolution.
+Evidence: Tests/MetaSprites/obj/snes-phase-source-native-{debug,release}.log,
+snes-phase-source-live-{debug,release}.log and build-snes-phase-source-*.log.
+
+## Renderer capability help and hires dependency audit - 2026-10-17
+
+Corrected Sprite Viewer and background-editor/import help that still described
+all SNES interlaced math as unsupported. Help now distinguishes supported
+normal-width interlaced math, hires sub/main math restrictions and pending
+interlaced rewind replacements. SNES import context has explicit line breaks.
+SMS import help now includes supported legacy graphics/text modes rather than
+claiming Mode 4 alone. These are UI text changes; renderer behavior is unchanged.
+
+The hires audit confirms a specific dependency in SnesPpu::ApplyColorMath:
+the sub output phase at x uses the previous main pixel at x-1 and its math
+control metadata. Current full-canvas composition resolves both object planes
+at one destination coordinate. Hires math therefore needs independent primary
+and secondary phase sampling/visibility, including earlier native objects and
+backgrounds; removing the current guard would lose that dependency. The
+normal-width mapping remains valid because it duplicates completed main output.
+
+Debug UI build passes with zero warnings/errors. Evidence:
+Tests/MetaSprites/obj/build-renderer-help-ui-debug.log. Existing renderer test
+evidence remains in the preceding sections; no new runtime behavior is claimed.
+
+## SNES normal-width interlace color-math support - 2026-10-17
+
+Normal-width interlaced fields can now carry PNG replacements with color math
+through weave, current-field, bob and bob-blend output. The new expansion path
+duplicates completed main-screen metadata while preserving both math operands,
+OBJ/main/sub eligibility, coverage, native lower objects and background math
+identity. PNG background sample coordinates expand with the output geometry.
+Captured hires sub/main phases and separate hires BG samples remain excluded
+from this path; their math dependency mapping is still unfinished.
+
+Debug/Release native suites verify expanded output against independent lowres
+math reference checks across 32 mode combinations and three animation-alpha
+phases, plus PNG background math/sample parity. Four new LoROM/BG mode 0 live
+OBJ-interlace fixtures exercise half-add math and full-frame PNG alpha/native
+restoration in all four deinterlace modes. All 18 OBJ-interlace cases pass in
+Debug and Release. Existing hires/ordinary-interlace Release regressions and
+the hidden SnesObj viewer-authored pack/camera/animation suite also pass.
+Interlaced rewind capture, true-hires math and broader live math modes remain
+open; this change does not claim those paths.
+
+Evidence: Tests/MetaSprites/obj/snes-main-math-native-{debug,release}.log,
+snes-main-math-live-{debug,release}.log, snes-main-math-hires-regression.log,
+snes-main-math-viewer-release.log and build-snes-main-math-*.log.
+
+## Whole-frame reverse rewind animation verification - 2026-10-17
+
+The live suite now records 150 fully composed forward frames, starts actual
+RewindManager reverse playback and requires at least 110 cached reverse frames
+to match their original full pixel arrays exactly in descending frame order.
+This includes looping metasprite PNGs and a conditional play-once background
+with a partial-alpha first phase and transparent final phase. The first phase
+lasts 60 frames so reverse playback reaches it despite rewind's 30-frame
+preparation block. Recording-to-rewind transition is under one emulator lock,
+preventing an unrecorded forward frame from entering the expected sequence.
+
+All nine Debug/Release fixtures pass, including native restoration after rewind
+and previous pause/2x/run-ahead/held-and-early-save-load checks. Required test
+flags are now 0x1FFFF. Fixtures: NES mapper 0, DMG/CGB, GBA BG/OBJ, PCE single
+VDC, SMS modes 4/0, SNES mode 1 BG0/OBJ and WS BG/OBJ. This proves exact reverse
+replay for these modes, not every mode, filter, input change or pack edit.
+Test-only forward pixel storage is bounded to 180 frames and released afterward.
+
+Evidence: Tests/MetaSprites/obj/animation-rewind-{debug,release}.log and
+build-animation-rewind-core-{debug,release}.log. Release UI rebuild passed
+with zero warnings/errors (build-animation-rewind-ui-release.log).
+
+## Live early background frame save/load replay - 2026-10-17
+
+The live suite now saves during the first partial-alpha background PNG, waits
+for its transparent final PNG/hold, restores, and requires the partial-alpha
+phase and transition to occur again. Both background and metasprite activation
+origins must remain unchanged under two-frame run-ahead. A 30-frame first
+background duration gives the test enough time to save its early phase.
+Existing final-frame hold restoration remains covered.
+
+All nine representative fixtures pass in Debug and Release with required flags
+0xFFFF. This verifies sentinel output and captured clocks in existing modes;
+whole-frame rewind playback and wider rendering modes remain outstanding.
+Release UI rebuild passes with zero warnings/errors, and packaged/root core
+DLL hashes match. Evidence: Tests/MetaSprites/obj/animation-early-bg-{debug,release}.log
+and build-animation-early-bg-*.log.
+
+## Live background clock restoration with run-ahead - 2026-10-17
+
+Combined live save/load now leaves both the looping metasprite and conditional
+play-once background active during two-frame run-ahead. The test records the
+background activation origin independently from its captured clock, advances,
+restores, requires a returned presentation frame and checks both origins and
+PNG output. Background final-frame hold must retain its elapsed clock even
+when its transparent final PNG would visually conceal a clock-state error.
+
+All nine representative fixtures pass in Debug and Release, retaining flags
+0x7FFF. Save/load during early background frames and wider renderer modes
+remain additional coverage; this test covers an already-held play-once phase.
+Evidence: Tests/MetaSprites/obj/animation-bg-state-{debug,release}.log and
+build-animation-bg-state-core-{debug,release}.log.
+
+## Bounded batch-import preview work - 2026-10-17
+
+Batch animation import now validates existing definitions once, validates each
+new frame independently and refreshes the preview/memory estimate only after
+the last successful import. Intermediate frames no longer trigger repeated
+whole-sequence asset scans or thumbnail decodes. Single-frame import also
+avoids its previous duplicate refresh. Partial failures still select retained
+successful frames and report their count.
+
+A 64-frame integration case verifies one non-null preview publication, final
+frame selection and the memory estimate. The complete hidden SnesObj suite
+and Debug UI build pass. This changes import work, not gameplay performance.
+Evidence: Tests/MetaSprites/obj/animation-batch-refresh-live-debug.log and
+build-animation-batch-refresh-ui-debug.log.
+
+## Live animation save/load during run-ahead - 2026-10-17
+
+Extended all nine live animation fixtures to save while two-frame run-ahead
+is enabled, advance through more PNG phases, restore the saved emulator state,
+observe a returned presentation frame and verify the same activation origin
+and independently expected animation colors. Complete Debug/Release suites
+pass with flags 0x7FFF. Direct native test animations now have distinct nonzero
+identities, matching the identity prerequisite already supplied by production
+packet parsing; anonymous animations intentionally cannot restore clocks.
+
+Coverage: NES mapper 0, DMG/CGB, GBA BG/OBJ, PCE single VDC, SMS modes 4/0,
+SNES mode 1 BG0/OBJ and WS BG/OBJ. This adds live default-metasprite phase
+verification across run-ahead/save-load; background state restoration, rewind
+video and additional renderer modes still need broader combined coverage.
+Evidence: Tests/MetaSprites/obj/animation-runahead-state-{debug,release}.log
+and build-animation-runahead-state-core-{debug,release}.log.
+
+## Live cross-system animation with run-ahead - 2026-10-17
+
+The live animation suite now enables one- and two-frame run-ahead at normal
+speed and requires observing IsRunAheadFrame during speculative emulation.
+Presented capture frame numbers, activation-clock origins and representative
+PNG output pixels remain consistent with independent timeline/color math.
+The suite checks default metasprite looping at both run-ahead settings and
+background play-once/partial alpha at two frames, then clears replacements.
+Previously covered pause, 2x speed, alternate ping-pong, RAM gating and native
+restoration still pass. Speculative frames never reach presentation.
+
+All nine Debug/Release fixtures pass: NES mapper 0, DMG, CGB, GBA BG/OBJ,
+PCE single VDC, SMS modes 4/0, SNES mode 1 BG0/OBJ and WS BG/OBJ. Flags now
+require 0x3FFF. These are representative captured artwork/sentinel checks,
+not whole-frame coverage of every mode, rewind video or run-ahead/save-load
+combinations. Wider renderer and rewind verification remains active.
+Evidence: Tests/MetaSprites/obj/animation-runahead-{debug,release}.log and
+build-animation-runahead-core-{debug,release}.log.
+
+## Batch PNG animation import - 2026-10-17
+
+The animation editor + picker now allows multiple PNGs. Frames append in picker
+order and remain reorderable with Earlier/Later. Existing single-file picker
+callers keep single-selection behavior through the shared dialog helper.
+Animation import preserves in-pack filenames, reuses files already in the pack
+and keeps readable collision suffixes for external imports. Batches exceeding
+the 256-frame capacity reject before any changes; an I/O/validation failure
+retains successful earlier imports and reports the exact added/selected count.
+
+Debug UI build and the complete hidden SnesObj viewer suite pass, including
+order/name reuse, capacity rejection and partial-failure checks. The native
+OS picker interaction itself was not driven by this test.
+Evidence: Tests/MetaSprites/obj/animation-batch-live-debug.log and
+build-animation-batch-ui-debug.log.
+
+## Origin-aligned animation editor playback - 2026-10-17
+
+Playback preview now places each PNG in a shared canvas using its effective
+origin and the shared artwork scale. Different dimensions or per-frame origins
+no longer move the crosshair between frames. Canvas bounds include all frames
+and the origin and fit within 512x512; PNG thumbnail caching remains bounded
+to three images. Bounds use image headers once at playback start, without
+decoding the complete sequence. Manual browsing retains individual PNG views.
+Clicking during aligned playback resolves native coordinates before stopping.
+
+The hidden SnesObj viewer integration suite passes, including a small frame
+and a portrait frame with different signed origins at scale 2, stable canvas
+and crosshair checks, and click-origin round-trip. Debug UI build passes with
+zero warnings/errors. Evidence: Tests/MetaSprites/obj/animation-aligned-live-debug.log
+and build-animation-aligned-ui-debug.log. Gameplay rendering is unchanged.
+
+## Animated SNES native color math - 2026-10-17
+
+Added independent per-channel reference checks for animated opaque red,
+partial-alpha white and transparent full canvases over two loops. All 32
+combinations of fixed-color/subscreen operands, add/subtract, half math,
+brightness 7/15 and math-window allowance compare every output pixel; a
+destination OBJ window also excludes the oversized margin. Complete native
+Debug and Release suites pass. These synthetic captures verify composition,
+not live register capture, hires or interlace color-math coverage.
+Evidence: Tests/MetaSprites/obj/animation-effects-{debug,release}.log.
+
+## Animated GBA native color effects - 2026-10-17
+
+Added an independent per-channel reference check for three-frame PNG animation
+(opaque green, partial-alpha red, transparent), over two loops and all four
+native GBA effect modes. Normal and hardware semitransparent OBJ variants
+verify alpha blend, brighten/darken, native source removal and destination
+OBJ visibility, including oversized artwork. Complete Debug/Release native
+suites pass. This uses synthetic captured state; live effect-register capture,
+other coefficients and cross-system color effects still need broader coverage.
+Evidence: Tests/MetaSprites/obj/animation-effects-{debug,release}.log.
+
+## Animated destination sprite visibility - 2026-10-17
+
+The SNES/GBA animated canvas reference matrix now also tests patterned native
+destination sprite visibility: SNES main-screen OBJ windows and GBA OBJ enable
+flags. All 144 configurations compare whole-output pixels over four ticks,
+including oversized margins, signed origins, transparency and scale 1/2/3/10.
+Complete native Debug and Release suites pass. Visibility metadata is synthetic;
+live window-register capture and additional color effects remain separate work.
+Evidence: Tests/MetaSprites/obj/animation-canvas-{debug,release}.log.
+
+## Animated canvas scale and clipping matrix - 2026-10-17
+
+Extended the full-canvas animation regression to synthetic SNES and GBA staged
+composition. The 72 configurations cover scales 1/2/3/10, native sprites at
+left/interior/right positions and origins -1/0/1 on both axes. Each compares
+every output pixel for four animation ticks against independent PNG-coordinate
+reference math, including transparent pixels, canvases not divisible by scale,
+canvas growth/shrinkage and screen-edge clipping. Both complete native Debug
+and Release suites pass. This verifies shared renderer paths with synthetic
+captures, not live hardware capture or all system effects/windows.
+Evidence: Tests/MetaSprites/obj/animation-canvas-{debug,release}.log.
+
+## Portrait animation preview bound - 2026-10-17
+
+Animation editor thumbnails now fit within 512 pixels on both axes. Previously
+only width was bounded, allowing tall background PNGs to retain their full
+height in preview memory. Added a 32x1024 PNG integration case at artwork
+scale 2; it verifies a 16x512 thumbnail and native-origin/crosshair round-trip.
+The Debug UI build and complete hidden SnesObj viewer suite pass.
+Evidence: Tests/MetaSprites/obj/animation-portrait-live-debug.log and
+build-animation-portrait-ui-debug.log. Gameplay artwork dimensions are unchanged.
+
+## Animated full-canvas regression - 2026-10-17
+
+Added a compositor regression with alternating 1-pixel and 3-pixel PNG frames
+over a 1-pixel native sprite. It verifies origin alignment, opaque overhang on
+both sides beyond native bounds, and restoration when the animation shrinks.
+Debug and Release native compositor suites pass. This is a synthetic SNES
+composition check; it does not establish all-system scaling/effects coverage.
+Evidence: Tests/MetaSprites/obj/animation-canvas-{debug,release}.log.
+
+## Active goal scope: PNG animation - 2026-10-17
+
+PNG animation is explicitly part of the active replacement goal for metasprites,
+alternate artwork and background PNG layers across all supported systems.
+Scope includes a dedicated animation editor, ordered frames and durations,
+loop/ping-pong/play-once playback, consistent origins, optional restart on
+activation, pack persistence and efficient asset loading. Existing implementation
+and verification progress is recorded below; remaining cross-system rendering
+and playback verification stays active. This supersedes earlier deferred status.
+
 # Metasprite replacement development
+
+## SNES woven background condition/camera continuity - 2026-10-17
+
+Woven SNES background selection now considers both captured field snapshots.
+The view retains an active-field mask per PNG, independent X/Y CPU camera
+references and native-layer hide masks per field. Sampling and hiding use the
+full source-row parity, including cropped output. A missing condition/camera
+byte falls back on that field without suppressing a valid neighboring field.
+Animation timing remains field-specific. Native-slot, foreground and independent
+SNES priority placement use the same field gating. Nonwoven frames retain their
+single-snapshot behavior.
+
+Decorative margins now include backgrounds active in either field and sample
+each field's camera/conditions. Camera coverage intersects the active rows'
+artwork bounds. The gameplay viewport still has one shared placement; this is
+not a separate sliding gameplay window per field.
+
+Debug/Release native suites pass opposite field conditions, per-field native
+hiding (including transparent artwork), distinct X/Y camera positions, missing-
+byte fallback, odd-source-row cropping and decorative margin sampling. A new
+LoROM/BG-mode-0 OBJ-interlace fixture toggles two WRAM bytes each vblank. Actual
+whole-frame PNG checks pass for both condition values, proving opposite field
+activation/cameras from real PPU capture. The 14-case OBJ-interlace fixture suite
+passes, as do the shared cross-system foreground/priority/lower-OBJ regressions.
+Debug/Release cores build and the Release UI build has zero warnings/errors.
+Release packaging contains Mesen.exe and the matching native core.
+
+Evidence under Tests/MetaSprites/obj/: snes-field-background-{debug,release}.log,
+snes-field-background-live-{debug,release}.log, snes-field-background-fixtures.log,
+snes-field-background-cross-system.log and build-snes-field-background-*.log.
+This closes the known newest-snapshot-only background condition/camera gap.
+Wider mode/effect/window/transform and visual rewind/run-ahead coverage, resident
+asset budgeting and the broader main-goal completion audit remain unfinished.
+
+
+## Buffered native packet-file loading - 2026-10-17
+
+Runtime pack application now hands sealed owned packet files to the native core
+instead of allocating final managed sprite/background byte arrays. Both writers
+share one encoding routine between their compatibility byte-array API and the
+direct-file API. File handoff flushes/closes the write handle and retains a
+read-only lease through synchronous native parsing. Normal completion and
+construction/parse failures dispose owned temporary files. Existing array/spill
+building remains available for compatibility/tests.
+
+Native sprite/background parsers accept either bytes or UTF-8 file paths. File
+input uses a 64 KiB explicit read buffer and the existing 512 MiB per-packet cap.
+The same word validation, resource-reference checks and incremental content
+identity apply to both sources. File/array words and identities match across
+legacy, shared and multi-megabyte fixtures, preserving pack-matched clock state.
+No input file handle or borrowed file buffer is retained by installed artwork.
+
+Both sets are parsed before publication. Under the emulator lock, combined
+activation rechecks ROM, console identity and compatibility before publishing
+and changing capture flags. Missing/truncated files and a wrong ROM leave the
+old definitions installed. Unicode-path activation, legacy byte activation,
+combined clear and retention after a malformed second packet pass in hidden
+Debug/Release integration tests. Actual PNG animation/editor/state checks pass
+through the new runtime path. Debug viewer export/import/apply tests pass for
+NES, DMG/CGB, GBA, PCE, SMS, SNES and WonderSwan.
+
+Managed ownership, read access, write exclusion and success/failure cleanup tests
+pass. Debug/Release native parser suites pass; both cores and UI configurations
+build. Release contains Mesen.exe and its matching native core. Evidence under
+Tests/MetaSprites/obj/: animation-file-load-managed.log,
+animation-file-load-{debug,release}.log, animation-file-load-live-{debug,release}.log,
+animation-file-load-viewer-*.log and build-animation-file-load-*.log.
+
+This incrementally reads packet input; it does not page artwork during gameplay.
+Decoded native assets remain resident, and old/new assets may coexist around
+publication. Decoder/codec buffers and the bounded managed PNG cache remain
+separate. Wider animation origins/scales/effects/windows/widescreen, visual
+rewind and run-ahead coverage still need work; the broader main-goal audit
+remains incomplete.
+
+
+## Representative live animation coverage across systems - 2026-10-16
+
+A new live fixture suite now exercises NES mapper 0, DMG, CGB, GBA BG/OBJ, PCE
+single VDC, SMS modes 4 and 0, SNES mode 1 BG0/OBJ and WonderSwan BG/OBJ. It
+recognizes actual captured sprite graphics and drives two configured writable
+CPU RAM bytes for enable/selection. Every accepted sample verifies that only
+those two bytes were captured and that capture/presentation frame numbers agree.
+
+Independent timeline/color expectations verify default loop durations, alternate
+ping-pong reverse visits, background play-once completion/final-frame holding,
+partial/transparent background alpha over animated OBJ, alternate/default
+re-entry, RAM-disabled native restoration and group reactivation. Group and
+background activation start frames must stay consistent across observations.
+Inactive clocks must clear. A real pause keeps output/frame number stable, and
+resuming at configured 200% speed preserves the same emulated-frame phase.
+Clearing definitions restores native pixels and removes condition/timing data.
+
+Debug and Release pass all nine fixtures (2047/2047 flags each). These tests use
+native decoded artwork and live rendering; real PNG file loading, packet
+references and SNES whole-frame field playback have separate existing checks.
+This suite verifies sentinel pixels and clocks, not every pixel or renderer mode.
+The shared foreground fixture refactor also passes its original cross-system
+static/priority/lower-OBJ regression suite. No production correction was needed
+for the exercised paths. Release packaging contains Mesen.exe and the matching
+core; the UI build has zero warnings/errors.
+
+Evidence: Tests/MetaSprites/obj/animation-gameplay-{debug,release}.log,
+animation-gameplay-static-regression-debug.log and
+build-animation-gameplay-ui-release.log. Run with --animation-gameplay.
+
+Incremental native asset loading, wider animation origins/scales/transforms,
+native BG insertion modes/effects/windows/widescreen, visual rewind and run-ahead
+coverage remain unfinished. The configured 2x-speed check is not a test of every
+turbo control path or timing setting. Broader main-goal renderer compatibility
+and the deferred future proposals retain their existing scope.
+
+
+## Shared animation pixel transport - 2026-10-16
+
+Runtime loading now emits MSP6/MBGI animation packets. An inline pixel buffer
+gets a packet-local ID; later frames can reference an earlier buffer while
+retaining their own dimensions, origins and durations. Resources are shared
+across default/alternate/group sequences and background layer sequences within
+each packet. Legacy MSP1..5 and MBG1..H parsing remains supported; static packet
+formats are unchanged. Native combined loading still interns matching pixels
+across the separate sprite/background packets.
+
+A content hash indexes a bounded 4096-entry metadata LRU. Full existing packet
+bytes decide equality, including on hash collisions. Lookup retains offsets and
+counts, not decoded images; comparisons use the RAM builder or a bounded spill
+read buffer. Evicted lookup entries may safely be re-inlined. Native references
+must point backward and have exactly the frame's pixel count; invalid, forward,
+missing and truncated references reject before installation.
+
+Five repeated 1 MiB frames shrink the sprite fixture from 5,243,068 to 1,048,784
+bytes and the background fixture from 5,243,192 to 1,048,908 bytes. Managed tests
+also verify forced hash collisions, bounded metadata, multi-block spill-backed
+comparisons, append position and safe re-inline after eviction. Debug/Release
+native suites verify cross-sequence sharing, timing, dimensions, origins, exact
+alpha and malformed reference rejection, alongside legacy regressions.
+
+The editor estimate counts unique paths as an upper estimate; identical content
+in different files can share further. It no longer rejects a sequence solely
+because its unshared frame sum exceeds 512 MiB. The actual encoded packet limit
+is still enforced by the writer. Hidden tests verify real repeated PNG references
+with independent origins in whole-frame SNES field playback, sprite/background
+editor behavior and a reusable sequence with an unshared sum above that limit.
+Shared-format save/load and full/XOR rewind checkpoint tests pass on NES, GB/GBC,
+GBA, PCE, SMS, SNES and WonderSwan with Debug and Release cores.
+
+Both cores build; Debug/Release UI builds have zero warnings/errors. Release
+contains Mesen.exe and the matching core. Evidence under Tests/MetaSprites/obj/:
+animation-shared-transport-managed.log, animation-shared-transport-{debug,release}.log,
+animation-shared-transport-live-{debug,release}.log and
+animation-shared-transport-state-{debug,release}.log.
+
+Incremental native asset loading and broader visible all-system animation,
+reverse playback, turbo/run-ahead coverage remain unfinished. Final interop
+arrays and old/new native assets can still coexist during application; this is
+content sharing and bounded lookup, not a global process-memory cap.
+
+
+## Bounded packet builders with temporary spill - 2026-10-16
+
+Both sprite and background packet writers now use a forward-only builder. Small
+packets stay in RAM, with capacity growth capped at 4 MiB. Larger builders spill
+to uniquely created DeleteOnClose temporary files and allocate the final interop
+byte array once. All writes, including static artwork and metadata, enforce the
+existing 512 MiB per-packet cap before extending storage. Success and failure
+dispose the owned spill file. Pixel arrays are written in little-endian blocks
+without changing straight-alpha values or existing native packet formats.
+
+Managed tests pass exact/over limits, spill boundaries, cleanup on success and
+failure, bounded capacity after non-power-of-two writes, readback/append behavior
+and byte equality with BinaryWriter. Actual MSP5/MBGH animation fixtures exceed
+the production threshold. Debug/Release native suites parse them, check frame
+dimensions/timings/alpha and shared storage, and reject truncated large packets.
+Evidence: Tests/MetaSprites/obj/animation-packet-stream-managed.log and
+animation-packet-stream-{debug,release}.log.
+
+Debug/Release UI builds pass with zero warnings/errors. Hidden actual-PNG,
+animation editor, playback and save-state integration checks pass against both
+cores. Release packaging contains Mesen.exe and the matching native core. Logs:
+animation-packet-stream-live-*.log and build-animation-packet-stream-ui-*.log.
+
+This removes a growing contiguous RAM builder beside large final packets; it is
+not incremental native asset streaming. Final sprite/background interop arrays,
+decoded cache/codec buffers and native old/new assets can still coexist during
+application. Repeated frame transport and broader live animation coverage remain
+unfinished.
+
+
+## Bounded managed PNG decode cache - 2026-10-16
+
+Pack application now uses a load-scoped least-recently-used decode cache capped
+at 64 MiB of retained pixel arrays and 128 images, shared by primary metasprite,
+alternate, background and sequence-frame loading. Canonical paths reuse decoded
+straight-alpha pixels. The codec validates headers and reserves space before
+allocating bitmap/pixel buffers, evicting older entries first. A single image
+larger than the budget clears retained entries and is decoded without caching.
+Invalid scale is rejected before decoding. Failed decodes publish no cache entry.
+Each Apply starts a fresh cache so subsequent pack applications see edited files.
+
+Managed checks cover recency eviction, canonical reuse, byte/entry bounds,
+oversized bypass, preallocation eviction, partial alpha, external ownership and
+missing/inconsistent reservations. Hidden saved-PNG/editor/playback and state
+integration checks pass against Debug and Release cores. Debug/Release UI builds
+pass; the Release package contains Mesen.exe and its matching native core. Logs:
+Tests/MetaSprites/obj/animation-cache-managed.log, animation-cache-live-*.log and
+build-animation-cache-ui-*.log.
+
+This bounds cache retention, not total resident memory: packet arrays/builders,
+codec scratch buffers and caller-owned frames remain separate. Eviction removes
+references; normal GC controls reclamation. Packet transport still repeats frame
+pixels and retains the existing 512 MiB packet limit. Bounded transport/loading
+and wider live animation coverage remain unfinished.
+
 
 ## Animation clock save states and rewind checkpoints - 2026-10-16
 

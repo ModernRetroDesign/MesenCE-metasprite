@@ -915,6 +915,7 @@ void PceVdc::InternalDrawScanline()
 	uint16_t xMax = _xStart + pixelsToDraw;
 	bool capture = !skipRender && _metaCaptureRequested.load();
 	if(capture) { std::fill(_metaRow + xStart, _metaRow + xMax, MetaSpritePixel{}); }
+	if(capture && _textMask) { std::fill(_textRow+xStart,_textRow+xMax,MetaTextPixel{}); }
 
 	bool inPicture = _hMode == PceVdcModeH::Hdw && _tileCount > 0;
 	if(capture && inPicture) { _metaPictureX = (int)xStart - _screenOffsetX; }
@@ -941,6 +942,11 @@ void PceVdc::InternalDrawScanline()
 						_metaRow[xStart].BackgroundSample = _metaBackgroundTiles[column];
 						_metaRow[xStart].BackgroundOverlayOccludesClasses = 2;
 						_metaRow[xStart].BackgroundSample.X += screenX & 7;
+						if(_textMask) {
+							auto& text=_textRow[xStart]; text.Valid=true; text.TileIndex=_tiles[column].TileAddr/16; text.GraphicsAddress=_tiles[column].TileAddr*2;
+							text.Palette=_tiles[column].Palette; text.LocalX=screenX&7; text.LocalY=_metaRow[xStart].BackgroundSample.Y&7;
+							for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=_vce->GetPalette(text.Palette*16+ink)|grayscaleBit; }
+						}
 					}
 					bgColor = GetTilePixelColor(_tiles[column].TileData[0], _tiles[column].TileData[1], 7 - (screenX & 0x07));
 					if(bgColor != 0) {
