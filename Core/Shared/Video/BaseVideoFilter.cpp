@@ -108,11 +108,18 @@ FrameInfo BaseVideoFilter::SendFrame(uint16_t* ppuOutputBuffer, uint32_t frameNu
 	_frameInfo = frameInfo;
 	UpdateBufferSize();
 	bool deferBlend = DeferFrameBlend();
-	if(!_blendFilter.IsEnabled() || _emu->GetRewindManager()->IsRewinding() || _emu->IsPaused()
+	if(!_blendFilter.IsEnabled() || (_emu->GetRewindManager()->IsRewinding() && !AllowRewindFrameBlend()) || _emu->IsPaused()
 		|| deferBlend != _blendDeferred || frameInfo.Width != _blendWidth || frameInfo.Height != _blendHeight) {
 		_blendFilter.ResetHistory();
 	}
 	_blendDeferred = deferBlend; _blendWidth = frameInfo.Width; _blendHeight = frameInfo.Height;
+	if(!_pendingRewindBlendHistory.empty()) {
+		auto history=std::move(_pendingRewindBlendHistory); _pendingRewindBlendHistory.clear();
+		if(AllowRewindFrameBlend() && history.size()>3 && history[0]==_blendWidth && history[1]==_blendHeight) {
+			BlendFilter::History restored; restored.FrameNumber=history[2];
+			restored.Pixels.assign(history.begin()+3,history.end()); _blendFilter.RestoreHistory(restored);
+		} else { _blendFilter.ResetHistory(); }
+	}
 	ApplyFilter(ppuOutputBuffer);
 
 	if(!DeferFrameBlend() && _blendFilter.IsEnabled() && !_emu->GetRewindManager()->IsRewinding() && !_emu->IsPaused()) {
@@ -125,9 +132,19 @@ FrameInfo BaseVideoFilter::SendFrame(uint16_t* ppuOutputBuffer, uint32_t frameNu
 
 void BaseVideoFilter::FinishFrameBlend(uint32_t* output, uint32_t size)
 {
-	if(DeferFrameBlend() && _blendFilter.IsEnabled() && !_emu->GetRewindManager()->IsRewinding() && !_emu->IsPaused()) {
+	if(DeferFrameBlend() && _blendFilter.IsEnabled() && (!_emu->GetRewindManager()->IsRewinding() || AllowRewindFrameBlend()) && !_emu->IsPaused()) {
 		_blendFilter.ApplyFilter(output, size, _frame.FrameNumber);
 	}
+}
+
+vector<uint32_t> BaseVideoFilter::CaptureRewindBlendHistory() const
+{
+	if(!AllowRewindFrameBlend()) { return {}; }
+	auto history=_blendFilter.CaptureHistory();
+	if(history.Pixels.empty()) { return {}; }
+	vector<uint32_t> result={_blendWidth,_blendHeight,history.FrameNumber};
+	result.insert(result.end(),history.Pixels.begin(),history.Pixels.end());
+	return result;
 }
 
 uint32_t* BaseVideoFilter::GetOutputBuffer()

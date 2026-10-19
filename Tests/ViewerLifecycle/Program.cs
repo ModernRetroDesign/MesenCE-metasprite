@@ -26,18 +26,19 @@ internal static class Program
 	{
 		string directory=Path.Combine(AppContext.BaseDirectory,"artifacts","text-systems-"+Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
 		File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts),"arial.ttf"),Path.Combine(directory,"font.ttf"));
-		foreach(var fixture in new[] {("gb","Gameboy",0), ("gbc","Gameboy",0), ("window-scroll.gbc","Gameboy",1), ("sms","Sms",0), ("background.pce","Pce",0), ("background-scroll.gba","Gba",0), ("background-sub-bg0-mode1-scroll.sfc","Snes",0), ("background-sub-bg1-scroll.sfc","Snes",1), ("background-sub-bg2-scroll.sfc","Snes",2), ("background-sub-bg3-scroll.sfc","Snes",3), ("background-scroll.wsc","Ws",0), ("background-window.wsc","Ws",1)}) {
-			foreach(int cellHeight in new[] {8,16}) { foreach(bool address in new[] {false,true}) {
+		foreach(var fixture in new[] {("gb","Gameboy",0), ("gbc","Gameboy",0), ("window-scroll.gbc","Gameboy",1), ("sms","Sms",0), ("legacy-mode0.sms","Sms",0), ("legacy-mode1.sms","Sms",0), ("legacy-mode2.sms","Sms",0), ("legacy-mode3.sms","Sms",0), ("background.pce","Pce",0), ("background-scroll.gba","Gba",0), ("background-sub-bg0-mode1-scroll.sfc","Snes",0), ("background-sub-bg1-scroll.sfc","Snes",1), ("background-sub-bg2-scroll.sfc","Snes",2), ("background-sub-bg3-scroll.sfc","Snes",3), ("background-scroll.wsc","Ws",0), ("background-window.wsc","Ws",1)}) {
+			foreach(int cellHeight in new[] {8,16}) { foreach(bool address in new[] {false,true}) { foreach(bool inherit in fixture.Item1.StartsWith("legacy-") ? new[] {false,true} : new[] {false}) { foreach(int sourceY in fixture.Item1=="legacy-mode2.sms" ? new[] {0,64,128} : new[] {0}) { foreach(int tilesWide in fixture.Item1=="legacy-mode1.sms" ? new[] {1,2} : new[] {1}) {
+                if(fixture.Item1=="legacy-mode3.sms" && !address) { continue; }
 				uint ram=fixture.Item2 switch {"Gameboy" or "Sms" => 0xC652,"Gba" => 0x02000652,"Snes" => 0x7E0652,"Pce" => 0x2652,_ => 0x652};
-				var p=new MetaTextProfile {Id=1,Enabled=true,FontPath="font.ttf",FontSize=12,RasterScale=2,Proportional=true,NativeLayer=fixture.Item3,CellHeight=cellHeight,
-					UsePaletteColor=false,Color="30E070C0",OutlineEnabled=true,OutlineColor="FF0000FF",OutlineWidth=.5,ShadowEnabled=true,ShadowColor="0000FF80",ShadowX=1,ShadowY=1,
+				var p=new MetaTextProfile {Id=1,Enabled=true,FontPath="font.ttf",FontSize=12,RasterScale=2,Proportional=true,NativeLayer=fixture.Item3,CellHeight=cellHeight,SourceTileWidth=fixture.Item1=="legacy-mode1.sms" ? 6 : 8,CellWidth=(fixture.Item1=="legacy-mode1.sms" ? 6 : 8)*tilesWide,
+					UsePaletteColor=inherit,Y=sourceY,Color="30E070C0",OutlineEnabled=true,OutlineColor="FF0000FF",OutlineWidth=.5,ShadowEnabled=true,ShadowColor="0000FF80",ShadowX=1,ShadowY=1,
 					UseDisplayRegion=true,DisplayX=fixture.Item2=="Pce" ? 40 : 8,DisplayY=8,DisplayWidth=40,DisplayHeight=32,WrapText=false,FillEnabled=address,FillColor="10182080",MatchKind=address ? MetaTextMatchKind.GraphicsAddress : MetaTextMatchKind.TileIndex,
-					Mappings=new() {new() {Tile=0,TilePattern=cellHeight==16 ? new uint[] {0,0} : Array.Empty<uint>(),Character="A"}},MemoryConditions=new() {new() {Address=ram,Value=0}}};
+					Mappings=new() {new() {Tile=0,TilePattern=cellHeight/8*tilesWide>1 ? Enumerable.Repeat(0u,cellHeight/8*tilesWide).ToArray() : Array.Empty<uint>(),Character="A"}},MemoryConditions=new() {new() {Address=ram,Value=0}}};
 				var budget=new MetaTextRasterizer.Budget(); byte[] packet=MetaTextRuntimePacket.Create(new MetaSpritePack {System=fixture.Item2,TextProfiles=new() {p}},profile => budget.Rasterize(profile,directory));
 				string path=Path.GetFullPath("Tests/MetaSprites/obj/gameplay-fixture."+fixture.Item1); uint result=RunMetaTextSystemTest(path,packet,(uint)packet.Length);
-				if(result!=0) { throw new Exception($"Text adapter {fixture.Item1}, layer={fixture.Item3}, height={cellHeight}, address={address}, failed at {result}."); }
-				Console.WriteLine($"PASS: {fixture.Item1} layer {fixture.Item3}, source 8x{cellHeight}, {(address ? "graphics addresses/fill" : "indices")}, actual TrueType glyph/effects/display region, full-frame pixel comparison and RAM disable/reactivation/clear.");
-			} }
+				if(result!=0) { throw new Exception($"Text adapter {fixture.Item1}, layer={fixture.Item3}, height={cellHeight}, tilesWide={tilesWide}, address={address}, inherited={inherit}, sourceY={sourceY}, failed at {result}."); }
+				Console.WriteLine($"PASS: {fixture.Item1} layer {fixture.Item3}, source {p.CellWidth}x{cellHeight}, inherited={inherit}, sourceY={sourceY}, {(address ? "graphics addresses/fill" : "indices")}, actual TrueType glyph/effects/display region, full-frame pixel comparison, RAM disable/reactivation/clear and first-frame RAM-trigger and changed-tilemap save-state restoration.");
+			} } } } }
 		}
 		foreach(var system in new[] {("gb",CpuType.Gameboy),("background-scroll.gba",CpuType.Gba),("background.pce",CpuType.Pce),("sms",CpuType.Sms),("background-sub-bg0-mode1-scroll.sfc",CpuType.Snes),("background-window.wsc",CpuType.Ws)}) {
 			// The desktop native singleton is initialized/released once per process.
@@ -66,6 +67,14 @@ internal static class Program
 	[STAThread]
 	private static void Main(string[] args)
 	{
+		int verifyUi=Array.IndexOf(args,"--verify-optimized-ui");
+		if(verifyUi>=0) {
+			var assembly=typeof(SpriteViewerViewModel).Assembly;
+			byte[] expected=System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(args[verifyUi+1]));
+			byte[] actual=System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(assembly.Location));
+			if(!actual.SequenceEqual(expected) || assembly.GetCustomAttribute<DebuggableAttribute>()?.IsJITOptimizerDisabled==true) { throw new Exception("Workflow harness did not load the expected optimized UI assembly."); }
+			Console.WriteLine("PASS: workflow harness loads the exact optimized UI assembly: "+assembly.Location); return;
+		}
 		int coreIndex = Array.IndexOf(args, "--native-core");
 		if(coreIndex >= 0) {
 			_textCorePath=Path.GetFullPath(args[coreIndex+1]); IntPtr core = NativeLibrary.Load(_textCorePath);
@@ -76,6 +85,10 @@ internal static class Program
 			string path = Path.Combine(AppContext.BaseDirectory, name.Name + ".dll");
 			return File.Exists(path) ? context.LoadFromAssemblyPath(path) : null;
 		};
+		int dependencyCopy=Array.IndexOf(args,"--dependency-copy");
+		if(dependencyCopy>=0) { CheckUnbundledCoreCopy(args[dependencyCopy+1]); return; }
+		int dependencyChild=Array.IndexOf(args,"--dependency-copy-child");
+		if(dependencyChild>=0) { string root=args[dependencyChild+2]; ExerciseUnbundledCoreCopy(args[dependencyChild+1],root,Path.Combine(root,"application"),Path.Combine(root,"home")); return; }
 		int pointerIndex = Array.IndexOf(args, "--pointer-suite");
 		if(pointerIndex >= 0 || Array.IndexOf(args, "--widescreen-profile") >= 0 || Array.IndexOf(args, "--music-replacement") >= 0 || Array.IndexOf(args,"--text-replacement")>=0 || Array.IndexOf(args,"--text-gameplay")>=0 || Array.IndexOf(args,"--text-systems")>=0 || Array.IndexOf(args,"--text-apply-system")>=0) {
 			string uiHome = Path.Combine(AppContext.BaseDirectory, "artifacts", "pointer-ui-" + Guid.NewGuid().ToString("N"));
@@ -186,7 +199,7 @@ internal static class Program
 			byte[] packet=MetaTextRuntimePacket.Create(pack,p => budget.Rasterize(p,directory));
 			uint result=RunMetaTextNesTest(scrolling ? scrollRom : romPath,packet,(uint)packet.Length);
 			if(result!=31) { throw new Exception($"NES live TrueType overlay failed: scrolling={scrolling}, graphics={graphics}, inherited={inherit}, fill={fill}, flags={result:X}/1F."); }
-			Console.WriteLine($"PASS: NES mapper 0 cached font overlay, {(scrolling ? "fine X/Y scroll" : "static")}, {(graphics ? "graphics addresses" : "tile indices")}, {(inherit ? "native palette" : "custom partial-alpha color")}, fill={fill}, original-pixel retention, two-byte RAM gating/reactivation and disable restoration.");
+			Console.WriteLine($"PASS: NES mapper 0 cached font overlay, {(scrolling ? "fine X/Y scroll" : "static")}, {(graphics ? "graphics addresses" : "tile indices")}, {(inherit ? "native palette" : "custom partial-alpha color")}, fill={fill}, original-pixel retention, two-byte RAM gating/reactivation, disable restoration and first-frame RAM-trigger and changed-tilemap save-state restoration.");
 		} } } }
 		string proportionalFont=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts),"arial.ttf"); File.Copy(proportionalFont,Path.Combine(directory,"proportional.ttf"));
 		foreach(bool fill in new[] {false,true}) {
@@ -197,9 +210,21 @@ internal static class Program
 			var pack=new MetaSpritePack {System="Nes",TextProfiles=new() {profile}}; var budget=new MetaTextRasterizer.Budget();
 			byte[] packet=MetaTextRuntimePacket.Create(pack,p => budget.Rasterize(p,directory)); uint result=RunMetaTextNesTest(scrollRom,packet,(uint)packet.Length);
 			if(result!=31) { throw new Exception($"Live proportional font/kerning/effects failed: fill={fill}, flags={result:X}/1F."); }
-			Console.WriteLine($"PASS: NES mapper 0 large proportional TrueType glyphs, font kerning, moved display region, independent red outline/blue shadow, fill={fill}, fine source scrolling and RAM reactivation/restoration.");
+			Console.WriteLine($"PASS: NES mapper 0 large proportional TrueType glyphs, font kerning, moved display region, independent red outline/blue shadow, fill={fill}, fine source scrolling, RAM reactivation/restoration and first-frame RAM-trigger and changed-tilemap save-state restoration.");
 		}
 		CheckTextRuntimeApply(romPath,font);
+		foreach(bool fill in new[] {false,true}) {
+			var p=new MetaTextProfile {Id=1,Enabled=true,FontPath="proportional.ttf",FontSize=12,RasterScale=2,Proportional=true,WrapWords=true,WrapText=true,
+				UseDisplayRegion=true,DisplayX=20,DisplayY=64,DisplayWidth=80,DisplayHeight=128,UseRegion=true,X=32,Y=32,Width=32,Height=16,
+				OutlineEnabled=true,OutlineWidth=.5,OutlineColor="FF0000FF",ShadowEnabled=true,ShadowX=1,ShadowY=1,ShadowColor="0000FF80",UsePaletteColor=false,Color="30E070C0",FillEnabled=fill,FillColor="101820C0",
+				MemoryConditions=MetaMemoryConditionText.Parse("0652 == 08\n0760 != 06"),Mappings=new() {new() {Tile=1,Character="A"},new() {Tile=2,Character="V"},new() {Tile=1,Palette=1,Character=" "}}};
+			var atlas=(MetaTextGlyphSet)new MetaTextRasterizer.Budget().Rasterize(p,directory);
+			int Pair(int a,int b) => atlas[a].Advance64+atlas[b].Advance64+(atlas.Kerning.TryGetValue(((ulong)a<<32)|(uint)b,out int k) ? k : 0);
+			p.DisplayWidth=(Math.Max(Pair(0,1),Pair(1,0))+63)/64;
+			byte[] bytes=MetaTextRuntimePacket.Create(new MetaSpritePack {System="Nes",TextProfiles=new() {p}},_ => atlas);
+			uint flags=RunMetaTextNesTest(scrollRom,bytes,(uint)bytes.Length); if(flags!=31) { throw new Exception($"Actual-font word wrapping failed: fill={fill}, flags={flags:X}."); }
+			Console.WriteLine($"PASS: NES mapper 0 actual-font word wrapping, boundary spaces, long-word fallback, source row breaks, kerning/effects, fill={fill}, full-frame oracle, RAM/state restoration and paused snapshots.");
+		}
 		foreach(var size in new[] {(W:8,H:16),(W:16,H:8),(W:16,H:16)}) { foreach(bool fill in new[] {false,true}) {
 			uint[] Pattern(uint first) => Enumerable.Range(0,size.W/8*size.H/8).Select(i => ((i%(size.W/8)+i/(size.W/8))%2==0) ? first : 3-first).ToArray();
 			var p=new MetaTextProfile {Id=1,Enabled=true,FontPath="proportional.ttf",FontSize=20,RasterScale=4,Proportional=true,CellWidth=size.W,CellHeight=size.H,
@@ -210,7 +235,7 @@ internal static class Program
 			uint flags=RunMetaTextNesTest(scrollRom,bytes,(uint)bytes.Length); if(flags!=31) { throw new Exception($"Live multi-tile source cells failed: {size.W}x{size.H}, fill={fill}, flags={flags:X}."); }
 			Console.WriteLine($"PASS: NES mapper 0 {size.W}x{size.H} source cells, complete index-pattern matching, exact/wildcard palettes, one emitted glyph/cell, fine scrolling, fill={fill}, RAM restoration and paused presentation snapshots.");
 		} }
-		Console.WriteLine("PASS: requested gameplay snapshots match native pixels while paused, including widened and rotated presentation in all 24 NES text fixtures.");
+		Console.WriteLine("PASS: requested gameplay snapshots match native pixels while paused, including widened and rotated presentation in all 26 NES text fixtures.");
 	}
 	private static void CheckTextRuntimeApply(string romPath,string font,CpuType cpu=CpuType.Nes)
 	{
@@ -218,11 +243,24 @@ internal static class Program
 		EmuApi.InitDll(); EmuApi.InitializeEmu(home,IntPtr.Zero,IntPtr.Zero,true,true,true,true); ConfigManager.Config.ApplyConfig();
 		try {
 			if(!EmuApi.LoadRom(romPath)) { throw new Exception("Text authoring fixture failed to load."); } EmuApi.Pause(); DebugApi.InitializeDebugger();
+			bool six=cpu==CpuType.Sms && romPath.Contains("legacy-mode1.sms");
+			if(six) {
+				EmuApi.Resume(); bool ready=false;
+				for(int i=0;i<200;i++) { var state=DebugApi.GetPpuState<SmsVdpState>(cpu); if(!state.UseMode4 && state.M1_Use224LineMode && state.RenderingEnabled) { ready=true; break; } System.Threading.Thread.Sleep(10); }
+				EmuApi.Pause(); if(!ready) { throw new Exception("SMS fixture did not select 40-column text mode."); }
+			}
 			using var viewer=new TilemapViewerViewModel(cpu,new PictureViewer(),new ScrollPictureViewer(),new Window());
+			if(six) { viewer.RefreshData(); Dispatcher.UIThread.RunJobs(); }
 			var loader=typeof(MetaSpritePack).Assembly.GetType("Mesen.Debugger.Utilities.MetaSpriteRuntimeLoader")!;
 			string romHash=EmuApi.GetRomHash(HashType.Sha1),packPath=(string)loader.GetMethod("GetPackPath",BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,new object[] {romHash,cpu})!;
 			bool ApplyText(MetaSpritePack pack) { try { return (bool)loader.GetMethod("Apply",BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,new object[] {pack,packPath})!; } catch(TargetInvocationException ex) when(ex.InnerException!=null) { throw ex.InnerException; } }
-			using var editor=cpu==CpuType.Nes ? viewer.CreateTextReplacementEditor() : new TextReplacementViewModel(packPath,romHash,cpu.ToString(),viewer.BackgroundEditor.HardwareLayerNames,0,1,16,0,() => EmuApi.GetRomHash(HashType.Sha1)==romHash,ApplyText);
+			using var editor=cpu==CpuType.Nes || six ? viewer.CreateTextReplacementEditor() : new TextReplacementViewModel(packPath,romHash,cpu.ToString(),viewer.BackgroundEditor.HardwareLayerNames,0,1,16,0,() => EmuApi.GetRomHash(HashType.Sha1)==romHash,ApplyText);
+			if(six) {
+				if(editor.SelectedProfile!.SourceTileWidth!=6 || editor.SelectedProfile.CellWidth!=6 || editor.SourceWidth!=240) { throw new Exception("Actual tilemap editor did not detect the 6x8 source grid."); }
+				editor.SourceRegion=new Rect(6,8,12,16); editor.UseSelectionCellSize(); editor.AddSelectedSourceCell();
+				if(MetaTextMappingText.Parse(editor.MappingText).Single().GetTiles().Length!=4) { throw new Exception("Actual 40-column tilemap source capture failed: "+editor.Status); }
+				editor.SelectedProfile.CellWidth=6; editor.SelectedProfile.CellHeight=8; editor.SelectedProfile.CellOriginX=0; editor.SelectedProfile.CellOriginY=0;
+			}
 			if(!editor.ImportFont(font)) { throw new Exception(editor.Status); }
 			editor.SelectedProfile!.Enabled=true; editor.MappingText="0001 = A\n0002 = B"; editor.ConditionsText="0652 == 08";
 			var window=new Mesen.Debugger.Windows.TextReplacementWindow(editor);
@@ -253,6 +291,15 @@ internal static class Program
 		using var editor=new TextReplacementViewModel(path,"text-fixture","Nes",new[] {"Background"},0,0x2A,0x1020,3,() => sameGame);
 		var window=new Mesen.Debugger.Windows.TextReplacementWindow(editor);
 		window.Measure(new Size(820,800)); window.Arrange(new Rect(0,0,820,800)); Dispatcher.UIThread.RunJobs();
+		var offlinePicker=Avalonia.VisualTree.VisualExtensions.GetVisualDescendants(window).OfType<NamedConditionPicker>().Single();
+		offlinePicker.ReloadLibrary();
+		if(!offlinePicker.ResolvedPreview.Contains("Load a supported game")) { throw new Exception("Standalone text editor picker did not reject the no-ROM state safely."); }
+		var wordControl=window.FindControl<CheckBox>("textWordWrap") ?? throw new Exception("Missing word-wrap control.");
+		if(!editor.SelectedProfile!.WrapWords || wordControl.IsChecked!=true) { throw new Exception("New text profiles did not enable word-aware wrapping."); }
+		wordControl.IsChecked=false; Dispatcher.UIThread.RunJobs(); if(editor.SelectedProfile.WrapWords) { throw new Exception("Word-wrap checkbox was not bound."); }
+		wordControl.IsChecked=true; Dispatcher.UIThread.RunJobs();
+		editor.SelectedProfile.WrapText=false; Dispatcher.UIThread.RunJobs(); if(wordControl.IsEnabled) { throw new Exception("Word-wrap control stayed enabled with wrapping disabled."); }
+		editor.SelectedProfile.WrapText=true; Dispatcher.UIThread.RunJobs(); if(!wordControl.IsEnabled) { throw new Exception("Word-wrap control did not follow the wrapping toggle."); }
 		using(var source=new WriteableBitmap(new PixelSize(512,256),new Vector(96,96),PixelFormat.Bgra8888,AlphaFormat.Opaque)) {
 			using var png=new MemoryStream(); source.Save(png,PngBitmapEncoderOptions.Default); png.Position=0;
 			editor.SetSourcePreview(new Bitmap(png),new Rect(13,19,18,10)); editor.UseViewerSelection();
@@ -262,6 +309,9 @@ internal static class Program
 			Dispatcher.UIThread.RunJobs();
 			if(sourcePicker.CanvasWidth!=512 || sourcePicker.Region!=editor.SourceRegion) { throw new Exception("Source picker snapshot/region binding failed."); }
 			editor.SelectedProfile.X=40; Dispatcher.UIThread.RunJobs();
+			editor.SelectedProfile.SourceTileWidth=6; Dispatcher.UIThread.RunJobs();
+			if(sourcePicker.SnapX!=6 || editor.SourceCellMaximum!=126) { throw new Exception("6-pixel source grid was not bound to the selector."); }
+			editor.SelectedProfile.SourceTileWidth=8; Dispatcher.UIThread.RunJobs();
 			if(sourcePicker.Region.X!=40) { throw new Exception("Numeric source coordinates did not update the visual rectangle."); }
 			displayPicker.SetCurrentValue(Mesen.Debugger.Controls.TextRegionSelector.RegionProperty,new Rect(17,29,140,46)); Dispatcher.UIThread.RunJobs();
 			if(editor.SelectedProfile.DisplayX!=17 || editor.SelectedProfile.DisplayWidth!=140 || !editor.SelectedProfile.UseDisplayRegion) { throw new Exception("Visual display rectangle did not update profile coordinates."); }
@@ -284,7 +334,11 @@ internal static class Program
 				picker.DrawMode=true; Drag(reverse ? new Point(31,29) : new Point(13,19),reverse ? new Point(13,19) : new Point(31,29));
 				if(picker.Region!=new Rect(8,16,24,16) || picker.DrawMode) { throw new Exception("Visual source drag did not snap correctly through preview zoom."); }
 			}
-			picker.Snap=1; picker.DrawMode=true; Drag(new Point(20,30),new Point(100,80));
+			picker.SnapX=6; picker.SnapY=8; picker.DrawMode=true; Drag(new Point(13,19),new Point(31,29));
+			if(picker.Region!=new Rect(12,16,24,16)) { throw new Exception("6x8 source drag did not snap independently by axis."); }
+			picker.RaiseEvent(new Avalonia.Input.KeyEventArgs {RoutedEvent=Avalonia.Input.InputElement.KeyDownEvent,Key=Avalonia.Input.Key.Right});
+			if(picker.Region.X!=18) { throw new Exception("6x8 source keyboard movement used the wrong horizontal step."); }
+			picker.SnapX=0; picker.SnapY=0; picker.Snap=1; picker.DrawMode=true; Drag(new Point(20,30),new Point(100,80));
 			Drag(new Point(50,50),new Point(55,53)); if(picker.Region!=new Rect(25,33,80,50)) { throw new Exception("Display rectangle interior drag did not move at pixel precision: "+picker.Region); }
 			Drag(new Point(105,83),new Point(115,89)); if(picker.Region!=new Rect(25,33,90,56)) { throw new Exception("Display corner handle did not resize."); }
 			picker.RaiseEvent(new Avalonia.Input.KeyEventArgs {RoutedEvent=Avalonia.Input.InputElement.KeyDownEvent,Key=Avalonia.Input.Key.Right});
@@ -294,6 +348,19 @@ internal static class Program
 			Console.WriteLine("PASS: visual text region selectors, bidirectional numeric bindings, tile snapping, reversed zoomed drags, pixel movement, resize handles and keyboard nudge.");
 		}
 		var mappings=window.FindControl<TextBox>("textMappings") ?? throw new Exception("Missing text mapping editor.");
+		using(var narrowEditor=new TextReplacementViewModel(path+".six.json","text-fixture","Sms",new[] {"Background"},0,1,8,-1,() => true,sourceTileWidth:6)) {
+			if(narrowEditor.SelectedProfile!.CellWidth!=6 || narrowEditor.SelectedProfile.SourceTileWidth!=6) { throw new Exception("SMS text profile did not default to 6x8."); }
+			narrowEditor.SetSourceTiles(new System.Collections.Generic.Dictionary<(int,int),TextReplacementViewModel.SourceTile> {
+				[(6,8)]=new(1,8,-1),[(12,8)]=new(2,16,-1),[(6,16)]=new(3,24,-1),[(12,16)]=new(4,32,-1)},6,8);
+			narrowEditor.SourceRegion=new Rect(6,8,12,16); narrowEditor.UseSelectionCellSize(); narrowEditor.AddSelectedSourceCell();
+			if(narrowEditor.SelectedProfile.CellOriginX!=6 || narrowEditor.SelectedProfile.CellOriginY!=8 || !MetaTextMappingText.Parse(narrowEditor.MappingText).Single().GetTiles().SequenceEqual(new uint[] {1,2,3,4})) { throw new Exception("6x8 multi-cell capture lost its grid phase or reading order."); }
+			if(TextReplacementViewModel.SnapSource(new Rect(13,19,18,10),240,192,6)!=new Rect(12,16,24,16)) { throw new Exception("Viewer selection did not use the 6x8 grid."); }
+			narrowEditor.AddProfile(); var maximumTiles=new System.Collections.Generic.Dictionary<(int,int),TextReplacementViewModel.SourceTile>();
+			for(int y=0;y<128;y+=8) { for(int x=0;x<126;x+=6) { maximumTiles[(x,y)]=new(1,8,-1); } }
+			narrowEditor.SetSourceTiles(maximumTiles,0,0); narrowEditor.SourceRegion=new Rect(0,0,126,128); narrowEditor.UseSelectionCellSize(); narrowEditor.AddSelectedSourceCell();
+			if(MetaTextMappingText.Parse(narrowEditor.MappingText).Single().GetTiles().Length!=336) { throw new Exception("Maximum 6x8 source cell capture was truncated."); }
+			Console.WriteLine("PASS: 6x8 source defaults, selection snapping, 12x16 full-pattern capture and grid origins.");
+		}
 		using(var cellEditor=new TextReplacementViewModel(path,"text-fixture","Nes",new[] {"Background"},0,-1,-1,-1,() => true)) {
 			cellEditor.SetSourceTiles(new System.Collections.Generic.Dictionary<(int,int),TextReplacementViewModel.SourceTile> {
 				[(8,8)]=new(0x10,0x100,0),[(8,16)]=new(0x20,0x200,0),[(16,8)]=new(0x10,0x100,0),[(16,16)]=new(0x21,0x210,0)},0,0);
@@ -309,6 +376,15 @@ internal static class Program
 			Console.WriteLine("PASS: complete selected source-cell capture, 8x16 sizing/origin, shared top-tile disambiguation, incomplete capture rejection and graphics-address patterns.");
 		}
 		mappings.Text="002A * = A"; Dispatcher.UIThread.RunJobs();
+		using(var addressEditor=new TextReplacementViewModel(path+".address.json","text-fixture","Sms",new[] {"Background"},0,-1,0x28,-1,() => true)) {
+			addressEditor.SetSourceTiles(new System.Collections.Generic.Dictionary<(int,int),TextReplacementViewModel.SourceTile> {[(0,0)]=new(uint.MaxValue,0x28,-1)},0,0);
+			addressEditor.SourceRegion=new Rect(0,0,8,8); addressEditor.CaptureCharacter="A";
+			addressEditor.AddSelectedSourceCell();
+			if(MetaTextMappingText.Parse(addressEditor.MappingText).Count!=0 || !addressEditor.Status.Contains("no identity")) { throw new Exception("Unavailable source indices were accepted."); }
+			addressEditor.SelectedProfile!.MatchKind=MetaTextMatchKind.GraphicsAddress; addressEditor.AddSelectedSourceCell();
+			if(MetaTextMappingText.Parse(addressEditor.MappingText).Single().Tile!=0x28) { throw new Exception("Address-only source tile capture failed."); }
+			Console.WriteLine("PASS: address-only source-cell capture and explicit rejection of unavailable tile indices.");
+		}
 		if(editor.MappingText!="002A * = A") { throw new Exception("Text mapping control is not bound."); }
 		editor.CaptureCharacter="Ω"; editor.AddCapturedTile();
 		var first=editor.SelectedProfile!;
@@ -375,12 +451,27 @@ internal static class Program
 			if(layoutEditor.Preview==null) { throw new Exception("Text-run preview failed: "+layoutEditor.Status); }
 			var atlas=(MetaTextGlyphSet)new MetaTextRasterizer.Budget().Rasterize(p,directory);
 			if(!atlas.Unclipped || atlas[0].Height<=8*p.RasterScale || !atlas.Kerning.TryGetValue(1,out int kern) || kern>=0) { throw new Exception("Proportional font lost full-size bounds or actual A/V font kerning."); }
+			var wordAtlas=(MetaTextGlyphSet)new MetaTextRasterizer.Budget().Rasterize(p,directory,new[] {"A","B"," "});
+			int Kern(int a,int b) => wordAtlas.Kerning.TryGetValue(((ulong)a<<32)|(uint)b,out int k) ? k : 0;
+			long aa=2L*wordAtlas[0].Advance64+Kern(0,0),bb=2L*wordAtlas[1].Advance64+Kern(1,1);
+			p.WrapText=true; p.WrapWords=true; p.DisplayWidth=(int)((aa+wordAtlas[2].Advance64+wordAtlas[1].Advance64+63)/64);
+			var wordPositions=MetaTextPreview.Layout(p,wordAtlas,"AA BB");
+			if(wordPositions[3].X!=0 || wordPositions[3].Y!=wordAtlas.LineHeight64 || wordPositions[4].X!=wordAtlas[1].Advance64+Kern(1,1) || wordPositions[4].Y!=wordAtlas.LineHeight64) { throw new Exception("Actual-font preview split a word that should move to the next line."); }
+			p.WrapWords=false; wordPositions=MetaTextPreview.Layout(p,wordAtlas,"AA BB");
+			if(wordPositions[3].Y!=0 || wordPositions[4].Y!=wordAtlas.LineHeight64) { throw new Exception("Legacy character wrapping changed."); }
+			p.WrapWords=true; p.WrapText=false; if(MetaTextPreview.Layout(p,wordAtlas,"AA BB")[4].Y!=0) { throw new Exception("Word wrapping ignored the wrapping toggle."); }
+			p.WrapText=true; p.DisplayWidth=(int)((aa+63)/64); wordPositions=MetaTextPreview.Layout(p,wordAtlas,"AAAAAA");
+			if(wordPositions[2].Y!=wordAtlas.LineHeight64 || wordPositions[4].Y!=2L*wordAtlas.LineHeight64) { throw new Exception("Long-word character fallback failed in preview."); }
+			p.DisplayWidth=(int)((Math.Max(aa,bb)+63)/64); wordPositions=MetaTextPreview.Layout(p,wordAtlas,"AA    \nBB");
+			if(wordPositions.Count!=4 || wordPositions[2].Y!=wordAtlas.LineHeight64) { throw new Exception("Trailing spaces inserted an extra line in preview."); }
+			Console.WriteLine("PASS: actual-font preview word boundaries, character fallback, source newlines, trailing spaces, legacy/no-wrap options and checkbox binding.");
 			bool hasRedOutline=atlas.SelectMany(g => g.Decorations ?? Array.Empty<uint>()).Any(c => ((c>>16)&255)>100 && (c&255)<30 && (c>>24)>0);
 			bool hasBlueShadow=atlas.SelectMany(g => g.Decorations ?? Array.Empty<uint>()).Any(c => (c&255)>100 && ((c>>16)&255)<30 && (c>>24)>0);
 			if(!hasRedOutline || !hasBlueShadow) { throw new Exception("Cached outline/shadow lost their independent colors."); }
+			p.DisplayWidth=80; // Restore the original persistence fixture after the narrow wrapping cases.
 			if(!layoutEditor.Save()) { throw new Exception(layoutEditor.Status); }
 			var savedLayout=MetaSpritePack.Load(path,"text-fixture","Nes").TextProfiles.Single();
-			if(!savedLayout.Proportional || !savedLayout.OutlineEnabled || !savedLayout.ShadowEnabled || savedLayout.DisplayWidth!=80 || savedLayout.OutlineColor!="FF0000FF" || savedLayout.ShadowColor!="0000FFFF") { throw new Exception("Text layout/effects failed persistence."); }
+			if(!savedLayout.Proportional || !savedLayout.WrapWords || !savedLayout.OutlineEnabled || !savedLayout.ShadowEnabled || savedLayout.DisplayWidth!=80 || savedLayout.OutlineColor!="FF0000FF" || savedLayout.ShadowColor!="0000FFFF") { throw new Exception("Text layout/effects failed persistence."); }
 			string previewPath=Path.Combine(directory,"proportional-effects-preview.png"); layoutEditor.Preview.Save(previewPath,PngBitmapEncoderOptions.Default); Console.WriteLine("TEXT PREVIEW: "+previewPath);
 		}
 		Console.WriteLine("PASS: text editor XAML/bindings, Unicode tile capture, independent invalid drafts, real font import/reuse and color rasterization, preview replacement, merged persistence, failed-save retry, stale game/editor guards and cancel isolation.");
@@ -590,7 +681,12 @@ internal static class Program
 		pack.Rules.Add(new() { Id = 3, Name = "Pause", Action = 2, TrackId = 0, Trigger = "0653 == 01" });
 		pack.Rules.Add(new() { Id = 4, Name = "Resume", Action = 3, TrackId = 0, Trigger = "0654 == 01" });
 		pack.Rules.Add(new() { Id = 5, Name = "Stop", Action = 1, TrackId = 0, Trigger = "0655 == 01" });
-		byte[] packet = pack.CreatePacket(home);
+		var eventLibrary=new MetaNamedConditionLibrary {RomHash=pack.RomHash,System="Nes",Conditions=new() {
+			new() {Name="AudioWrite",Address=0x652,Value=8},new() {Name="AudioContextSix",Address=0x760,Value=6}
+		}};
+		pack.Rules[0].Trigger="[AudioWrite]"; pack.Rules[0].Conditions="[AudioContextSix]\n[AudioWrite]";
+		byte[] packet = pack.CreatePacket(home,eventLibrary);
+		pack.Rules[0].Trigger="0652 == 08"; pack.Rules[0].Conditions="0760 == 06\n0652 == 08";
 		string saved = Path.Combine(home, "music.json"); File.WriteAllText(saved, pack.ToJson());
 		var loaded = MusicReplacementPack.Load(saved, pack.RomHash); Check(loaded.Rules.Count == 5 && loaded.Tracks[0].LoopStart == 16, "Music JSON round trip failed.");
 		bool rejected = false; try { MusicReplacementPack.Load(saved, new string('B', 40)); } catch(InvalidDataException) { rejected = true; } Check(rejected, "ROM isolation failed.");
@@ -684,6 +780,21 @@ internal static class Program
 			foreach(var rule in pack.Rules) { model.Pack.Rules.Add(rule); }
 			model.AddEffectRule(); Check(model.SelectedRule?.Action == 4 && model.SelectedRule.Restart && model.SelectedRule.TrackId == 2, "Effect rule defaults failed.");
 			model.SaveApply(); Check(model.Status.Contains("saved and applied"), model.Status);
+			string currentHash=EmuApi.GetRomHash(HashType.Sha1);
+			string graphicsPath=Path.Combine(ConfigManager.HdPackFolder,"MetaSprites","Nes",currentHash,"groups.json");
+			var namedEditor=new NamedConditionEditorViewModel(graphicsPath,currentHash,"Nes",0x760,6,"CPU RAM",()=>true);
+			namedEditor.ConditionName="ContextSix"; Check(namedEditor.Save(),namedEditor.Status);
+			namedEditor.NewPreset(); namedEditor.ConditionName="WriteEvent"; namedEditor.AddressHex="0652"; namedEditor.ValueHex="08"; Check(namedEditor.Save(),namedEditor.Status);
+			model.Pack.Rules[0].Trigger="[WriteEvent]"; model.Pack.Rules[0].Conditions="[ContextSix]\n[WriteEvent]";
+			model.SaveApply(); Check(model.Status.Contains("saved and applied"),model.Status);
+			model.Reload(); Check(model.Pack.Rules[0].Trigger=="[WriteEvent]" && model.Pack.Rules[0].Conditions.Contains("[ContextSix]"),"Audio editor discarded named references on reload.");
+			namedEditor.SelectedEntry=namedEditor.Entries.Single(e=>e.Name=="ContextSix");
+			Check(!namedEditor.Remove(),"Audio-only preset reference was deleted.");
+			namedEditor.ConditionName="RenamedContext"; Check(!namedEditor.Save(),"Audio-only preset reference was renamed.");
+			namedEditor.ConditionName="ContextSix"; namedEditor.ValueHex="04"; Check(namedEditor.Save(),namedEditor.Status);
+			model.SaveApply(); Check(model.Status.Contains("saved and applied"),model.Status);
+			Console.WriteLine("PASS: music editor shared CPU library save/apply/reload, preserved source expressions, audio-only rename/delete protection and preset value edits.");
+			model.SelectedTrack=model.Pack.Tracks.Single(t=>t.Id==2);
 			model.Playback(0); Check(DebugApi.GetReplacementMusicTrack() == 2, model.Status);
 			model.Playback(4); Check(model.Status.StartsWith("Playback command sent"), model.Status);
 			model.Playback(5); Check(DebugApi.GetReplacementMusicTrack() == 2, "Effect stop changed music.");
@@ -956,6 +1067,56 @@ internal static class Program
 		Console.WriteLine("PASS: actual Avalonia group label binding updates immediately for group/pose renames and clearing optional names.");
 	}
 
+	private static void CheckUnbundledCoreCopy(string assemblyPath)
+	{
+		string root=Path.Combine(AppContext.BaseDirectory,"artifacts","dependency-copy-"+Guid.NewGuid().ToString("N"));
+		string source=Path.Combine(root,"application"),home=Path.Combine(root,"home");
+		Directory.CreateDirectory(source); Directory.CreateDirectory(home);
+		try {
+			var start=new ProcessStartInfo(Environment.ProcessPath!) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+			if(Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet",StringComparison.OrdinalIgnoreCase)) { start.ArgumentList.Add(Assembly.GetExecutingAssembly().Location); }
+			start.ArgumentList.Add("--dependency-copy-child"); start.ArgumentList.Add(Path.GetFullPath(assemblyPath)); start.ArgumentList.Add(root);
+			using var process=Process.Start(start) ?? throw new Exception("Could not start isolated dependency extraction check.");
+			var output=process.StandardOutput.ReadToEndAsync(); var error=process.StandardError.ReadToEndAsync(); process.WaitForExit();
+			Console.Write(output.GetAwaiter().GetResult());
+			if(process.ExitCode!=0) { throw new Exception("Dependency extraction check failed: "+error.GetAwaiter().GetResult()); }
+		} finally { Directory.Delete(root,true); }
+	}
+
+	private static void ExerciseUnbundledCoreCopy(string assemblyPath,string root,string source,string home)
+	{
+		var context=new AssemblyLoadContext("Release dependency extraction",isCollectible:true);
+		try {
+			string isolatedAssembly=Path.Combine(source,"Mesen.dll");
+			File.Copy(Path.GetFullPath(assemblyPath),isolatedAssembly);
+			var assembly=context.LoadFromAssemblyPath(isolatedAssembly);
+			byte[] current={1,2,3,4},expected=current; bool bundled=false;
+			using(var resource=assembly.GetManifestResourceStream("Mesen.Dependencies.zip") ?? throw new Exception("Packaged UI has no dependency archive.")) {
+				using var zip=new System.IO.Compression.ZipArchive(resource);
+				var core=zip.Entries.SingleOrDefault(entry=>entry.Name=="MesenCore.dll");
+				if(core!=null) {
+					bundled=true; using var input=core.Open(); using var bytes=new MemoryStream(); input.CopyTo(bytes); expected=bytes.ToArray();
+					if(!expected.SequenceEqual(File.ReadAllBytes(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(assemblyPath))!,"MesenCore.dll")))) { throw new Exception("Packaged UI embeds a stale core different from its built adjacent DLL."); }
+				}
+			}
+			var program=assembly.GetType("Mesen.Program",throwOnError:true)!;
+			program.GetProperty("OriginalFolder",BindingFlags.Public|BindingFlags.Static)!.SetValue(null,Path.Combine(root,"unrelated-working-directory"));
+			var helper=assembly.GetType("Mesen.Utilities.DependencyHelper",throwOnError:true)!;
+			var extract=helper.GetMethod("ExtractNativeDependencies",BindingFlags.Public|BindingFlags.Static)!;
+			string sourceCore=Path.Combine(source,"MesenCore.dll"),homeCore=Path.Combine(home,"MesenCore.dll");
+			byte[] obsolete={4,3,2,1};
+			File.WriteAllBytes(sourceCore,current); File.WriteAllBytes(homeCore,obsolete);
+			File.SetLastWriteTimeUtc(homeCore,File.GetLastWriteTimeUtc(sourceCore));
+			extract.Invoke(null,new object[]{home});
+			if(!File.ReadAllBytes(homeCore).SequenceEqual(expected)) { throw new Exception("Release retained an obsolete home-folder core."); }
+			File.Delete(homeCore); extract.Invoke(null,new object[]{home});
+			if(!File.ReadAllBytes(homeCore).SequenceEqual(expected)) { throw new Exception("Release did not install its core into a fresh home folder."); }
+			extract.Invoke(null,new object[]{source});
+			if(!File.ReadAllBytes(sourceCore).SequenceEqual(expected)) { throw new Exception("Portable extraction did not retain the current core."); }
+			Console.WriteLine(bundled ? "PASS: actual bundled Release UI embeds the current core and restores it over stale/missing home cores and a stale portable adjacent core." : "PASS: actual unbundled UI dependency extraction refreshes a stale same-size/same-timestamp home core, installs a missing core, and preserves a portable adjacent core independently of the launch working directory.");
+		} finally { context.Unload(); }
+	}
+
 	private static void CheckColdStartup(string sourceHome, string mode, string romPath, string? statePath, bool scrollTurn, string? settingsPath, bool softwareRenderer)
 	{
 		if(mode != "preloaded" && mode != "queued" && mode != "disabled") { throw new ArgumentException("Use preloaded, queued or disabled activation mode."); }
@@ -1125,6 +1286,127 @@ internal static class Program
 		}
 	}
 
+	private static void CheckNamedConditionAuthoring(SpriteViewerViewModel viewer,string packPath,string hash,CpuType cpu)
+	{
+		uint address=cpu.ToString() switch { "Gameboy"=>0xC000,"Gba"=>0x02000000,"Pce"=>0x2000,"Sms"=>0xC000,"Snes"=>0x7E0000,_=>0 };
+		CheckNamedConditionMemorySelection(cpu,(int)address);
+		bool sameGame=true;
+		var editor=new NamedConditionEditorViewModel(packPath,hash,cpu.ToString(),address,0,"CPU selection",()=>sameGame);
+		editor.ConditionName="Gate"; editor.MaskHex="00";
+		if(!editor.Save()) { throw new Exception(editor.Status); }
+		var window=new Mesen.Debugger.Windows.NamedConditionWindow(editor);
+		if(window.DataContext!=editor) { throw new Exception("Named condition window lost its model."); }
+		window.Close();
+		viewer.MetaMemoryConditionsText="[Gate]"; viewer.SaveMetaGroups();
+		if(MetaSpritePack.Load(packPath,hash,cpu.ToString()).Groups[0].MemoryConditionExpression!="[Gate]") { throw new Exception("Named group expression was not persisted: "+viewer.MetaStatus); }
+		if(editor.Remove()) { throw new Exception("Referenced preset was removed."); }
+		editor.ConditionName="RenamedGate";
+		if(editor.Save()) { throw new Exception("Referenced preset was renamed."); }
+		editor.ConditionName="Gate"; editor.AddressAlias=true;
+		if(editor.Save()) { throw new Exception("Required preset value was removed."); }
+		editor.AddressAlias=false; editor.ValueHex="01";
+		if(!editor.Save()) { throw new Exception(editor.Status); }
+		viewer.SaveMetaGroups();
+		var saved=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+		if(saved.Groups[0].MemoryConditions[0].Value!=1) { throw new Exception("Updated preset was not resolved on save: "+viewer.MetaStatus); }
+		editor.NewPreset(); editor.ConditionName="LocationName"; editor.AddressAlias=true;
+		if(!editor.Save()) { throw new Exception(editor.Status); }
+		viewer.MetaMemoryConditionsText="[LocationName] == $04 / $00"; viewer.SaveMetaGroups();
+		saved=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+		if(saved.Groups[0].MemoryConditions[0].Value!=4 || saved.Groups[0].MemoryConditions[0].Address!=address) { throw new Exception("Address alias override failed."); }
+		var stale=new NamedConditionEditorViewModel(packPath,hash,cpu.ToString(),address,0,"CPU selection",()=>true);
+		editor.NewPreset(); editor.ConditionName="Unused";
+		if(!editor.Save() || !editor.Remove()) { throw new Exception(editor.Status); }
+		stale.ConditionName="Stale";
+		// Create a real content change after the stale snapshot.
+		editor.NewPreset(); editor.ConditionName="Later";
+		if(!editor.Save() || stale.Save()) { throw new Exception("Stale editor overwrote a newer library."); }
+		CheckNamedConditionPicker(viewer,editor);
+		sameGame=false; editor.NewPreset(); editor.ConditionName="WrongGame";
+		if(editor.Save()) { throw new Exception("Changed-ROM editor saved conditions."); }
+		Console.WriteLine("PASS: "+cpu+" named condition window, shared-address aliases, saved references, live re-resolution, referenced rename/delete guards, stale edits and changed-ROM guard.");
+	}
+	private static void CheckNamedConditionPicker(SpriteViewerViewModel viewer,NamedConditionEditorViewModel editor)
+	{
+		string original=viewer.MetaMemoryConditionsText;
+		var picker=new NamedConditionPicker();
+		using var binding=picker.Bind(NamedConditionPicker.ExpressionProperty,new Avalonia.Data.Binding(nameof(viewer.MetaMemoryConditionsText)) {Source=viewer,Mode=Avalonia.Data.BindingMode.TwoWay});
+		picker.ReloadLibrary();
+		var choices=(ComboBox)((WrapPanel)picker.Children[0]).Children[0];
+		void Select(string name)=>choices.SelectedItem=choices.ItemsSource!.Cast<MetaNamedCondition>().Single(c=>c.Name==name);
+		viewer.MetaMemoryConditionsText=""; Select("Gate"); picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!="[Gate]" || !picker.ResolvedPreview.Contains("$01 / $00")) { throw new Exception("Condition picker insertion did not update its two-way field binding: "+picker.ResolvedPreview); }
+		picker.MaximumConditions=1; picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!="[Gate]" || !picker.ResolvedPreview.Contains("at most 1")) { throw new Exception("Condition picker exceeded its field limit."); }
+		picker.MaximumConditions=64; picker.MemorySource=1; picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!="[Gate]" || !picker.ResolvedPreview.Contains("main CPU")) { throw new Exception("Condition picker inserted a main CPU alias into an alternate source."); }
+		picker.MemorySource=0; viewer.MetaMemoryConditionsText=""; Select("LocationName"); picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!="[LocationName] == " || !picker.ResolvedPreview.Contains("needs attention")) { throw new Exception("Address alias insertion silently supplied a comparison value."); }
+		viewer.MetaMemoryConditionsText="[LocationName] == $04 / $00";
+		if(!picker.ResolvedPreview.Contains("$04 / $00")) { throw new Exception("Condition picker did not resolve a typed alias override."); }
+		editor.SelectedEntry=editor.Entries.Single(e=>e.Name=="Gate"); editor.ValueHex="02";
+		if(!editor.Save()) { throw new Exception(editor.Status); }
+		viewer.MetaMemoryConditionsText="[Gate]"; picker.ReloadLibrary();
+		if(!picker.ResolvedPreview.Contains("$02 / $00")) { throw new Exception("Condition picker retained a stale preset after refresh."); }
+		Select("Later"); editor.SelectedEntry=editor.Entries.Single(e=>e.Name=="Later");
+		if(!editor.Remove()) { throw new Exception(editor.Status); }
+		string before=viewer.MetaMemoryConditionsText; picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!=before || !picker.ResolvedPreview.Contains("removed")) { throw new Exception("A removed picker entry silently inserted a different preset."); }
+		viewer.MetaMemoryConditionsText="[Missing]";
+		if(!picker.ResolvedPreview.Contains("needs attention")) { throw new Exception("Condition picker concealed an unresolved name."); }
+		viewer.MetaMemoryConditionsText=original; viewer.SaveMetaGroups();
+		var position=new MetaWidescreenPosition(); var boundaryPicker=new NamedConditionPicker {MaximumConditions=8}; var input=new TextBox();
+		using var boundaryBinding=boundaryPicker.Bind(NamedConditionPicker.ExpressionProperty,new Avalonia.Data.Binding(nameof(position.LeftFlags)) {Source=position,Mode=Avalonia.Data.BindingMode.TwoWay});
+		using var inputBinding=input.Bind(TextBox.TextProperty,new Avalonia.Data.Binding(nameof(position.LeftFlags)) {Source=position,Mode=Avalonia.Data.BindingMode.TwoWay});
+		boundaryPicker.ReloadLibrary(); input.SetCurrentValue(TextBox.TextProperty,"[Gate]");
+		if(boundaryPicker.Expression!="[Gate]") { throw new Exception("Typing a boundary expression did not refresh its picker."); }
+		boundaryPicker.InsertSelectedCondition();
+		if(input.Text=="[Gate]" || input.Text!=position.LeftFlags) { throw new Exception("Boundary picker insertion did not update the text field."); }
+		picker.Measure(new Size(220,double.PositiveInfinity)); picker.Arrange(new Rect(0,0,220,picker.DesiredSize.Height));
+		if(((WrapPanel)picker.Children[0]).Children.Any(child=>child.Bounds.Right>220.1)) { throw new Exception("Condition picker overflowed the narrow Sprite Viewer panel."); }
+		typeof(NamedConditionPicker).GetField("_hash",BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(picker,"another-game");
+		picker.ReloadLibrary(); picker.InsertSelectedCondition();
+		if(viewer.MetaMemoryConditionsText!=original || !picker.ResolvedPreview.Contains("game changed")) { throw new Exception("Condition picker inserted a stale game's preset."); }
+		Console.WriteLine("PASS: condition picker two-way insertion, resolved numeric preview, alias value entry, source/field limits, library refresh and removed-entry rejection.");
+	}
+	private static void CheckNamedConditionMemorySelection(CpuType cpu,int address)
+	{
+		var window=new Mesen.Debugger.Windows.MemoryToolsWindow();
+		try {
+			var model=(MemoryToolsViewModel)window.DataContext!;
+			var hex=window.FindControl<HexEditor>("Hex")!;
+			var method=window.GetType().GetMethod("GetNamedConditionAddress",BindingFlags.NonPublic|BindingFlags.Instance)!;
+			AddressInfo? Selected()=> (AddressInfo?)method.Invoke(window,null);
+			model.Config.MemoryType=cpu.ToMemoryType(); hex.SelectionStart=address; hex.SelectionLength=0;
+			var selected=Selected();
+			if(selected?.Type!=cpu.ToMemoryType() || selected?.Address!=address) { throw new Exception(cpu+" CPU selection was not preserved."); }
+			var physical=DebugApi.GetAbsoluteAddress(selected!.Value);
+			if(physical.Address<0 || physical.Type==cpu.ToMemoryType() || physical.Type.IsPpuMemory()) { throw new Exception(cpu+" fixture RAM is not mapped to a physical RAM domain."); }
+			model.Config.MemoryType=physical.Type; hex.SelectionStart=physical.Address; hex.SelectionLength=1;
+			selected=Selected();
+			if(selected==null || selected.Value.Type!=cpu.ToMemoryType()) { throw new Exception(cpu+" physical RAM selection was not translated."); }
+			var roundtrip=DebugApi.GetAbsoluteAddress(selected.Value);
+			if(roundtrip.Address!=physical.Address || roundtrip.Type!=physical.Type) { throw new Exception(cpu+" physical RAM translation changed the selected byte."); }
+			hex.SelectionLength=2;
+			if(Selected()!=null) { throw new Exception("A multi-byte range was accepted as a byte condition."); }
+			// Unsupported domains below are synthetic; detach normal label bindings
+			// before injecting domains that are absent from this console's UI list.
+			hex.DataContext=null;
+			hex.SelectionLength=0; model.Config.MemoryType=MemoryType.NesPpuMemory; hex.SelectionStart=0;
+			if(Selected()!=null) { throw new Exception("PPU selection was accepted as CPU RAM."); }
+			model.Config.MemoryType=MemoryType.SpcMemory;
+			if(Selected()!=null) { throw new Exception("Secondary CPU selection was accepted as main CPU RAM."); }
+			// A stale cursor is injected only into the control. The normal selection
+			// observer assumes a valid address and must not send this synthetic value
+			// through label lookup before the context action can reject it.
+			model.Config.MemoryType=cpu.ToMemoryType(); hex.DataContext=null; hex.SelectionStart=DebugApi.GetMemorySize(cpu.ToMemoryType());
+			if(Selected()!=null) { throw new Exception("An out-of-range CPU selection was accepted."); }
+			hex.SelectionStart=-1;
+			if(Selected()!=null) { throw new Exception("A negative CPU selection was accepted."); }
+			Console.WriteLine("PASS: "+cpu+" Memory Viewer named-condition CPU selection, mapped physical RAM round trip and range/PPU/secondary-domain rejection.");
+		} finally { window.Close(); }
+	}
+
 	private static void CheckSelection(string system, bool startupTiming, bool recognitionBenchmark, bool pointerTesting = false)
 	{
 		var (cpu, extension) = system switch {
@@ -1144,6 +1426,8 @@ internal static class Program
 		EmuApi.InitializeEmu(home, IntPtr.Zero, IntPtr.Zero, true, true, true, true);
 		ConfigManager.Config.ApplyConfig();
 		try {
+			if(cpu==CpuType.Nes && (DebugApi.SetMetaReplacements("no-rom",Array.Empty<byte>(),0,Array.Empty<byte>(),0)
+				|| !DebugApi.GetMetaReplacementErrorMessage().Contains("No ROM is loaded"))) { throw new Exception("Pack activation without a loaded ROM did not fail safely with a useful reason."); }
 			if(!EmuApi.LoadRom(romPath)) { throw new Exception("Selection fixture ROM failed to load: " + system); }
 			System.Threading.Thread.Sleep(150);
 			EmuApi.Pause();
@@ -1188,6 +1472,7 @@ internal static class Program
 				if(saved.Groups.Count != 1 || !saved.Groups[0].Enabled || !File.Exists(Path.Combine(Path.GetDirectoryName(packPath)!, saved.Groups[0].ReplacementPath))) {
 					throw new Exception("Actual Create flow did not persist its enabled PNG group in the default folder.");
 				}
+				CheckNamedConditionAuthoring(viewer,packPath,hash,cpu);
 				if(system == "SnesObj") {
 					var group=saved.Groups[0];
 					if(group.Width!=20 || group.Height!=16 || group.Members.Count!=2 || group.Members[1].X!=12 || group.Members[1].Y!=8) { throw new Exception("Authored OBJ-interlace member arrangement used field-height coordinates."); }
@@ -1532,7 +1817,12 @@ internal static class Program
 					background.HideOriginalLayer = true;
 					background.ExtendIntoMargins = true;
 					background.UseWidescreenPosition = true;
-					background.WidescreenPosition = new() { Position = 3, CameraMin = -10, CameraMax = 2048, SlideSpeed = 0.1, ReleaseDelay = 6, UseRamFlags = true, LeftFlags = "$68 == $01", RightFlags = "$68 == $02" };
+					var boundaryEditor=new NamedConditionEditorViewModel(packPath,hash,cpu.ToString(),0x68,1,"CPU boundary flag",()=>true);
+					boundaryEditor.ConditionName="BoundaryLeft";
+					if(!boundaryEditor.Save()) { throw new Exception(boundaryEditor.Status); }
+					boundaryEditor.NewPreset(); boundaryEditor.ConditionName="BoundaryRight"; boundaryEditor.ValueHex="02";
+					if(!boundaryEditor.Save()) { throw new Exception(boundaryEditor.Status); }
+					background.WidescreenPosition = new() { Position = 3, CameraMin = -10, CameraMax = 2048, SlideSpeed = 0.1, ReleaseDelay = 6, UseRamFlags = true, LeftFlags = "[BoundaryLeft]", RightFlags = "[BoundaryRight]" };
 					background.WidescreenPosition.RamSpeed = new() { Enabled = true, Format = 0, Address = 0x64, Multiplier = 0.0625, Maximum = 2.5 };
 					background.UseCpuCamera = true;
 					background.CameraX.Format = 4; background.CameraX.AddressHex = "0060"; background.CameraX.PageAddressHex = "0061"; background.CameraX.PageSize = 256;
@@ -1554,6 +1844,10 @@ internal static class Program
 					background.CompositionPosition = 1;
 					tilemap.BackgroundEditor.SaveMetaGroups();
 					if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.")) { throw new Exception("Actual background activation failed: " + tilemap.BackgroundEditor.MetaStatus); }
+					if(boundaryEditor.Remove()) { throw new Exception("Boundary-only named preset was deleted."); }
+					boundaryEditor.ConditionName="RenamedBoundary";
+					if(boundaryEditor.Save()) { throw new Exception("Boundary-only named preset was renamed."); }
+					Console.WriteLine("PASS: "+cpu+" named camera boundary save/apply and boundary-only reference management.");
 					if(MetaSpritePack.Load(packPath, EmuApi.GetRomHash(HashType.Sha1), cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id).DrawOrder != 7) { throw new Exception("Background editor did not persist the PNG draw order."); }
 					if(MetaSpritePack.Load(packPath, hash, cpu.ToString()).BackgroundLayers.Single(layer => layer.Id == background.Id).CompositionPosition != 1) { throw new Exception("Background editor did not persist foreground composition."); }
 					background.CompositionPosition = 0; tilemap.BackgroundEditor.SaveMetaGroups();
@@ -1596,6 +1890,16 @@ internal static class Program
 					}
 					if(cpu == CpuType.Nes) {
 						tilemap.BackgroundEditor.SaveCpuCamera();
+						uint definitionsBefore=GetMetaReplacementDefinitionFlagsTest();
+						byte[] diagnosticsEmptySprites={(byte)'M',(byte)'S',(byte)'P',(byte)'1',0,0,0,0};
+						byte[] diagnosticsEmptyBackgrounds={(byte)'M',(byte)'B',(byte)'G',(byte)'1',0,0,0,0};
+						if(DebugApi.SetMetaReplacements("wrong-rom",diagnosticsEmptySprites,8,diagnosticsEmptyBackgrounds,8)
+							|| !DebugApi.GetMetaReplacementErrorMessage().Contains("different ROM") || GetMetaReplacementDefinitionFlagsTest()!=definitionsBefore) { throw new Exception("NES ROM mismatch diagnostics lost the reason or modified active replacements."); }
+						if(DebugApi.SetMetaReplacements(hash,new byte[1],1,diagnosticsEmptyBackgrounds,8)
+							|| !DebugApi.GetMetaReplacementErrorMessage().Contains("packet",StringComparison.OrdinalIgnoreCase) || GetMetaReplacementDefinitionFlagsTest()!=definitionsBefore) { throw new Exception("NES malformed-pack diagnostics lost the parser reason or modified active replacements."); }
+						tilemap.BackgroundEditor.SaveMetaGroups();
+						if(!tilemap.BackgroundEditor.MetaStatus.StartsWith("Background definitions saved and applied.") || DebugApi.GetMetaReplacementErrorMessage().Length!=0) { throw new Exception("NES successful activation retained a stale rejection reason."); }
+						Console.WriteLine("PASS: NES ROM/packet rejection diagnostics preserve active definitions and clear after successful pack activation.");
 						if(!tilemap.BackgroundEditor.HasSavedCamera) { throw new Exception("CPU camera profile was not saved."); }
 						string beforeFailedCameraSave = File.ReadAllText(packPath);
 						background.CameraX.AddressHex = "0062";
@@ -1646,7 +1950,7 @@ internal static class Program
 						|| saved.BackgroundLayers[0].ScrollSpeedX != 0.5 || saved.BackgroundLayers[0].ScrollSpeedY != -1
 						|| saved.BackgroundLayers[0].IgnoreRasterScroll != (cpu == CpuType.Nes) || saved.BackgroundLayers[0].ScrollReferenceScanline != 47
 						|| !saved.BackgroundLayers[0].HideOriginalLayer || !saved.BackgroundLayers[0].ExtendIntoMargins
-						|| !saved.BackgroundLayers[0].UseWidescreenPosition || saved.BackgroundLayers[0].WidescreenPosition.CameraMin != -10 || saved.BackgroundLayers[0].WidescreenPosition.LeftFlags != "$68 == $01"
+						|| !saved.BackgroundLayers[0].UseWidescreenPosition || saved.BackgroundLayers[0].WidescreenPosition.CameraMin != -10 || saved.BackgroundLayers[0].WidescreenPosition.LeftFlags != "[BoundaryLeft]"
 						|| saved.BackgroundLayers[0].WidescreenPosition.SlideSpeed != 0.1 || saved.BackgroundLayers[0].WidescreenPosition.ReleaseDelay != 6
 						|| !saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Enabled || saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Address != 0x64
 						|| saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Multiplier != 0.0625 || saved.BackgroundLayers[0].WidescreenPosition.RamSpeed.Maximum != 2.5
@@ -1726,6 +2030,10 @@ internal static class Program
 					long bytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
 					Console.WriteLine($"RECOGNITION BENCHMARK: {system}, {elapsedMs / iterations:F4} ms/refresh, {bytes / iterations} bytes/refresh; actual paused viewer snapshot, excludes desktop presentation.");
 				}
+				var startupDefinitions=MetaSpritePack.Load(packPath,hash,cpu.ToString());
+				startupDefinitions.Groups[0].MemoryConditionExpression="[LocationName] == $04 / $00";
+				foreach(var layer in startupDefinitions.BackgroundLayers) { layer.MemoryConditionExpression="[Gate]"; }
+				startupDefinitions.Save(packPath);
 				Type loader = typeof(SpriteViewerViewModel).Assembly.GetType("Mesen.Debugger.Utilities.MetaSpriteRuntimeLoader")!;
 				MethodInfo preload = loader.GetMethod("LoadForGame", BindingFlags.Public | BindingFlags.Static)!;
 				int loads = 0;
@@ -1748,7 +2056,7 @@ internal static class Program
 				if(!EmuApi.LoadRom(romPath) || loads != 1 || !applied || before != after || beforeClock != afterClock) {
 					throw new Exception($"Pre-emulation PNG activation failed: loads={loads}, applied={applied}, frames={before}/{after}, clocks={beforeClock}/{afterClock}.");
 				}
-				Console.WriteLine($"PASS: {system} saved PNG decode/native activation completed during GameLoaded with frame/clock unchanged ({before}/{beforeClock}); {preloadMs:F3} ms.");
+				Console.WriteLine($"PASS: {system} saved named group/background conditions and PNG decode/native activation completed during GameLoaded with frame/clock unchanged ({before}/{beforeClock}); {preloadMs:F3} ms.");
 				Console.WriteLine($"CLEANUP: {system} activation check returned; finishing viewer scope.");
 				if(startupTiming) {
 					const int viewerId = 19071;

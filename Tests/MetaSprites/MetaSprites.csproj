@@ -8,6 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../UI/Debugger/Utilities/MetaSpritePack.cs" Link="MetaSpritePack.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MetaNamedConditionLibrary.cs" Link="MetaNamedConditionLibrary.cs" />
+    <Compile Include="../../UI/Debugger/Utilities/MusicReplacementPack.cs" Link="MusicReplacementPack.cs" />
     <Compile Include="../../UI/Debugger/Utilities/MetaPngAnimation.cs" Link="MetaPngAnimation.cs" />
     <Compile Include="../../UI/Debugger/Utilities/MetaTextReplacement.cs" Link="MetaTextReplacement.cs" />
     <Compile Include="../../UI/Debugger/Utilities/MetaTextRuntimePacket.cs" Link="MetaTextRuntimePacket.cs" />

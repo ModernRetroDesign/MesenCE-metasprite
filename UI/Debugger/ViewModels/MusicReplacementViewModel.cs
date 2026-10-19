@@ -34,7 +34,7 @@ public partial class MusicReplacementViewModel : ObservableObject
 	private void CheckGame() { if((_console != ConsoleType.Nes && _console != ConsoleType.Gameboy && _console != ConsoleType.Gba && _console != ConsoleType.PcEngine && _console != ConsoleType.Sms && _console != ConsoleType.Snes && _console != ConsoleType.Ws) || EmuApi.GetRomInfo().ConsoleType != _console || EmuApi.GetRomHash(HashType.Sha1) != _hash) { throw new InvalidOperationException("The game changed. Reopen the Audio Replacement Editor."); } }
 	private void CheckEditable() { CheckGame(); if(_loadError) { throw new InvalidDataException("Fix the pack load error and reload before editing."); } }
 	public void Reload() {
-		try { CheckGame(); var pack = MusicReplacementPack.Load(PackPath, _hash, _console.ToString()); _snapshot = File.Exists(PackPath) ? File.ReadAllText(PackPath) : null; Pack = pack; SelectedTrack = Pack.Tracks.FirstOrDefault(); SelectedRule = Pack.Rules.FirstOrDefault(); _loadError = false; Status = "Loaded music pack. Unsaved edits do not affect playback."; }
+		try { CheckGame(); var pack = MusicReplacementRuntime.LoadPack(PackPath, _hash, _console.ToString()); _snapshot = File.Exists(PackPath) ? File.ReadAllText(PackPath) : null; Pack = pack; SelectedTrack = Pack.Tracks.FirstOrDefault(); SelectedRule = Pack.Rules.FirstOrDefault(); _loadError = false; Status = "Loaded music pack. Unsaved edits do not affect playback."; }
 		catch(Exception ex) { _loadError = true; Status = ex.Message; }
 	}
 	public void Import(string source) {
@@ -57,7 +57,8 @@ public partial class MusicReplacementViewModel : ObservableObject
 		try {
 			CheckEditable(); string? disk = File.Exists(PackPath) ? File.ReadAllText(PackPath) : null;
 			if(disk != _snapshot) { throw new InvalidOperationException("Music pack changed on disk. Reload before saving."); }
-			string json = Pack.ToJson(); byte[] packet = Pack.CreatePacket(Path.GetDirectoryName(PackPath)!);
+			var library=MusicReplacementRuntime.GetLibrary(_hash,Pack.NamedExpressions());
+			string json = Pack.ToJson(library); byte[] packet = Pack.CreatePacket(Path.GetDirectoryName(PackPath)!,library);
 			Write(json);
 			if(!DebugApi.SetMusicReplacements(_hash, packet, (uint)packet.Length)) {
 				if(disk != null) { Write(disk); } else { File.Delete(PackPath); }

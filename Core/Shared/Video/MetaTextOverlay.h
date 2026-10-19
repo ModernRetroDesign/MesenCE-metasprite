@@ -14,6 +14,7 @@ class MetaTextOverlay
 	std::vector<uint32_t> _output;
 	std::vector<uint32_t> _previousOutput;
 	std::vector<uint32_t> _columns;
+	std::vector<int64_t> _wordWidths;
 	struct Token { int X,Y,SourceX,SourceY; uint32_t GlyphIndex; const MetaTextReplacement* Profile; const MetaTextGlyph* Glyph; const MetaTextPixel* Tile; };
 	std::vector<Token> _tokens;
 	static uint32_t Blend(uint32_t front,uint32_t back)
@@ -35,6 +36,20 @@ class MetaTextOverlay
 			std::vector<const Token*> tokens; for(const auto& token:_tokens) { if(token.Profile==profile) { tokens.push_back(&token); } }
 			if(tokens.empty()) { continue; }
 			std::stable_sort(tokens.begin(),tokens.end(),[&](const auto* a,const auto* b) { return p.UseDisplayRegion ? std::tie(a->SourceY,a->SourceX)<std::tie(b->SourceY,b->SourceX) : std::tie(a->Y,a->X)<std::tie(b->Y,b->X); });
+			bool words=p.WrapWords && p.WrapText && p.UseDisplayRegion;
+			if(words) {
+				_wordWidths.resize(tokens.size());
+				// Suffix widths make word lookahead linear even for very long unbroken strings.
+				for(size_t i=tokens.size();i-- >0;) {
+					const auto& t=*tokens[i]; _wordWidths[i]=t.Glyph->WordSeparator ? 0 : p.Proportional ? t.Glyph->Advance64 : p.CellWidth*64;
+					if(!t.Glyph->WordSeparator && i+1<tokens.size()) { const auto& next=*tokens[i+1];
+						if(!next.Glyph->WordSeparator && next.SourceY==t.SourceY && next.SourceX==t.SourceX+p.CellWidth) {
+							_wordWidths[i]+=p.LetterSpacing64+_wordWidths[i+1];
+							if(p.Proportional) { auto k=p.Kerning.find((uint64_t(t.GlyphIndex)<<32)|next.GlyphIndex); if(k!=p.Kerning.end()) { _wordWidths[i]+=k->second; } }
+						}
+					}
+				}
+			}
 			int left=p.UseDisplayRegion ? std::max(0,(p.DisplayX-cropLeft)*int(scale)) : 0,top=p.UseDisplayRegion ? std::max(0,(p.DisplayY-cropTop)*int(scale)) : 0;
 			int right=p.UseDisplayRegion ? std::min(int(width),(p.DisplayX+p.DisplayWidth-cropLeft)*int(scale)) : int(width);
 			int bottom=p.UseDisplayRegion ? std::min(int(height),(p.DisplayY+p.DisplayHeight-cropTop)*int(scale)) : int(height);
@@ -47,17 +62,30 @@ class MetaTextOverlay
 				if(p.UseDisplayRegion) { fill(left,top,right-left,bottom-top); }
 				else { for(const auto* t:tokens) { fill((t->X-cropLeft)*int(scale),(t->Y-cropTop)*int(scale),p.CellWidth*int(scale),p.CellHeight*int(scale)); } }
 			}
-			int64_t cursor=0,line=0; int previousRow=INT32_MIN,previousX=INT32_MIN; uint32_t previousGlyph=UINT32_MAX;
-			for(const auto* token:tokens) {
+			int64_t cursor=0,line=0; int previousRow=INT32_MIN,previousX=INT32_MIN; uint32_t previousGlyph=UINT32_MAX; bool pendingWrap=false;
+			for(size_t tokenIndex=0;tokenIndex<tokens.size();tokenIndex++) {
+				const auto* token=tokens[tokenIndex];
 				int row=p.UseDisplayRegion ? token->SourceY : token->Y,x=p.UseDisplayRegion ? token->SourceX : token->X;
 				bool newRow=row!=previousRow,adjacent=previousGlyph!=UINT32_MAX && x==previousX+p.CellWidth;
 				if(newRow) {
 					if(p.UseDisplayRegion) { cursor=int64_t(p.DisplayX)*64; line=previousRow==INT32_MIN ? int64_t(p.DisplayY)*64 : line+p.LineHeight64; }
 					else { cursor=int64_t(token->X)*64; line=int64_t(token->Y)*64; }
-					previousGlyph=UINT32_MAX;
+					previousGlyph=UINT32_MAX; pendingWrap=false;
 				} else if(!p.UseDisplayRegion && (!p.Proportional || !adjacent)) { cursor=int64_t(token->X)*64; }
-				if(p.Proportional && adjacent && !newRow) { auto kern=p.Kerning.find((uint64_t(previousGlyph)<<32)|token->GlyphIndex); if(kern!=p.Kerning.end()) { cursor+=kern->second; } }
 				int advance=p.Proportional ? token->Glyph->Advance64 : p.CellWidth*64;
+				int kern=0; if(p.Proportional && adjacent && !newRow) { auto k=p.Kerning.find((uint64_t(previousGlyph)<<32)|token->GlyphIndex); if(k!=p.Kerning.end()) { kern=k->second; } }
+				if(words) {
+					bool separator=token->Glyph->WordSeparator;
+					if(separator && (pendingWrap || (cursor+kern+advance>int64_t(p.DisplayX+p.DisplayWidth)*64 && cursor>int64_t(p.DisplayX)*64))) {
+						pendingWrap=true; previousRow=row; previousX=x; previousGlyph=UINT32_MAX; continue;
+					}
+					if(pendingWrap) { cursor=int64_t(p.DisplayX)*64; line+=p.LineHeight64; kern=0; pendingWrap=false; }
+					bool wordStart=!separator && (newRow || !adjacent || (tokenIndex>0 && tokens[tokenIndex-1]->Glyph->WordSeparator));
+					if(wordStart && cursor>int64_t(p.DisplayX)*64 && cursor+kern+_wordWidths[tokenIndex]>int64_t(p.DisplayX+p.DisplayWidth)*64) {
+						cursor=int64_t(p.DisplayX)*64; line+=p.LineHeight64; kern=0;
+					}
+				}
+				cursor+=kern;
 				if(p.UseDisplayRegion && p.WrapText && cursor+advance>int64_t(p.DisplayX+p.DisplayWidth)*64 && cursor>int64_t(p.DisplayX)*64) { cursor=int64_t(p.DisplayX)*64; line+=p.LineHeight64; }
 				const auto& g=*token->Glyph;
 				int64_t startX=cursor-int64_t(cropLeft)*64+int64_t(g.OffsetX)*64/p.Scale,startY=line-int64_t(cropTop)*64+int64_t(g.OffsetY)*64/p.Scale;
@@ -97,7 +125,7 @@ public:
 		auto tileAt=[&](size_t index) -> const MetaTextPixel& { return plane<0 ? frame.TextPixels[index] : frame.TextLayers[plane][index].Tile; };
 		auto sampleAt=[&](size_t index) { if(plane<0) { return pixels[index].BackgroundSample; } const auto& t=frame.TextLayers[plane][index]; return MetaBackgroundSample {t.X,t.Y,(uint8_t)plane,t.Tile.Valid}; };
 		const MetaTextReplacement* lastProfile=nullptr; const MetaTextGlyph* lastGlyph=nullptr;
-		uint32_t lastTile=0,lastAddress=0; uint8_t lastPalette=0,lastLayer=0; bool cached=false;
+		uint32_t lastTile=0,lastAddress=0; uint8_t lastPalette=0,lastLayer=0,lastWidth=0; bool cached=false;
 		uint32_t targetScale=outputScale;
 		// Build one visible-tile index only when a multi-tile profile is active.
 		std::unordered_map<uint64_t,size_t> cells;
@@ -106,27 +134,29 @@ public:
 		if(multi) {
 			for(uint32_t y=0;y<height;y++) { for(uint32_t x=0;x<width;x++) {
 				size_t i=(size_t(y)+cropTop)*frame.Width+x+cropLeft; const auto& t=tileAt(i); const auto& s=sampleAt(i);
-				if(t.Valid && s.Valid && t.LocalX<8 && t.LocalY<8) { cells.emplace(Position(int(x)+cropLeft-t.LocalX,int(y)+cropTop-t.LocalY),i); }
+				if(t.Valid && s.Valid && t.LocalX<t.TileWidth && t.LocalY<8) { cells.emplace(Position(int(x)+cropLeft-t.LocalX,int(y)+cropTop-t.LocalY),i); }
 			} }
 			for(size_t priority=0;priority<active.size();priority++) {
 				const auto& p=*active[priority]; if(p.Patterns.empty()) { continue; }
 				for(const auto& cell:cells) {
 					size_t index=cell.second; const auto& tile=tileAt(index); const auto& sample=sampleAt(index);
 					int sourceX=sample.X-tile.LocalX,sourceY=sample.Y-tile.LocalY;
-					if(sample.Layer!=p.Layer || (sourceX-p.CellOriginX)%p.CellWidth || (sourceY-p.CellOriginY)%p.CellHeight
+					if(tile.TileWidth!=p.SourceTileWidth || sample.Layer!=p.Layer || (sourceX-p.CellOriginX)%p.CellWidth || (sourceY-p.CellOriginY)%p.CellHeight
 						|| (p.UseRegion && (sourceX<p.X || sourceY<p.Y || int64_t(sourceX)+p.CellWidth>int64_t(p.X)+p.Width || int64_t(sourceY)+p.CellHeight>int64_t(p.Y)+p.Height))) { continue; }
 					int tx=int(index%frame.Width)-tile.LocalX,ty=int(index/frame.Width)-tile.LocalY;
 					const MetaTextReplacement::TilePattern* matched=nullptr;
 					uint32_t first=p.MatchKind ? tile.GraphicsAddress : tile.TileIndex;
+					if(first==UINT32_MAX) { continue; }
 					for(int palette:{int(tile.Palette),-1}) {
 						auto starts=p.PatternStarts.find(MetaTextReplacement::Key(first,palette)); if(starts==p.PatternStarts.end()) { continue; }
 						for(size_t id:starts->second) {
-							const auto& pattern=p.Patterns[id]; bool valid=pattern.Glyph<p.Glyphs.size() && pattern.Tiles.size()==size_t(p.CellWidth/8*p.CellHeight/8);
+							const auto& pattern=p.Patterns[id]; bool valid=pattern.Glyph<p.Glyphs.size() && pattern.Tiles.size()==size_t(p.CellWidth/p.SourceTileWidth*p.CellHeight/8);
 							for(size_t t=0;valid && t<pattern.Tiles.size();t++) {
-								int ox=int(t%(p.CellWidth/8))*8,oy=int(t/(p.CellWidth/8))*8;
+								int ox=int(t%(p.CellWidth/p.SourceTileWidth))*p.SourceTileWidth,oy=int(t/(p.CellWidth/p.SourceTileWidth))*8;
 								auto key=Position(tx+ox,ty+oy); auto part=cells.find(key); if(part==cells.end() || owners.count(key)) { valid=false; break; }
 								const auto& tt=tileAt(part->second); const auto& ss=sampleAt(part->second);
-								if(ss.Layer!=p.Layer || ss.X-tt.LocalX!=sourceX+ox || ss.Y-tt.LocalY!=sourceY+oy
+								if(tt.TileWidth!=p.SourceTileWidth || ss.Layer!=p.Layer || ss.X-tt.LocalX!=sourceX+ox || ss.Y-tt.LocalY!=sourceY+oy
+									|| (p.MatchKind ? tt.GraphicsAddress : tt.TileIndex)==UINT32_MAX
 									|| (p.MatchKind ? tt.GraphicsAddress : tt.TileIndex)!=pattern.Tiles[t] || (pattern.Palette>=0 && tt.Palette!=pattern.Palette)) { valid=false; break; }
 								for(size_t earlier=0;earlier<priority;earlier++) { if(active[earlier]->Patterns.empty() && active[earlier]->Find(tt,ss)) { valid=false; break; } }
 							}
@@ -137,7 +167,7 @@ public:
 					if(!matched) { continue; }
 					const auto* glyph=&p.Glyphs[matched->Glyph];
 					_tokens.push_back({tx,ty,sourceX,sourceY,matched->Glyph,&p,glyph,&tile}); _matches.push_back({index,&p,glyph}); targetScale=std::max(targetScale,uint32_t(p.Scale));
-					for(int oy=0;oy<p.CellHeight;oy+=8) { for(int ox=0;ox<p.CellWidth;ox+=8) { owners.emplace(Position(tx+ox,ty+oy),priority); } }
+					for(int oy=0;oy<p.CellHeight;oy+=8) { for(int ox=0;ox<p.CellWidth;ox+=p.SourceTileWidth) { owners.emplace(Position(tx+ox,ty+oy),priority); } }
 				}
 			}
 		}
@@ -147,10 +177,10 @@ public:
 			const auto& tile=tileAt(index); const auto& sample=sampleAt(index);
 			if(!tile.Valid || !sample.Valid) { continue; }
 			if(multi && owners.count(Position(int(x)+cropLeft-tile.LocalX,int(y)+cropTop-tile.LocalY))) { continue; }
-			if(hasRegion || !cached || tile.TileIndex!=lastTile || tile.GraphicsAddress!=lastAddress || tile.Palette!=lastPalette || sample.Layer!=lastLayer) {
+			if(hasRegion || !cached || tile.TileIndex!=lastTile || tile.GraphicsAddress!=lastAddress || tile.Palette!=lastPalette || tile.TileWidth!=lastWidth || sample.Layer!=lastLayer) {
 				lastProfile=nullptr; lastGlyph=nullptr;
 				for(const auto* profile:active) { if(auto glyph=profile->Find(tile,sample)) { lastProfile=profile; lastGlyph=glyph; break; } }
-				lastTile=tile.TileIndex; lastAddress=tile.GraphicsAddress; lastPalette=tile.Palette; lastLayer=sample.Layer; cached=tile.LocalX<minWidth && tile.LocalY<minHeight;
+				lastTile=tile.TileIndex; lastAddress=tile.GraphicsAddress; lastPalette=tile.Palette; lastWidth=tile.TileWidth; lastLayer=sample.Layer; cached=tile.LocalX<minWidth && tile.LocalY<minHeight;
 			}
 			if(lastGlyph && tile.LocalX<lastProfile->CellWidth && tile.LocalY<lastProfile->CellHeight) {
 				_matches.push_back({index,lastProfile,lastGlyph}); targetScale=std::max(targetScale,uint32_t(lastProfile->Scale));

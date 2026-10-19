@@ -13,7 +13,7 @@ public:
 	std::vector<MetaTextReplacement> Parse()
 	{
 		if(!_reader.IsValid() || _reader.Length()>64*1024*1024) { throw std::runtime_error("Invalid text packet"); }
-		uint32_t magic=Read(); if(magic!=0x3154584D && magic!=0x3254584D && magic!=0x3354584D && magic!=0x3454584D) { throw std::runtime_error("Invalid text packet"); }
+		uint32_t magic=Read(); if(magic!=0x3154584D && magic!=0x3254584D && magic!=0x3354584D && magic!=0x3454584D && magic!=0x3554584D && magic!=0x3654584D) { throw std::runtime_error("Invalid text packet"); }
 		uint32_t count=Read(); if(count>64) { throw std::runtime_error("Too many text profiles"); }
 		std::set<int> ids; std::vector<MetaTextReplacement> result;
 		for(uint32_t i=0;i<count;i++) {
@@ -26,16 +26,18 @@ public:
 			if(magic>=0x3254584D) { uint32_t fill=Read(); if(fill>1) { throw std::runtime_error("Invalid text fill flag"); } p.FillEnabled=fill!=0; p.FillColor=Read(); }
 			if(magic>=0x3354584D) {
 				uint32_t flags=Read(); p.Proportional=flags&1; p.UseDisplayRegion=flags&2; p.WrapText=flags&4; p.Unclipped=flags&8;
+				p.WrapWords=magic>=0x3654584D && (flags&16);
 				p.LineHeight64=int32_t(Read()); p.LetterSpacing64=int32_t(Read()); p.DisplayX=int32_t(Read()); p.DisplayY=int32_t(Read()); p.DisplayWidth=int32_t(Read()); p.DisplayHeight=int32_t(Read());
-				if(flags>15 || (p.Proportional && !p.Unclipped) || (p.UseDisplayRegion && !p.Unclipped) || p.LineHeight64<1 || p.LineHeight64>512*64 || p.LetterSpacing64< -8*64 || p.LetterSpacing64>32*64
+				if(flags>(magic>=0x3654584D ? 31u : 15u) || (p.Proportional && !p.Unclipped) || (p.UseDisplayRegion && !p.Unclipped) || p.LineHeight64<1 || p.LineHeight64>512*64 || p.LetterSpacing64< -8*64 || p.LetterSpacing64>32*64
 					|| p.DisplayX< -4096 || p.DisplayX>4096 || p.DisplayY< -4096 || p.DisplayY>4096 || p.DisplayWidth<1 || p.DisplayWidth>4096 || p.DisplayHeight<1 || p.DisplayHeight>4096) { throw std::runtime_error("Invalid text run layout"); }
 			}
 			if(p.Id<1 || !ids.insert(p.Id).second || p.Layer<0 || p.Layer>3 || p.MatchKind<0 || p.MatchKind>1 || p.Scale<1 || p.Scale>8
 				|| p.CellWidth<1 || p.CellWidth>128 || p.CellHeight<1 || p.CellHeight>128 || palette>1 || region>1 || p.InkIndex<1 || p.InkIndex>3
 				|| p.X<0 || p.X>4096 || p.Y<0 || p.Y>4096 || p.Width<1 || p.Width>4096 || p.Height<1 || p.Height>4096) { throw std::runtime_error("Invalid text profile"); }
-			if(magic==0x3454584D) {
-				p.CellOriginX=int32_t(Read()); p.CellOriginY=int32_t(Read());
-				if(p.CellWidth%8 || p.CellHeight%8 || p.CellOriginX<0 || p.CellOriginX>=p.CellWidth || p.CellOriginY<0 || p.CellOriginY>=p.CellHeight || p.CellOriginX%8 || p.CellOriginY%8
+			if(magic>=0x3454584D) {
+				if(magic>=0x3554584D) { p.SourceTileWidth=int32_t(Read()); }
+                p.CellOriginX=int32_t(Read()); p.CellOriginY=int32_t(Read());
+				if((p.SourceTileWidth!=6 && p.SourceTileWidth!=8) || p.CellWidth%p.SourceTileWidth || p.CellHeight%8 || p.CellOriginX<0 || p.CellOriginX>=p.CellWidth || p.CellOriginY<0 || p.CellOriginY>=p.CellHeight || p.CellOriginX%p.SourceTileWidth || p.CellOriginY%8
 					|| ((p.CellWidth!=8 || p.CellHeight!=8) && !p.Unclipped)) { throw std::runtime_error("Invalid source cell grid"); }
 			}
 			uint32_t conditions=Read(); if(conditions>64) { throw std::runtime_error("Too many text conditions"); }
@@ -66,8 +68,8 @@ public:
 			uint32_t mappings=Read(); if(!mappings || mappings>4096 || mappings>_reader.Remaining()/12) { throw std::runtime_error("Invalid text mappings"); }
 			std::set<std::pair<std::vector<uint32_t>,int>> patterns;
 			for(uint32_t m=0;m<mappings;m++) {
-				if(magic==0x3454584D) {
-					uint32_t cells=Read(); if(cells!=uint32_t(p.CellWidth/8*p.CellHeight/8) || cells>256 || cells>_reader.Remaining()/4) { throw std::runtime_error("Incomplete source tile pattern"); }
+				if(magic>=0x3454584D) {
+					uint32_t cells=Read(); if(cells!=uint32_t(p.CellWidth/p.SourceTileWidth*p.CellHeight/8) || cells>336 || cells>_reader.Remaining()/4) { throw std::runtime_error("Incomplete source tile pattern"); }
 					MetaTextReplacement::TilePattern pattern; for(uint32_t t=0;t<cells;t++) { pattern.Tiles.push_back(Read()); }
 					pattern.Palette=int32_t(Read()); pattern.Glyph=Read();
 					if(pattern.Palette< -1 || pattern.Palette>255 || pattern.Glyph>=glyphs || !patterns.emplace(pattern.Tiles,pattern.Palette).second) { throw std::runtime_error("Invalid source tile pattern"); }
@@ -81,6 +83,10 @@ public:
 			if(magic>=0x3354584D) {
 				uint32_t pairs=Read(); if(pairs>65536 || pairs>_reader.Remaining()/12) { throw std::runtime_error("Invalid kerning table"); }
 				for(uint32_t k=0;k<pairs;k++) { uint32_t a=Read(),b=Read(); int value=int32_t(Read()); if(a>=glyphs || b>=glyphs || value< -128*64 || value>128*64 || !p.Kerning.emplace((uint64_t(a)<<32)|b,value).second) { throw std::runtime_error("Invalid kerning pair"); } }
+			}
+			if(magic>=0x3654584D) {
+				uint32_t separators=Read(); if(separators>glyphs || separators>_reader.Remaining()/4) { throw std::runtime_error("Invalid word separators"); }
+				for(uint32_t s=0;s<separators;s++) { uint32_t id=Read(); if(id>=glyphs || p.Glyphs[id].WordSeparator) { throw std::runtime_error("Invalid word separator identity"); } p.Glyphs[id].WordSeparator=true; }
 			}
 			result.push_back(std::move(p));
 		}

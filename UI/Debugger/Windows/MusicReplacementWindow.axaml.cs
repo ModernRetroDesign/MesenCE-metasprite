@@ -10,6 +10,7 @@ namespace Mesen.Debugger.Windows;
 
 public class MusicReplacementWindow : MesenWindow
 {
+	private async void OnManageNamedConditions(object? sender,RoutedEventArgs e) => await NamedConditionWindow.OpenForCurrentGame(this);
 	private readonly MusicReplacementViewModel _model;
 	private readonly DispatcherTimer _poll;
 	public MusicReplacementWindow() { AvaloniaXamlLoader.Load(this); _model = new(); DataContext = _model; _poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) }; _poll.Tick += (_, _) => _model.RefreshPlayback(); Opened += (_, _) => _poll.Start(); Closed += (_, _) => _poll.Stop(); }

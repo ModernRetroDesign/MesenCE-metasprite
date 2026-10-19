@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Shared/Video/MetaSnesCapture.h"
+#include "Shared/Video/MetaSnesFieldCheckpoint.h"
 #include "SNES/SnesPpu.h"
 #include "SNES/SnesConsole.h"
 #include "SNES/SnesMemoryManager.h"
@@ -437,6 +438,11 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t& hClock)
 
 				if(!_skipRender) {
 					_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
+					// Clear the new drawing buffer, never the published frame that
+					// the asynchronous video decoder may still be reading in vblank.
+					if(_interlacedFrame && _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
+						memset(_currentBuffer,0,512*478*sizeof(uint16_t));
+					}
 
 					//If we're not skipping this frame, reset the high resolution/interlace flags
 					_useHighResOutput = IsDoubleWidth() || _interlacedFrame;
@@ -487,7 +493,6 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t& hClock)
 		if(_scanline == 240) {
 			if(_interlacedFrame) {
 				switch(_settings->GetSnesConfig().DeinterlaceMode) {
-					case SnesDeinterlaceMode::CurrentField: memset(_currentBuffer, 0, 512 * 478 * sizeof(uint16_t)); break;
 					case SnesDeinterlaceMode::Weave: memcpy(GetPreviousScreenBuffer(), _currentBuffer, 512 * 478 * sizeof(uint16_t)); break;
 				}
 			}
@@ -1826,13 +1831,22 @@ void SnesPpu::SendFrame()
 	_emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::PpuFrameDone);
 
 	bool isRewinding = _emu->GetRewindManager()->IsRewinding();
+	// Only woven output needs its absent parity repaired. Current Field leaves
+	// it black; Bob modes already copy each line to the following output row.
+	// Recopying by parity shifts Bob's odd-field rows at rewind checkpoints.
 	if(isRewinding && _needFullFrame) {
-		FillInterlacedFrame();
+		if(_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Weave) { FillInterlacedFrame(); }
+		else if(_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
+			// The checkpoint does not contain the output buffer. If it resumes
+			// after the normal vblank clear, the inactive rows can be from a
+			// different replay segment instead of the intended black field.
+			for(int y=0;y<239;y++) { memset(_currentBuffer+(y*2+(_oddFrame^1))*512,0,512*sizeof(uint16_t)); }
+		}
 	}
 	_needFullFrame = false;
 
 	RenderedFrame frame(_currentBuffer, width, height, _useHighResOutput ? 0.5 : 1.0, _frameCount, _console->GetControlManager()->GetPortStates());
-	bool weaveCapture = _metaFrame && _interlacedFrame && !isRewinding
+	bool weaveCapture = _metaFrame && _interlacedFrame
 		&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Weave;
 	if(weaveCapture) {
 		_metaFrame->FrameNumber = _frameCount;
@@ -1854,7 +1868,7 @@ void SnesPpu::SendFrame()
 		}
 	} else {
 		_metaInterlaceFields[0].reset(); _metaInterlaceFields[1].reset();
-		if(_metaFrame && _interlacedFrame && !isRewinding
+		if(_metaFrame && _interlacedFrame
 			&& _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::CurrentField) {
 			_metaFrame->FrameNumber = _frameCount;
 			auto output = _metaOutputFramePool.Acquire(width, height);
@@ -1863,7 +1877,7 @@ void SnesPpu::SendFrame()
 				frame.MetaSprites=output;
 			}
 		}
-		if(_metaFrame && _interlacedFrame && !isRewinding
+		if(_metaFrame && _interlacedFrame
 			&& (_settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::Bob
 				|| _settings->GetSnesConfig().DeinterlaceMode == SnesDeinterlaceMode::BobBlend)) {
 			_metaFrame->FrameNumber = _frameCount;
@@ -2658,6 +2672,96 @@ void SnesPpu::Write(uint32_t addr, uint8_t value)
 			break;
 	}
 }
+
+// Keep partially fetched/evaluated capture state with the native PPU state.
+// Container pointers are excluded; coverage lists are encoded separately.
+#define SNES_META_CHECKPOINT_FIELDS(X) \
+	X(_metaSpriteIds) X(_metaSpriteIdsCopy) X(_metaSpriteOrder) X(_metaSpriteOrderCopy) X(_metaFetchOrder) \
+	X(_metaMainIds) X(_metaSubIds) X(_metaBgMain) X(_metaBgSub) X(_metaBgMainFlags) X(_metaBgSubPriority) \
+	X(_metaBgMainLayer) X(_metaBgSubLayer) X(_metaTileSamples) X(_metaMosaicSample) X(_metaBgMainSample) X(_metaBgSubSample) \
+	X(_metaBgLayers) X(_textTiles) X(_metaFetchedSprite) X(_metaFirstObjectEvaluation) X(_metaFirstObjectCopy) X(_metaFirstObject)
+struct SnesPpu::MetaCaptureCheckpoint {
+#define DECLARE_META_CHECKPOINT(name) decltype(SnesPpu::name) name {};
+	SNES_META_CHECKPOINT_FIELDS(DECLARE_META_CHECKPOINT)
+#undef DECLARE_META_CHECKPOINT
+};
+
+vector<uint8_t> SnesPpu::CaptureReplacementRewindState()
+{
+	auto* decoder=_emu->GetVideoDecoder();
+	if(!_interlacedFrame || !_metaCaptureRequested.load() || _settings->GetSnesConfig().DeinterlaceMode!=SnesDeinterlaceMode::Weave
+		|| !decoder->HasMetaReplacements() || _emu->IsRunAheadFrame()) { return {}; }
+	decoder->WaitForAsyncFrameDecode();
+	MetaSnesFieldCheckpoint::Writer w;
+	w.Pod(uint32_t(0x31575053)); w.Pod(_frameCount); w.Pod(_scanline); w.Pod(_oddFrame); w.Pod(_interlacedFrame); w.Pod(_overscanFrame); w.Pod(_useHighResOutput); w.Pod(_skipRender);
+	w.Pod(uint8_t(_currentBuffer==_outputBuffers[0] ? 0 : 1));
+	w.Raw(_outputBuffers[0],512*478*sizeof(uint16_t)); w.Raw(_outputBuffers[1],512*478*sizeof(uint16_t));
+#define WRITE_META_CHECKPOINT(name) w.Pod(name);
+	SNES_META_CHECKPOINT_FIELDS(WRITE_META_CHECKPOINT)
+#undef WRITE_META_CHECKPOINT
+	for(const auto* list:{_metaSpriteCoverage,_metaSpriteCoverageCopy}) { for(int x=0;x<256;x++) {
+		if(list[x].size()>128) { return {}; } w.Pod((uint32_t)list[x].size()); for(const auto& entry:list[x]) { w.Pod(entry); }
+	} }
+	shared_ptr<MetaSpriteFrame> fields[3]={_metaInterlaceFields[0],_metaInterlaceFields[1],_metaFrame};
+	uint64_t revision=UINT64_MAX;
+	for(int i=0;i<3;i++) {
+		int8_t alias=-1; for(int n=0;n<i;n++) { if(fields[i] && fields[i]==fields[n]) { alias=(int8_t)n; break; } }
+		w.Pod(alias); w.Pod(uint8_t(fields[i]!=nullptr));
+		if(fields[i] && alias<0) {
+			vector<uint8_t> bytes; uint64_t fieldRevision=0;
+			if(!decoder->CaptureSnesFieldCheckpoint(*fields[i],bytes,fieldRevision) || (revision!=UINT64_MAX && revision!=fieldRevision)) { return {}; }
+			revision=fieldRevision; w.Pod(fieldRevision); w.Vector(bytes);
+		}
+	}
+	return w.Valid ? std::move(w.Bytes) : vector<uint8_t>{};
+}
+
+bool SnesPpu::RestoreReplacementRewindState(const vector<uint8_t>& bytes)
+{
+	if(!_metaCaptureRequested.load() || _settings->GetSnesConfig().DeinterlaceMode!=SnesDeinterlaceMode::Weave) { return false; }
+	MetaSnesFieldCheckpoint::Reader r(bytes); uint32_t magic=0,frame=0;
+	decltype(_scanline) scanline=0; decltype(_oddFrame) odd=false; decltype(_overscanFrame) overscan=false;
+	decltype(_interlacedFrame) interlaced=false; decltype(_useHighResOutput) hires=false; decltype(_skipRender) skipped=false; uint8_t buffer=0;
+	r.Pod(magic); r.Pod(frame); r.Pod(scanline); r.Pod(odd); r.Pod(interlaced); r.Pod(overscan); r.Pod(hires); r.Pod(skipped); r.Pod(buffer);
+	if(!r.Valid || magic!=0x31575053 || frame!=_frameCount || scanline!=_scanline || odd!=_oddFrame || !interlaced || buffer>1) { return false; }
+	vector<uint16_t> native(2*512*478); r.Raw(native.data(),native.size()*sizeof(uint16_t));
+	MetaCaptureCheckpoint state;
+#define READ_META_CHECKPOINT(name) r.Pod(state.name);
+	SNES_META_CHECKPOINT_FIELDS(READ_META_CHECKPOINT)
+#undef READ_META_CHECKPOINT
+	std::array<MetaSpriteCoverageList<MetaSpritePixel::SnesCoverageSample>,512> coverage;
+	for(auto& list:coverage) {
+		uint32_t count=0; r.Pod(count); if(!r.Valid || count>128) { return false; }
+		for(uint32_t n=0;n<count;n++) { MetaSpritePixel::SnesCoverageSample entry; r.Pod(entry);
+			if(!r.Valid || entry.Sprite<0 || entry.Sprite>=128) { return false; } list.push_back(entry);
+		}
+	}
+	shared_ptr<MetaSpriteFrame> fields[3]; uint64_t revision=UINT64_MAX;
+	for(int i=0;i<3;i++) {
+		int8_t alias=-1; uint8_t present=0; r.Pod(alias); r.Pod(present);
+		if(!r.Valid || present>1 || alias < -1 || alias>=i || (!present && alias>=0)) { return false; }
+		if(alias>=0) { if(!fields[alias]) { return false; } fields[i]=fields[alias]; }
+		else if(present) {
+			uint64_t fieldRevision=0; vector<uint8_t> payload; r.Pod(fieldRevision); r.Vector(payload,MetaSnesFieldCheckpoint::MaxBytes);
+			if(!r.Valid || (revision!=UINT64_MAX && revision!=fieldRevision)
+				|| !_emu->GetVideoDecoder()->RestoreSnesFieldCheckpoint(payload,fieldRevision,fields[i])) { return false; }
+			revision=fieldRevision;
+		}
+	}
+	if(!r.Complete()) { return false; }
+	_emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+	memcpy(_outputBuffers[0],native.data(),512*478*sizeof(uint16_t)); memcpy(_outputBuffers[1],native.data()+512*478,512*478*sizeof(uint16_t));
+	_currentBuffer=_outputBuffers[buffer];
+	// These frame-latched rendering flags are not part of the native serializer.
+	_interlacedFrame=interlaced; _overscanFrame=overscan; _useHighResOutput=hires; _skipRender=skipped;
+#define RESTORE_META_CHECKPOINT(name) memcpy(&name,&state.name,sizeof(name));
+	SNES_META_CHECKPOINT_FIELDS(RESTORE_META_CHECKPOINT)
+#undef RESTORE_META_CHECKPOINT
+	for(int x=0;x<256;x++) { _metaSpriteCoverage[x].swap(coverage[x]); _metaSpriteCoverageCopy[x].swap(coverage[x+256]); }
+	_metaInterlaceFields[0]=std::move(fields[0]); _metaInterlaceFields[1]=std::move(fields[1]); _metaFrame=std::move(fields[2]);
+	_needFullFrame=false; return true;
+}
+#undef SNES_META_CHECKPOINT_FIELDS
 
 void SnesPpu::Serialize(Serializer& s)
 {

@@ -17,7 +17,7 @@ public sealed class MetaTextGlyphSet : List<MetaTextGlyph>
 
 public static class MetaTextRuntimePacket
 {
-	public const uint Magic=0x3454584D; // MXT4: source-cell grids and full tile-pattern mappings.
+	public const uint Magic=0x3654584D; // MXT6: optional word wrapping and breakable-space glyph identities.
 	public const int MaximumBytes=64*1024*1024;
 	public static byte[] Create(MetaSpritePack pack,Func<MetaTextProfile,IReadOnlyList<MetaTextGlyph>> rasterize)
 	{
@@ -31,6 +31,7 @@ public static class MetaTextRuntimePacket
 	}
 	private static void Write(Stream stream,MetaSpritePack pack,Func<MetaTextProfile,IReadOnlyList<MetaTextGlyph>> rasterize)
 	{
+		pack.ValidateCompiledConditions();
 		var profiles=pack.TextProfiles.Where(p => p.Enabled).ToArray();
 		if(profiles.Length>64 || profiles.Select(p => p.Id).Distinct().Count()!=profiles.Length) { throw new InvalidDataException("Invalid text profile list."); }
 		int maxLayer=pack.System switch {"Nes" or "Sms" or "Pce" => 0,"Gameboy" or "Ws" => 1,"Gba" or "Snes" => 3,_ => -1};
@@ -40,6 +41,7 @@ public static class MetaTextRuntimePacket
 		foreach(var p in profiles) {
 			p.Validate();
 			if(p.NativeLayer>maxLayer) { throw new InvalidDataException("Select a hardware background layer available on this system."); }
+			if(p.SourceTileWidth==6 && pack.System!="Sms") { throw new InvalidDataException("6x8 source tiles require SMS text mode."); }
 			var glyphs=rasterize(p);
 			var expected=p.Mappings.Select(m => m.Character).Distinct().ToArray();
 			if(glyphs.Count!=expected.Length || glyphs.Select(g => g.Character).Distinct().Count()!=glyphs.Count || expected.Any(c => !glyphs.Any(g => g.Character==c))) { throw new InvalidDataException("Glyph atlas does not match the profile's characters."); }
@@ -55,10 +57,10 @@ public static class MetaTextRuntimePacket
 			bool unclipped=atlas?.Unclipped==true;
 			if(p.Proportional && !unclipped) { throw new InvalidDataException("Proportional text requires an atlas with glyph bounds and advances."); }
 			if((p.CellWidth!=8 || p.CellHeight!=8) && !unclipped) { throw new InvalidDataException("Multi-tile source cells require a text-run atlas."); }
-			writer.Write((p.Proportional ? 1 : 0)|(p.UseDisplayRegion ? 2 : 0)|(p.WrapText ? 4 : 0)|(unclipped ? 8 : 0));
+			writer.Write((p.Proportional ? 1 : 0)|(p.UseDisplayRegion ? 2 : 0)|(p.WrapText ? 4 : 0)|(unclipped ? 8 : 0)|(p.WrapWords ? 16 : 0));
 			writer.Write(atlas?.LineHeight64>0 ? atlas.LineHeight64 : p.CellHeight*64); writer.Write((int)Math.Round(p.LetterSpacing*64));
 			writer.Write(p.DisplayX); writer.Write(p.DisplayY); writer.Write(p.DisplayWidth); writer.Write(p.DisplayHeight);
-			writer.Write(p.CellOriginX); writer.Write(p.CellOriginY);
+			writer.Write(p.SourceTileWidth); writer.Write(p.CellOriginX); writer.Write(p.CellOriginY);
 			writer.Write(p.MemoryConditions.Count);
 			foreach(var condition in p.MemoryConditions) { writer.Write(condition.Address); writer.Write(condition.Value); writer.Write(condition.Mask); writer.Write((int)condition.Comparison); }
 			writer.Write(glyphs.Count);
@@ -75,6 +77,8 @@ public static class MetaTextRuntimePacket
 			foreach(var mapping in p.Mappings) { var tiles=mapping.GetTiles(); writer.Write(tiles.Length); foreach(uint tile in tiles) { writer.Write(tile); } writer.Write(mapping.Palette); writer.Write(indices[mapping.Character]); }
 			writer.Write(atlas?.Kerning.Count ?? 0);
 			if(atlas!=null) { foreach(var pair in atlas.Kerning) { writer.Write((uint)(pair.Key>>32)); writer.Write((uint)pair.Key); writer.Write(pair.Value); } }
+			var separators=glyphs.Select((g,i) => (g,i)).Where(g => MetaTextProfile.IsWordSeparator(g.g.Character)).Select(g => g.i).ToArray();
+			writer.Write(separators.Length); foreach(int separator in separators) { writer.Write(separator); }
 		}
 	}
 }

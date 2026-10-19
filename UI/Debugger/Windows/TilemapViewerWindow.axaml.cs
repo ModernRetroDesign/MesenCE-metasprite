@@ -69,6 +69,7 @@ namespace Mesen.Debugger.Windows
 			_model.Config.ShowSettingsPanel = !_model.Config.ShowSettingsPanel;
 		}
 		private async void OnReplaceMetaBackground(object? sender, RoutedEventArgs e) => await _model.BackgroundEditor.ReplaceBackgroundPng(this);
+		private async void OnManageNamedConditions(object? sender,RoutedEventArgs e) => await NamedConditionWindow.OpenForCurrentGame(this);
 		private async void OnEditTextReplacement(object? sender,RoutedEventArgs e)
 		{
 			try { await new TextReplacementWindow(_model.CreateTextReplacementEditor()).ShowDialog(this); }

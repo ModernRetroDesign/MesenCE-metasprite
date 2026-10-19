@@ -16,6 +16,7 @@ namespace Mesen.Debugger.Windows;
 
 public class TextReplacementWindow : MesenWindow
 {
+	private async void OnManageNamedConditions(object? sender,RoutedEventArgs e) => await NamedConditionWindow.OpenForCurrentGame(this);
 	private readonly TextReplacementViewModel _model;
 	private readonly DispatcherTimer _snapshotTimer = new() { Interval=TimeSpan.FromMilliseconds(100) };
 	private readonly DispatcherTimer _previewTimer = new() { Interval=TimeSpan.FromMilliseconds(180) };

@@ -18,11 +18,14 @@ class SnesPpu : public ISerializable
 {
 public:
 	void SetMetaSpriteCapture(bool enabled) { _metaCaptureRequested.store(enabled); }
+	std::vector<uint8_t> CaptureReplacementRewindState();
+	bool RestoreReplacementRewindState(const std::vector<uint8_t>& bytes);
 	constexpr static uint32_t SpriteRamSize = 544;
 	constexpr static uint32_t CgRamSize = 512;
 	constexpr static uint32_t VideoRamSize = 0x10000;
 
 private:
+	struct MetaCaptureCheckpoint;
 	std::atomic<bool> _metaCaptureRequested {false};
 	std::shared_ptr<MetaSpriteFrame> _metaFrame;
 	MetaSpriteFramePool _metaFramePool;

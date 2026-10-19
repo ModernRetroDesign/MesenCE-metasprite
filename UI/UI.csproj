@@ -3,6 +3,8 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DependencyArchiveDirectory>$(BaseIntermediateOutputPath)NativeDependencies/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/$(OptimizeUi)/</DependencyArchiveDirectory>
+    <DependencyArchive>$(DependencyArchiveDirectory)Dependencies.zip</DependencyArchive>
     <Nullable>enable</Nullable>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <AssemblyName>Mesen</AssemblyName>
@@ -649,7 +651,7 @@
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\NtscSafeArea.lua" />
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\NesPianoRoll.lua" />
     <EmbeddedResource Include="Debugger\Utilities\LuaScripts\ReverseMode.lua" />
-    <EmbeddedResource Include="Dependencies.zip" />
+	<EmbeddedResource Include="$(DependencyArchive)" LogicalName="Mesen.Dependencies.zip" />
     <EmbeddedResource Include="Localization\resources.en.xml" WithCulture="false" Type="Non-Resx" />
     <EmbeddedResource Include="Utilities\DipSwitchDefinitions.xml" />
   </ItemGroup>
@@ -678,7 +680,11 @@
 		<NugetDependencyFiles Include="$(OutDir)libSkiaSharp.$(DllExtension)" />
 	</ItemGroup>
 
-	<Target Name="ZipDependencies" BeforeTargets="PreBuildEvent" AfterTargets="Restore" Inputs="@(DependencyFiles);@(NugetDependencyFiles);$(OutDir)NugetTimestamp.txt" Outputs="$(ProjectDir)Dependencies.zip">
+	<Target Name="ValidateOptimizedNativeCore" BeforeTargets="ZipDependencies;PrepareResources" Condition="'$(OptimizeUi)'=='true'">
+		<Error Condition="!Exists('$(OutDir)MesenCore.$(DllExtension)')" Text="The optimized UI requires the built native core at $(OutDir)MesenCore.$(DllExtension). Build the native core before packaging the UI." />
+	</Target>
+	<Target Name="ZipDependencies" BeforeTargets="PrepareResources" AfterTargets="Restore" Inputs="@(DependencyFiles);@(NugetDependencyFiles);$(OutDir)NugetTimestamp.txt" Outputs="$(DependencyArchive)">
+		<MakeDir Directories="$(DependencyArchiveDirectory)" />
 		<RemoveDir Directories="$(OutDir)Dependencies" />
 		<Copy SourceFiles="@(DependencyFiles)" DestinationFolder="$(OutDir)Dependencies/%(RecursiveDir)" />
 
@@ -686,11 +692,11 @@
 		<Touch Files="$(OutDir)NugetTimestamp.txt" AlwaysCreate="True" Condition="'$(MSBuildLastTaskResult)' == 'true'" />
 
 		<Copy Condition="'$(RuntimeIdentifier)'=='osx-x64' Or '$(RuntimeIdentifier)'=='osx-arm64'" SourceFiles="./Assets/MesenIcon.icns" DestinationFolder="$(OutDir)" />
-		<ZipDirectory SourceDirectory="$(OutDir)Dependencies" DestinationFile="$(ProjectDir)Dependencies.zip" Overwrite="true" />
+		<ZipDirectory SourceDirectory="$(OutDir)Dependencies" DestinationFile="$(DependencyArchive)" Overwrite="true" />
 	</Target>
 
 	<Target Name="CleanDependencies" AfterTargets="Clean">
 		<RemoveDir Directories="$(OutDir)Dependencies" />
-		<Delete Files="$(ProjectDir)Dependencies.zip" />
+		<Delete Files="$(DependencyArchive)" />
 	</Target>
 </Project>

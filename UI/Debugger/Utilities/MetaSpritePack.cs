@@ -21,13 +21,48 @@ public sealed class MetaSpritePack
 	public List<MetaTextProfile> TextProfiles { get; set; } = new();
 	public MetaSavedCamera? SavedCamera { get; set; }
 
-	public string GetSpriteDefinitionsSnapshot() => JsonSerializer.Serialize(new MetaSpritePack {
+	public string GetSpriteDefinitionsSnapshot() => DefinitionSnapshot(new MetaSpritePack {
 		Groups = Groups, NextGroupId = NextGroupId
-	}, MetaSpriteSerializerContext.Default.MetaSpritePack);
-	public string GetBackgroundDefinitionsSnapshot() => JsonSerializer.Serialize(new MetaSpritePack {
+	});
+	public string GetBackgroundDefinitionsSnapshot() => DefinitionSnapshot(new MetaSpritePack {
 		BackgroundLayers = BackgroundLayers, NextBackgroundId = NextBackgroundId, SavedCamera = SavedCamera
-	}, MetaSpriteSerializerContext.Default.MetaSpritePack);
-	public string GetTextDefinitionsSnapshot() => JsonSerializer.Serialize(new MetaSpritePack {TextProfiles=TextProfiles},MetaSpriteSerializerContext.Default.MetaSpritePack);
+	});
+	public string GetTextDefinitionsSnapshot() => DefinitionSnapshot(new MetaSpritePack {TextProfiles=TextProfiles});
+	private static string DefinitionSnapshot(MetaSpritePack source)
+	{
+		string serialized=JsonSerializer.Serialize(source,MetaSpriteSerializerContext.Default.MetaSpritePack);
+		if(!source.ConditionOwners().Any(owner=>owner.MemoryConditionExpression!=null)) { return serialized; }
+		var clone=JsonSerializer.Deserialize(serialized,MetaSpriteSerializerContext.Default.MetaSpritePack)!;
+		// Resolved numbers are a cache. Updating a library must not look like an
+		// unrelated editor changed this group's actual reference expression.
+		foreach(var owner in clone.ConditionOwners()) { if(owner.MemoryConditionExpression!=null) { owner.MemoryConditions=new(); } }
+		return JsonSerializer.Serialize(clone,MetaSpriteSerializerContext.Default.MetaSpritePack);
+	}
+	public IEnumerable<IMetaMemoryConditionOwner> ConditionOwners()
+	{
+		if(Groups==null || BackgroundLayers==null || TextProfiles==null) { throw new InvalidDataException("Invalid replacement definition lists."); }
+		foreach(var group in Groups) {
+			if(group==null || group.AlternateArtwork==null || group.AlternateArtwork.Any(a=>a==null)) { throw new InvalidDataException("Invalid group or alternate definitions."); }
+			yield return group; foreach(var alternate in group.AlternateArtwork) { yield return alternate; }
+		}
+		foreach(var layer in BackgroundLayers) {
+			if(layer==null) { throw new InvalidDataException("Invalid background definitions."); } yield return layer;
+			if(layer.WidescreenPosition!=null) { yield return layer.WidescreenPosition.LeftCondition; yield return layer.WidescreenPosition.RightCondition; }
+		}
+		foreach(var text in TextProfiles) { if(text==null) { throw new InvalidDataException("Invalid text definitions."); } yield return text; }
+	}
+	public void ResolveNamedConditions(string directory)
+	{
+		var owners=ConditionOwners().Where(o=>o.MemoryConditionExpression!=null).ToArray();
+		if(owners.Length==0) { return; }
+		foreach(var owner in owners) { owner.NamedConditionsResolved=false; }
+		var library=owners.Any(o=>MetaNamedConditionBindings.UsesNames(o.MemoryConditionExpression))
+			? MetaNamedConditionLibrary.Load(Path.Combine(directory,MetaNamedConditionLibrary.FileName),RomHash,System) : null;
+		var compiled=owners.Select(owner=>(Owner:owner,Conditions:MetaMemoryConditionText.Parse(owner.MemoryConditionExpression!,library))).ToArray();
+		if(compiled.Any(item=>item.Owner is MetaBoundaryCondition && item.Conditions.Count>8)) { throw new InvalidDataException("Use at most eight boundary conditions per edge."); }
+		foreach(var item in compiled) { item.Owner.MemoryConditions=item.Conditions; item.Owner.NamedConditionsResolved=true; }
+	}
+	public void ValidateCompiledConditions() { foreach(var owner in ConditionOwners()) { MetaNamedConditionBindings.ValidateCompiled(owner); } }
 
 	public int AlignPoseOrigins(MetaSpriteGroup source)
 	{
@@ -61,22 +96,23 @@ public sealed class MetaSpritePack
 
 	public void Save(string path)
 	{
+		ResolveNamedConditions(Path.GetDirectoryName(Path.GetFullPath(path))!);
 		Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
 		string temporary = path + ".tmp";
 		File.WriteAllText(temporary, JsonSerializer.Serialize(this, MetaSpriteSerializerContext.Default.MetaSpritePack));
 		File.Move(temporary, path, true);
 	}
 
-	public static MetaSpritePack Load(string path, string romHash, string system)
+	public static MetaSpritePack Load(string path, string romHash, string system, bool resolveNamedConditions = true)
 	{
 		if(!File.Exists(path)) {
 			return new() { RomHash = romHash, System = system };
 		}
 		MetaSpritePack pack = JsonSerializer.Deserialize(File.ReadAllText(path), MetaSpriteSerializerContext.Default.MetaSpritePack)
 			?? throw new InvalidDataException("Empty metasprite pack.");
-		if(pack.Version != 1 || pack.RomHash != romHash || pack.System != system) {
-			throw new InvalidDataException("Metasprite pack version, ROM, or system does not match.");
-		}
+		if(pack.Version != 1) { throw new InvalidDataException($"Metasprite pack version {pack.Version} is not supported (expected version 1)."); }
+		if(pack.RomHash != romHash) { throw new InvalidDataException("The metasprite pack ROM hash does not match the loaded ROM. Check that this pack belongs to the same ROM revision."); }
+		if(pack.System != system) { throw new InvalidDataException($"The metasprite pack system is '{pack.System}', but the loaded system is '{system}'."); }
 		if(pack.Groups == null || pack.Groups.Any(g => g == null || g.Id < 1 || g.Name == null || g.PoseName == null || g.PoseFamilyId < 0 || g.ReplacementPath == null
 			|| g.Width < 1 || g.Height < 1 || g.Width > 2048 || g.Height > 2048 || g.ReplacementScale < 1 || g.ReplacementScale > 10
 			|| g.Members == null || g.Members.Count == 0 || g.Members.Any(m => m == null || m.Width < 1 || m.Height < 1
@@ -90,7 +126,8 @@ public sealed class MetaSpritePack
 			|| pack.BackgroundLayers.Select(layer => layer.Id).Distinct().Count() != pack.BackgroundLayers.Count) {
 			throw new InvalidDataException("Invalid background layer definitions.");
 		}
-		foreach(var layer in pack.BackgroundLayers) { layer.Validate(); }
+		if(resolveNamedConditions) { pack.ResolveNamedConditions(Path.GetDirectoryName(Path.GetFullPath(path))!); }
+		foreach(var layer in pack.BackgroundLayers) { layer.Validate(resolveNamedConditions); }
 		pack.ValidateSavedCamera();
 		if(pack.TextProfiles==null || pack.TextProfiles.Count>64 || pack.TextProfiles.Any(p => p==null)
 			|| pack.TextProfiles.Select(p => p.Id).Distinct().Count()!=pack.TextProfiles.Count) { throw new InvalidDataException("Invalid text replacement profiles."); }
@@ -144,6 +181,15 @@ public sealed class MetaSlideRamSpeed : INotifyPropertyChanged
 	}
 }
 
+internal sealed class MetaBoundaryCondition : IMetaMemoryConditionOwner
+{
+	private string _source="";
+	public string Source { get=>_source; set { _source=value; NamedConditionsResolved=false; } }
+	public List<MetaMemoryCondition> MemoryConditions { get; set; }=new();
+	public string? MemoryConditionExpression { get=>MetaNamedConditionBindings.SavedExpression(Source); set=>Source=value ?? MetaMemoryConditionText.Format(MetaNamedConditionBindings.UsesNames(Source) ? MemoryConditions : MetaMemoryConditionText.Parse(Source)); }
+	public bool NamedConditionsResolved { get; set; }
+}
+
 public sealed class MetaWidescreenPosition : INotifyPropertyChanged
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
@@ -155,21 +201,30 @@ public sealed class MetaWidescreenPosition : INotifyPropertyChanged
 	public MetaSlideRamSpeed RamSpeed { get; set; } = new();
 	private bool _useRamFlags;
 	public bool UseRamFlags { get => _useRamFlags; set { _useRamFlags = value; PropertyChanged?.Invoke(this, new(nameof(UseRamFlags))); } }
-	public string LeftFlags { get; set; } = "";
-	public string RightFlags { get; set; } = "";
+	[JsonIgnore] internal MetaBoundaryCondition LeftCondition { get; }=new();
+	[JsonIgnore] internal MetaBoundaryCondition RightCondition { get; }=new();
+	public string LeftFlags { get=>LeftCondition.Source; set { LeftCondition.Source=value; PropertyChanged?.Invoke(this,new(nameof(LeftFlags))); } }
+	public string RightFlags { get=>RightCondition.Source; set { RightCondition.Source=value; PropertyChanged?.Invoke(this,new(nameof(RightFlags))); } }
 	public List<MetaMemoryCondition> ParseFlags(string text) {
-		var result = MetaMemoryConditionText.Parse(text ?? "");
+		List<MetaMemoryCondition> result;
+		if(MetaNamedConditionBindings.UsesNames(text)) {
+			var binding=text==LeftFlags ? LeftCondition : text==RightFlags ? RightCondition : throw new InvalidDataException("Resolve the saved boundary expression before using it.");
+			MetaNamedConditionBindings.ValidateCompiled(binding); result=binding.MemoryConditions;
+		} else { result=MetaMemoryConditionText.Parse(text ?? ""); }
 		if(result.Count > 8) { throw new InvalidDataException("Use at most eight boundary conditions per edge."); }
 		return result;
 	}
-	public void Validate() {
+	public void Validate(bool validateNamedConditions=true) {
 		if(Position < 0 || Position > 3 || CameraMin < -16777216 || CameraMin > 16777216 || CameraMax < -16777216 || CameraMax > 16777216 || !double.IsFinite(SlideSpeed) || SlideSpeed < 0 || SlideSpeed > 64 || ReleaseDelay > 600) { throw new InvalidDataException("Invalid PNG gameplay positioning settings."); }
 		if(RamSpeed == null) { throw new InvalidDataException("Missing player speed settings."); } RamSpeed.Validate();
-		if(UseRamFlags) { var left = ParseFlags(LeftFlags); var right = ParseFlags(RightFlags); if(left.Count + right.Count == 0) { throw new InvalidDataException("Enter a left or right boundary condition for this PNG."); } }
+		if(UseRamFlags) {
+			foreach(string text in new[]{LeftFlags,RightFlags}) { if(validateNamedConditions || !MetaNamedConditionBindings.UsesNames(text)) { ParseFlags(text); } }
+			if(string.IsNullOrWhiteSpace(LeftFlags) && string.IsNullOrWhiteSpace(RightFlags)) { throw new InvalidDataException("Enter a left or right boundary condition for this PNG."); }
+		}
 	}
 }
 
-public sealed class MetaBackgroundLayer : INotifyPropertyChanged
+public sealed class MetaBackgroundLayer : INotifyPropertyChanged, IMetaMemoryConditionOwner
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
 	private int _artworkScale = 1, _x, _y;
@@ -223,9 +278,13 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 	public bool WrapY { get; set; }
 	public bool Enabled { get; set; }
 	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	private string? _memoryConditionExpression;
+	[JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+	public string? MemoryConditionExpression { get=>_memoryConditionExpression; set { _memoryConditionExpression=value; NamedConditionsResolved=false; } }
+	[JsonIgnore] public bool NamedConditionsResolved { get; set; }
 	public override string ToString() => $"Background {Id:D3}" + (Name.Length > 0 ? $" — {Name}" : "");
 
-	public void Validate()
+	public void Validate(bool validateNamedConditions=true)
 	{
 		if(Id < 1 || Name == null || ArtworkPath == null || NativeLayer < 0 || NativeLayer > 7) {
 			throw new InvalidDataException("Invalid background layer identity.");
@@ -235,7 +294,7 @@ public sealed class MetaBackgroundLayer : INotifyPropertyChanged
 		if(CompositionPosition < 0 || CompositionPosition > 6 || GbaPriority < 0 || GbaPriority > 3 || SnesPriority < 1 || SnesPriority > 15) { throw new InvalidDataException("Invalid PNG composition position or hardware priority."); }
 		MetaSpritePlacement.ValidateCanvas(ArtworkWidth, ArtworkHeight, ArtworkScale);
 		MetaMemoryCondition.ValidateAll(MemoryConditions);
-		if(UseWidescreenPosition) { if(WidescreenPosition == null) { throw new InvalidDataException("Missing PNG gameplay positioning settings."); } WidescreenPosition.Validate(); }
+		if(UseWidescreenPosition) { if(WidescreenPosition == null) { throw new InvalidDataException("Missing PNG gameplay positioning settings."); } WidescreenPosition.Validate(validateNamedConditions); }
 		ValidateScrollSpeed(ScrollSpeedX); ValidateScrollSpeed(ScrollSpeedY);
 		if(CameraX == null || CameraY == null) { throw new InvalidDataException("Missing CPU camera axes."); }
 		if(!UseSavedCamera) { CameraX.Validate(); CameraY.Validate(); }
@@ -346,6 +405,7 @@ public static class MetaBackgroundRuntimePacket
 		Func<MetaPngAnimationFrame,int,(int Width,int Height,uint[] Pixels)>? loadFrame, bool sharedFrames)
 	{
 		pack.ValidateSavedCamera();
+		pack.ValidateCompiledConditions();
 		using BinaryWriter writer = new(stream,System.Text.Encoding.UTF8,true);
 		var resources=sharedFrames ? new MetaPngPacketResources(stream) : null;
 		// Keep older conditionless definitions editable, but never activate them.
@@ -426,7 +486,7 @@ public static class MetaBackgroundRuntimePacket
 	}
 }
 
-public sealed class MetaSpriteGroup : INotifyPropertyChanged
+public sealed class MetaSpriteGroup : INotifyPropertyChanged, IMetaMemoryConditionOwner
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
 	private string _name = "";
@@ -453,6 +513,10 @@ public sealed class MetaSpriteGroup : INotifyPropertyChanged
 	public MetaPngAnimation Animation { get; set; } = new();
 	public List<MetaSpriteMember> Members { get; set; } = new();
 	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	private string? _memoryConditionExpression;
+	[JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+	public string? MemoryConditionExpression { get=>_memoryConditionExpression; set { _memoryConditionExpression=value; NamedConditionsResolved=false; } }
+	[JsonIgnore] public bool NamedConditionsResolved { get; set; }
 	public List<MetaAlternateArtwork> AlternateArtwork { get; set; } = new();
 	[JsonIgnore]
 	public string DisplayName => $"Meta {Id:D3}" + (Name.Length > 0 ? $" — {Name}" : "") + (PoseName.Length > 0 ? $" ({PoseName})" : "");
@@ -520,11 +584,16 @@ public sealed class MetaMemoryCondition
 
 public static class MetaMemoryConditionText
 {
-	public static List<MetaMemoryCondition> Parse(string text)
+	public static List<MetaMemoryCondition> Parse(string text, MetaNamedConditionLibrary? library = null)
 	{
 		List<MetaMemoryCondition> result = new();
 		foreach(string line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)) {
 			if(string.IsNullOrWhiteSpace(line)) { continue; }
+			if(result.Count>=64) { throw new InvalidDataException("Use at most 64 memory conditions."); }
+			if(line.TrimStart().StartsWith('[')) {
+				if(library==null) { throw new InvalidDataException("Load the game's named-condition library before resolving a [Name] reference."); }
+				result.Add(library.ResolveExpression(line)); continue;
+			}
 			var match = System.Text.RegularExpressions.Regex.Match(line, @"^\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+)\s*(==|!=|>=|<=|>|<|=)\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+)(?:\s*/\s*(\$?[0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+))?\s*$");
 			if(!match.Success) { throw new InvalidDataException("Use one hexadecimal ADDRESS OP VALUE / MASK condition per line; OP is ==, !=, >, <, >= or <=."); }
 			static uint Hex(string value) {
@@ -553,7 +622,7 @@ public static class MetaMemoryConditionText
 	};
 }
 
-public sealed class MetaAlternateArtwork : INotifyPropertyChanged
+public sealed class MetaAlternateArtwork : INotifyPropertyChanged, IMetaMemoryConditionOwner
 {
 	public event PropertyChangedEventHandler? PropertyChanged;
 	private int _scale = 1, _originX, _originY;
@@ -566,6 +635,10 @@ public sealed class MetaAlternateArtwork : INotifyPropertyChanged
 	public int OriginX { get => _originX; set { if(_originX == value) { return; } _originX = value; PropertyChanged?.Invoke(this, new(nameof(OriginX))); } }
 	public int OriginY { get => _originY; set { if(_originY == value) { return; } _originY = value; PropertyChanged?.Invoke(this, new(nameof(OriginY))); } }
 	public List<MetaMemoryCondition> MemoryConditions { get; set; } = new();
+	private string? _memoryConditionExpression;
+	[JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+	public string? MemoryConditionExpression { get=>_memoryConditionExpression; set { _memoryConditionExpression=value; NamedConditionsResolved=false; } }
+	[JsonIgnore] public bool NamedConditionsResolved { get; set; }
 	public void Validate()
 	{
 		if(string.IsNullOrWhiteSpace(Path) || Scale < 1 || Scale > 10 || MemoryConditions == null) { throw new InvalidDataException("Alternate artwork requires a PNG, scale, and a memory condition list."); }
@@ -699,6 +772,7 @@ public static class MetaSpriteRuntimePacket
 		Func<MetaAlternateArtwork, (int Width, int Height, uint[] Pixels)>? loadAlternate,
 		Func<MetaPngAnimationFrame, int, (int Width, int Height, uint[] Pixels)>? loadFrame, bool sharedFrames)
 	{
+		pack.ValidateCompiledConditions();
 		using BinaryWriter writer = new(stream,System.Text.Encoding.UTF8,true);
 		var resources=sharedFrames ? new MetaPngPacketResources(stream) : null;
 		var groups = pack.Groups.Where(g => g.Enabled).ToList();

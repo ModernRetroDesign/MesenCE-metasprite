@@ -1,0 +1,64 @@
+# Named RAM conditions
+
+Status: implemented and verified in Debug and optimized Release on 2026-10-18. This completes the named-condition feature, not the overall replacement goal or its remaining system/rendering work.
+
+The user promoted this feature from deferred plans on 2026-10-18. The goal is a Memory Viewer right-click action that saves a selected CPU address as a named condition, plus reusable bracket references throughout the replacement condition editors.
+
+The shared foundation is implemented and tested:
+
+- `MetaNamedConditionLibrary` stores a versioned `conditions.json` library with ROM hash, CPU system and named entries. It is intended to live beside the game's `groups.json` so graphics, text and audio editors can share one library.
+- Entries contain a name, explicit CPU memory domain, address and optional comparison/value/mask defaults. Multiple names may share an address. Names are unique without regard to case.
+- `[DialogBoxOpen]` can supply an entire comparison. `[LocationName] == $04 / $FF` supplies local fields for an address alias. Explicit fields override saved defaults without modifying the preset; omitted fields inherit them. A missing value is an error. All six operators and legacy numeric equality syntax remain supported.
+- Numeric and named lines can be mixed, with at most 64 conditions. Resolution produces the existing numeric condition objects and performs no RAM reads. Native condition capture and packet formats are unchanged.
+- Saves use an atomic replacement and an exclusive edit lock with an expected-content check. A stale editor cannot silently overwrite newer definitions; failed replacement preserves the original file and cleans up its temporary file.
+- The initial library supports the main mapped CPU address space for NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. Wrong-ROM/system libraries, out-of-width addresses and physical/PPU domains are rejected. Physical memory selections will need explicit CPU translation or a clear unsupported-state message in the authoring action.
+
+`Tests/MetaSprites/NamedConditionTests.cs` covers preset/alias resolution, shared addresses, independent overrides, all operators, malformed/missing references, CPU/domain identity, JSON persistence, stale saves and failed atomic replacement. The managed regression suite and Debug application build pass. Logs are `Tests/MetaSprites/obj/named-conditions-core.log` and `build-named-conditions-ui-debug.log`.
+
+Implementation checklist (completed by the progress and Release checks below):
+
+1. Retain reference expressions alongside compiled conditions in group, alternate, background and text definitions. Resolve against the current library on load/apply; unresolved references must never fall back to cached numeric values.
+2. Wire existing condition editors to the resolver, preserve expressions on reload, and show name selection and a resolved preview. Include boundary-condition fields where applicable.
+3. Add the Memory Viewer action and dialog, prefill the selected address/current byte, allow complete presets or address-only aliases, and support multiple saved names for an address.
+4. Implement library management and safe rename/deletion/reference handling, stale-game/editor protection and activation refresh.
+5. Connect music/sound condition gates to the same library while preserving write-event triggering and validating the selected CPU/context domain.
+6. Verify actual authoring, persistence, startup/apply, watched-address bounds and error handling across all supported systems. Publish an updated Release only after the authoring workflow is connected and verified.
+
+## Authoring progress
+
+Additional entry points: **Debug > Named RAM Conditions…** opens the current game's library without a memory selection. **Manage conditions…** buttons beside group, alternate, background and text conditions open the same editor. Existing entries are selected on open; an empty library requires an address to be entered. The Memory Viewer right-click action remains available and continues prefilling the selected mapped address and byte.
+
+Steps 1 and 3 are implemented in Debug. Group, alternate, background and text condition fields accept and retain bracket expressions. Pack save/load and runtime apply re-resolve them against the current library. Resolution is transactional, missing references fail closed, and unresolved caches cannot enter native packets. Semantic edit snapshots exclude compiled named values so library changes do not cause false concurrent-edit conflicts.
+
+The Memory Viewer has a `Save named RAM condition...` action and an editor with new/save/remove/reload, CPU address, optional value, operator, mask and a resolved preview. Physical selections must map explicitly to the main CPU address space; unsupported PPU, secondary-CPU and unmapped selections are disabled. Referenced presets cannot be renamed or removed; edits cannot invalidate existing expressions. Stale-library saves and changed-ROM sessions are rejected. Cursor positions outside the selected domain are rejected before translation or byte capture.
+
+The Debug UI and workflow harness build with zero warnings/errors. The library/pack suite verifies retained references, live re-resolution, stable edit snapshots, byte-identical numeric sprite/background/text packets and fail-closed caches. Actual authoring window/model and existing activation workflows pass for NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan, including alias overrides, referenced rename/delete guards and stale/game-change rejection. Evidence: `Tests/MetaSprites/obj/named-condition-bindings.log`, `build-named-authoring-ui.log`, `build-named-authoring-tests.log` and `Tests/ViewerLifecycle/named-authoring-<system>.log`.
+
+Music and sound rules now accept bracket references in main CPU write triggers and RAM gates, retaining their original strings in music.json. Runtime startup and editor save/apply load the graphics/text condition library beside groups.json, including the PcEngine-to-Pce system identity mapping. Main CPU aliases are rejected in SPC and I/O-source fields; numeric alternate-source rules remain supported. Audio context changes remain gates on write events, and native packet formats are unchanged. Library management checks saved audio references, including disabled rules, before deleting/renaming a preset or invalidating its defaults. Preset commits refresh applied audio definitions when that pack uses names. Music and effect tabs also have Manage conditions buttons.
+
+The seven-system managed audio binding checks pass for persisted strings, byte-identical numeric packets, missing/wrong libraries, unknown names and CPU/SPC/I/O separation (`Tests/MetaSprites/obj/named-condition-audio.log`). The native audio/editor suite passes across all systems, including the shared-library save/apply/reload path, audio-only reference protection and preset edits (`Tests/ViewerLifecycle/named-audio-workflow.log`). Debug UI and harness builds pass without warnings.
+
+Camera boundary fields now accept bracket expressions, including local overrides and mixed numeric/named lines. Existing LeftFlags/RightFlags strings remain the saved format; compiled boundary conditions are transient and never replace those strings. Save/load/apply resolve both edges with the shared library, and source edits invalidate compiled caches. Missing names and more than eight conditions per edge are rejected. Native packets remain byte-identical to equivalent numeric boundaries. Library rename/delete/default validation includes boundary references, including currently disabled boundaries. The boundary section also has a Manage conditions button.
+
+Verified: the managed regression suite covers boundary persistence, library value updates, missing names, stale caches, eight-condition limits, raw management loads and numeric packet equivalence (`Tests/MetaSprites/obj/named-condition-boundaries.log`). Actual background save/apply and boundary-only rename/delete protection pass in NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan workflows (`Tests/ViewerLifecycle/named-boundaries-<system>.log`). Debug UI/harness builds pass with zero warnings/errors (`build-named-boundaries-ui.log`, `build-named-boundaries-tests.log`).
+
+Memory Viewer mapping checks now pass for NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan. They construct the actual window/control, preserve a direct CPU RAM selection, translate a physical RAM selection and round-trip it to the same physical byte, and reject multi-byte ranges, PPU/secondary domains and negative/out-of-range cursors. Synthetic unsupported-domain/range injections detach normal selection-to-label bindings so invalid addresses cannot reach unrelated native label lookup before the action guard is tested. Existing full authoring/background/activation workflows also pass in those runs. Evidence: `Tests/ViewerLifecycle/named-memory-<system>.log`, `build-named-memory-ui.log`, `build-named-memory-tests.log` (zero warnings/errors).
+
+Shared pickers and resolved previews are now connected beside group, alternate, background, left/right boundary, text, music and sound trigger/context fields. The picker lists saved names, adds a bracket reference and displays resolved numeric checks without reading RAM or applying edits. Address-only aliases insert an incomplete comparison for the user to supply the value; they never silently choose zero. Refresh names and opening the list re-read the library. Insertion rechecks the current game and library, rejects a removed selection instead of inserting another name, enforces each field's 1/8/64-condition bound and disables named insertion for SPC/I/O sources. Existing text boxes and Manage conditions buttons remain available. Boundary source properties now notify both the text box and picker when edited.
+
+Picker workflow checks pass across NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan, covering two-way field insertion, typed overrides, numeric previews, alias value entry, library updates, removed names, alternate domains, field limits, stale-game guards and the 220-pixel Sprite Viewer layout (`Tests/ViewerLifecycle/named-picker-<system>.log`). Audio editor/native playback and minimum-width layout regressions pass (`named-picker-audio.log`); its rules screenshot was inspected. Standalone text editor tests pass (`named-picker-text.log`), including a no-ROM regression: the picker now checks the loaded CPU list before requesting a ROM hash. The loaded-game NES workflow also passes after this guard fix. Debug UI/harness builds have zero warnings/errors (`build-named-picker-ui.log`, `build-named-picker-tests.log`). The shared pack suite passes after the boundary notification change (`Tests/MetaSprites/obj/named-condition-boundaries.log`).
+
+## Optimized Release verification
+
+The clean native Release rebuild, optimized UI build and Release workflow harness build pass with zero warnings/errors. The harness can now select its UI build with `-p:MesenBuildConfiguration=Release` (default remains Debug). `--verify-optimized-ui bin/win-x64/Release/Mesen.dll` proves the loaded assembly matches the built Release file by SHA-256 and has JIT optimization enabled. The extraction check proves the embedded core exactly matches the rebuilt adjacent core and replaces stale/missing home cores and a stale portable adjacent copy. Optimized packaging now rejects a missing built core instead of silently reusing a previous dependency archive; the negative build check passes.
+
+Actual optimized Release workflows pass for NES, GB/GBC, GBA, PCE, SMS, SNES and WonderSwan, including named authoring, picker behavior, mapped-memory selection, boundary reference protection, save/reload/native apply and named group/background resolution during GameLoaded without advancing emulation. Optimized audio, standalone text (including no-ROM picker safety) and widescreen-profile regressions also pass. The final executable is `bin/win-x64/Release/Mesen.exe`.
+
+Evidence: `build-named-native-release-clean.log`, `build-named-conditions-release.log`, `build-named-release-tests.log`, `Tests/ViewerLifecycle/named-release-assembly.log`, `named-release-dependencies.log`, `named-release-<system>.log`, `named-release-music-replacement.log`, `named-release-text-replacement.log`, `named-release-widescreen-profile.log` and `Tests/MetaSprites/obj/named-release-missing-core.log`.
+
+Final Release SHA-256 identities:
+
+- Mesen.dll: `54C211D8A773B58D50E799C5912319492F1BE6D045D110290C9035FD74A17E2E`.
+- MesenCore.dll: `9D907A3F2F6D2112E2444DA684F532F3F6571D1CD69283F4E6CF0A5FB98EFD63`.
+
+Named RAM conditions are complete for the supported main CPU domains. The overall replacement goal remains active with its separately documented system/rendering work. Additional CPU domains would require explicit domain-specific authoring and resolution rather than reinterpreting these main-CPU presets.

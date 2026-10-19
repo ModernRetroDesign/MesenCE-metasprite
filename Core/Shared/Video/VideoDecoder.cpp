@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Utilities/Serializer.h"
 #include "Shared/Video/VideoDecoder.h"
+#include "Shared/Video/MetaSnesFieldCheckpoint.h"
 #include "Shared/Video/VideoRenderer.h"
 #include "Shared/Video/BaseVideoFilter.h"
 #include "Shared/NotificationManager.h"
@@ -114,7 +115,18 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	auto previewLock = _textPreviewLock.AcquireSafe();
 	_textPreviewSource = nullptr;
 	UpdateVideoFilter();
-	if(_resetBlendHistory.exchange(false)) { _videoFilter->ResetFrameBlendHistory(); }
+	uint64_t replacementRevision=_replacementRevision.load();
+	{
+		auto lock=_rewindBlendLock.AcquireSafe();
+		if(_resetBlendHistory.exchange(false)) { _videoFilter->ResetFrameBlendHistory(); }
+		if(!_pendingRewindBlendHistory.empty()) {
+			auto history=std::move(_pendingRewindBlendHistory); _pendingRewindBlendHistory.clear();
+			if(history.size()>3 && history[0]==(uint32_t)_videoFilterType
+				&& (uint64_t(history[1])|(uint64_t(history[2])<<32))==replacementRevision) {
+				history.erase(history.begin(),history.begin()+3); _videoFilter->QueueRewindBlendHistory(std::move(history));
+			}
+		}
+	}
 
 	bool isAudioPlayer = _emu->GetAudioPlayerHud() != nullptr;
 	if(isAudioPlayer) {
@@ -166,6 +178,7 @@ void VideoDecoder::DecodeFrame(bool forRewind)
 	}
 
 	_videoFilter->FinishFrameBlend(outputBuffer, frameSize.Width * frameSize.Height);
+	_decodedReplacementRevision.store(replacementRevision);
 	_textPreviewSource = outputBuffer;
 	_textPreviewSourceSize = frameSize;
 	_textPreviewNativeSize = { _frame.Width, _frame.Height };
@@ -290,6 +303,34 @@ void VideoDecoder::WaitForAsyncFrameDecode()
 		//Spin until decode is done
 		std::this_thread::sleep_for(std::chrono::duration<int, std::milli>(15));
 	}
+}
+
+vector<uint32_t> VideoDecoder::CaptureRewindBlendHistory()
+{
+	// Other systems retain their existing rewind presentation and pay no copy.
+	if(_consoleType!=ConsoleType::Snes || _emu->GetSettings()->GetSnesConfig().DeinterlaceMode!=SnesDeinterlaceMode::BobBlend) { return {}; }
+	WaitForAsyncFrameDecode();
+	uint64_t revision=_replacementRevision.load();
+	if(!_videoFilter || _resetBlendHistory.load() || _decodedReplacementRevision.load()!=revision) { return {}; }
+	auto history=_videoFilter->CaptureRewindBlendHistory();
+	if(!history.empty()) { history.insert(history.begin(),{(uint32_t)_videoFilterType,(uint32_t)revision,(uint32_t)(revision>>32)}); }
+	return history;
+}
+
+bool VideoDecoder::CaptureSnesFieldCheckpoint(const MetaSpriteFrame& frame,vector<uint8_t>& bytes,uint64_t& revision)
+{
+	vector<uint64_t> bindings; uint64_t capturedRevision=0;
+	if(!_metaSpriteCompositor.CaptureFieldAnimationBindings(frame,bindings,capturedRevision)
+		|| !MetaSnesFieldCheckpoint::Encode(frame,bindings,bytes)) { return false; }
+	revision=capturedRevision; return true;
+}
+
+bool VideoDecoder::RestoreSnesFieldCheckpoint(const vector<uint8_t>& bytes,uint64_t revision,shared_ptr<MetaSpriteFrame>& frame)
+{
+	MetaSnesFieldCheckpoint::Snapshot restored;
+	if(!MetaSnesFieldCheckpoint::Decode(bytes,restored)
+		|| !_metaSpriteCompositor.RestoreFieldAnimationBindings(*restored.Frame,restored.HasAnimationTiming,restored.AnimationBindings,revision)) { return false; }
+	frame=std::move(restored.Frame); return true;
 }
 
 void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)

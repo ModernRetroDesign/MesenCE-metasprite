@@ -38,6 +38,7 @@ public:
 		std::swap(_items, other._items); std::swap(_size, other._size); std::swap(_capacity, other._capacity);
 	}
 	void clear() { _size = 0; }
+	size_t size() const { return _size; }
 	void push_back(T value)
 	{
 		if(_size == _capacity) {
@@ -78,6 +79,7 @@ struct MetaTextPixel
 	uint32_t TileIndex=0, GraphicsAddress=0;
 	uint16_t InkColors[3]={};
 	uint8_t Palette=0, LocalX=0, LocalY=0;
+	uint8_t TileWidth=8;
 	bool Valid=false;
 };
 

@@ -82,12 +82,20 @@ namespace MetaSnesCapture
 		return true;
 	}
 
+	inline bool HasValidLogicalObjectRows(const MetaSpriteFrame& source)
+	{
+		for(const auto& row : source.DecodedRows) {
+			if(row.SnesField || (row.SnesRowStep!=1 && row.SnesRowStep!=2) || row.SnesRowPhase>=row.SnesRowStep
+				|| row.Row%row.SnesRowStep!=row.SnesRowPhase || (row.SnesRowStep==2 && row.Height<2)) { return false; }
+		}
+		return true;
+	}
 	inline bool CanExpandHiresMath(const MetaSpriteFrame& source)
 	{
 		if(!source.SnesColorEffects || source.SpriteCoordinateScale!=1 || !source.Width || !source.Height
 			|| source.Pixels.size()!=(size_t)source.Width*source.Height || source.SnesSubOutput.size()!=source.Pixels.size()
 			|| (!source.SnesBackgrounds.empty() && source.SnesBackgrounds.size()!=source.Pixels.size())) { return false; }
-		for(const auto& row : source.DecodedRows) { if(row.SnesField || row.SnesRowStep!=1) { return false; } }
+		if(!HasValidLogicalObjectRows(source)) { return false; }
 		for(size_t i=0;i<source.SnesSubOutput.size();i++) {
 			const auto& phase=source.SnesSubOutput[i]; int x=(int)(i%source.Width);
 			if(phase.Captured && (phase.MathControlX!=(x ? x-1 : 0) || phase.SecondarySampleX!=(x ? x-1 : -1))) { return false; }
@@ -161,7 +169,7 @@ namespace MetaSnesCapture
 	{
 		if(CanExpandHiresMath(source)) { return true; }
 		if(!CanExpandMainWithMath(source)) { return false; }
-		for(const auto& row : source.DecodedRows) { if(row.SnesField || row.SnesRowStep!=1) { return false; } } return true;
+		return HasValidLogicalObjectRows(source);
 	}
 	inline bool ExpandSupportedMath(const MetaSpriteFrame& source,MetaSpriteFrame& output,bool mainMath,bool hiresMath)
 	{

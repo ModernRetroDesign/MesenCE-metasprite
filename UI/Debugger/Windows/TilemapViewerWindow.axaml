@@ -166,14 +166,19 @@
 								<TextBlock Text="Right limit" /><NumericUpDown Value="{Binding SelectedMetaBackground.WidescreenPosition.CameraMax}" Minimum="-16777216" Maximum="16777216" Increment="1" IsEnabled="{Binding !SelectedMetaBackground.WidescreenPosition.UseRamFlags}" />
 								<CheckBox Content="Use RAM boundary flags instead of limits" IsChecked="{Binding SelectedMetaBackground.WidescreenPosition.UseRamFlags}" />
 								<StackPanel IsVisible="{Binding SelectedMetaBackground.WidescreenPosition.UseRamFlags}">
-									<TextBlock Text="Left edge checks (hex; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.LeftFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
-									<TextBlock Text="Right edge checks (hex; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.RightFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
+									<Button Content="Manage conditions…" Click="OnManageNamedConditions" />
+<TextBlock Text="Left edge checks (hex or [Name]; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.LeftFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
+<dc:NamedConditionPicker Expression="{Binding SelectedMetaBackground.WidescreenPosition.LeftFlags}" MaximumConditions="8" />
+									<TextBlock Text="Right edge checks (hex or [Name]; all must match)" TextWrapping="Wrap" /><TextBox Text="{Binding SelectedMetaBackground.WidescreenPosition.RightFlags}" AcceptsReturn="True" MinHeight="55" TextWrapping="Wrap" />
+<dc:NamedConditionPicker Expression="{Binding SelectedMetaBackground.WidescreenPosition.RightFlags}" MaximumConditions="8" />
 									<TextBlock Text="ADDRESS OP VALUE / MASK, one per line; max 8 per edge.&#10;Operators: == != &gt; &lt; &gt;= &lt;=. Both/neither/missing returns to normal." TextWrapping="Wrap" />
 								</StackPanel>
 								<TextBlock Text="This PNG's activation conditions select its level/scene.&#10;If several active PNGs define positioning, the first in pack order wins." TextWrapping="Wrap" />
 							</StackPanel>
 							<TextBlock Text="CPU memory conditions&#10;Hex values; all conditions must match" TextWrapping="Wrap" />
 							<TextBox Text="{Binding MemoryConditionsText}" AcceptsReturn="True" MinHeight="70" TextWrapping="Wrap" PlaceholderText="C000 == 01 / FF" />
+<dc:NamedConditionPicker Expression="{Binding MemoryConditionsText}" />
+							<Button Content="Manage conditions…" Click="OnManageNamedConditions" />
 							<TextBlock Text="One ADDRESS OP VALUE / MASK per line.&#10;Operators: ==, !=, &gt;, &lt;, &gt;=, &lt;=.&#10;Mask defaults to FF and applies to both values before unsigned comparison.&#10;Gameplay replacement requires at least one condition. All conditions must match." TextWrapping="Wrap" />
 							<Button Content="Save and apply background edits" Click="OnSaveMetaBackgrounds" />
 							<Button Content="Reload saved backgrounds" Click="OnReloadMetaBackgrounds" ToolTip.Tip="Reload layers from disk, discarding unsaved background edits." />

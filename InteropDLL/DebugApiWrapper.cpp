@@ -46,6 +46,7 @@
 #include "Utilities/StringUtilities.h"
 
 extern unique_ptr<Emulator> _emu;
+static thread_local string _metaReplacementError;
 
 template<typename T>
 T WrapDebuggerCall(std::function<T(Debugger* debugger)> func)
@@ -73,6 +74,7 @@ void WrapDebuggerCall(std::function<void(Debugger* debugger)> func)
 
 extern "C"
 {
+	DllExport const char* __stdcall GetMetaReplacementError() { return _metaReplacementError.c_str(); }
 	DllExport void __stdcall RequestTextPreview() { auto lock = _emu->AcquireLock(); _emu->GetVideoDecoder()->WaitForAsyncFrameDecode(); _emu->GetVideoDecoder()->RequestTextPreview(); }
 	DllExport uint32_t __stdcall ReadTextPreview(uint32_t* pixels, uint32_t capacity, FrameInfo& size) { return _emu->GetVideoDecoder()->ReadTextPreview(pixels, capacity, size); }
 	DllExport bool __stdcall SetMetaBackgroundReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
@@ -114,6 +116,8 @@ extern "C"
 	}
 	static bool ApplyMetaReplacements(const char* romHash, const uint8_t* packet, uint32_t length, const uint8_t* backgroundPacket, uint32_t backgroundLength, bool combined, const char* spriteFile = nullptr, const char* backgroundFile = nullptr, const char* textFile = nullptr)
 	{
+		_metaReplacementError.clear();
+		auto fail=[](const string& reason) { _metaReplacementError=reason; return false; };
 		try {
 			auto console = _emu->GetConsole();
 			auto gameboy = dynamic_cast<Gameboy*>(console.get());
@@ -129,29 +133,37 @@ extern "C"
 					&& (!nes || (dynamic_cast<DefaultNesPpu*>(nes->GetPpu()) && !nes->GetVsMainConsole() && !nes->GetVsSubConsole()))
 					&& (!gameboy || (!gameboy->IsSgb() && !gameboy->GetLinkedConsole())) && (!pce || !pce->IsSuperGrafx());
 			};
-			if(!romHash || !compatible() || _emu->GetHash(HashType::Sha1)!=romHash) { return false; }
+			if(!console) { return fail("No ROM is loaded. Load the game before applying its replacement pack."); }
+			if(!romHash || _emu->GetHash(HashType::Sha1)!=romHash) { return fail("The replacement pack belongs to a different ROM. Reopen the editor for the currently loaded ROM."); }
+			if(!compatible()) {
+				if(nes && (nes->GetVsMainConsole() || nes->GetVsSubConsole())) { return fail("NES dual-console VS layouts are not supported by replacement packs."); }
+				if(nes) { return fail("This NES renderer cannot apply metasprite packs. Legacy HD packs, HD Pack Builder and NSF playback use a different renderer. Reload the NES ROM with legacy HD packs disabled and HD Pack Builder stopped."); }
+				if(pce && pce->IsSuperGrafx()) { return fail("SuperGrafx replacement capture is not supported yet."); }
+				if(gameboy) { return fail("Super Game Boy and linked Game Boy layouts are not supported by replacement packs."); }
+				return fail("This console layout does not support replacement packs.");
+			}
 			MetaPngPixelPool animationPixels;
 			std::vector<MetaTextReplacement> texts;
 			if(textFile) {
 				texts=MetaTextPacket(std::string(textFile)).Parse();
-				if(std::any_of(texts.begin(),texts.end(),[&](const auto& p) { return p.Layer>(nes || sms || pce ? 0 : gameboy || ws ? 1 : 3); })) { return false; }
+				if(std::any_of(texts.begin(),texts.end(),[&](const auto& p) { return (p.SourceTileWidth==6 && !sms) || p.Layer>(nes || sms || pce ? 0 : gameboy || ws ? 1 : 3); })) { return fail("A text profile uses a source-cell width or hardware layer unsupported by this system."); }
 			}
 			auto groups = spriteFile ? MetaSpritePacket(std::string(spriteFile), &animationPixels).Parse() : MetaSpritePacket(packet, length, &animationPixels).Parse();
 			std::vector<MetaBackgroundReplacement> layers;
 			if(combined) {
 				layers = backgroundFile ? MetaBackgroundPacket(std::string(backgroundFile), &animationPixels).Parse() : MetaBackgroundPacket(backgroundPacket, backgroundLength, &animationPixels).Parse();
-				if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return false; }
-				if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return false; }
-				if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return false; }
+				if(!nes && !gameboy && !pce && !sms && !ws && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition >= 4; })) { return fail("A background uses sprite insertion bands unsupported by this system."); }
+				if(!snes && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 3; })) { return fail("A background uses SNES priority in a different system's pack."); }
+				if(!gba && std::any_of(layers.begin(), layers.end(), [](const auto& layer) { return layer.CompositionPosition == 2; })) { return fail("A background uses GBA priority in a different system's pack."); }
 				// Accept SMS assets before its program selects the VDP mode. Capture
 				// remains guarded by UseMode4 at rendering time.
-				if(!layers.empty() && !gameboy && !sms && !ws && !nes && !pce && !gba && !snes) { return false; }
-				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba || snes ? 3 : 1); })) { return false; }
+				if(!layers.empty() && !gameboy && !sms && !ws && !nes && !pce && !gba && !snes) { return fail("This system does not support replacement backgrounds."); }
+				if(std::any_of(layers.begin(), layers.end(), [&](const auto& layer) { return sms || nes || pce ? layer.Layer != 0 : layer.Layer > (gba || snes ? 3 : 1); })) { return fail("A background uses an invalid native hardware layer for this system. NES backgrounds must use layer 0."); }
 			}
 			// Parsing does not pause emulation. Recheck the ROM/console under its
 			// lock before publishing both sets as one transaction.
 			auto emuLock = _emu->AcquireLock();
-			if(console != _emu->GetConsole() || !compatible() || _emu->GetHash(HashType::Sha1) != romHash) { return false; }
+			if(console != _emu->GetConsole() || !compatible() || _emu->GetHash(HashType::Sha1) != romHash) { return fail("The ROM or console layout changed while loading the replacement pack. Reopen the editor."); }
 			if(textFile) { _emu->GetVideoDecoder()->SetAllMetaReplacements(std::move(groups),std::move(layers),std::move(texts)); }
 			else if(combined) { _emu->GetVideoDecoder()->SetMetaReplacements(std::move(groups), std::move(layers)); }
 			else { _emu->GetVideoDecoder()->SetMetaSpriteGroups(std::move(groups)); }
@@ -164,7 +176,8 @@ extern "C"
 			if(nes) { nes->GetPpu()->SetMetaSpriteCapture(enabled); }
 			if(snes) { snes->GetPpu()->SetMetaSpriteCapture(enabled); }
 			return true;
-		} catch(...) { return false; }
+		} catch(const std::exception& ex) { return fail(ex.what()); }
+		catch(...) { return fail("An unknown error occurred while reading the replacement pack."); }
 	}
 	DllExport bool __stdcall SetMetaSpriteReplacements(const char* romHash, const uint8_t* packet, uint32_t length)
 	{

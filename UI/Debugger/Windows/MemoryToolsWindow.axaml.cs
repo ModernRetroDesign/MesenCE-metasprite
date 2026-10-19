@@ -165,6 +165,7 @@ namespace Mesen.Debugger.Windows
 				GetAddWatchAction(),
 				GetEditBreakpointAction(),
 				GetEditLabelAction(),
+				GetNamedConditionAction(),
 				new ContextMenuSeparator(),
 				GetViewInDebuggerAction(),
 				GetViewInMemoryAction(),
@@ -559,6 +560,39 @@ namespace Mesen.Debugger.Windows
 					}
 
 					LabelEditWindow.EditLabel(label.MemoryType.ToCpuType(), this, label);
+				}
+			};
+		}
+
+		private AddressInfo? GetNamedConditionAddress()
+		{
+			try {
+				MemoryType memory=_model.Config.MemoryType;
+				if(_editor.SelectionLength>1 || memory.IsPpuMemory() || _editor.SelectionStart<0 || _editor.SelectionStart>=DebugApi.GetMemorySize(memory)) { return null; }
+				CpuType cpu=memory.ToCpuType();
+				if(cpu is not (CpuType.Nes or CpuType.Gameboy or CpuType.Gba or CpuType.Pce or CpuType.Sms or CpuType.Snes or CpuType.Ws)
+					|| !EmuApi.GetRomInfo().CpuTypes.Contains(cpu)) { return null; }
+				var selected=new AddressInfo {Address=_editor.SelectionStart,Type=memory};
+				var mapped=memory==cpu.ToMemoryType() ? selected : DebugApi.GetRelativeAddress(selected,cpu);
+				return mapped.Address>=0 && mapped.Type==cpu.ToMemoryType() ? mapped : null;
+			} catch { return null; }
+		}
+		private ContextMenuAction GetNamedConditionAction()
+		{
+			return new ContextMenuAction {
+				ActionType=ActionType.Custom, CustomText="Save named RAM condition...",
+				IsEnabled=()=>GetNamedConditionAddress()!=null,
+				OnClick=async()=> {
+					try {
+						if(GetNamedConditionAddress() is not AddressInfo address) { return; }
+						CpuType cpu=address.Type.ToCpuType(); string hash=EmuApi.GetRomHash(HashType.Sha1);
+						string packPath=MetaSpriteRuntimeLoader.GetPackPath(hash,cpu);
+						var model=new NamedConditionEditorViewModel(packPath,hash,cpu.ToString(),(uint)address.Address,DebugApi.GetMemoryValue(address.Type,(uint)address.Address),
+							$"Selection: {_model.Config.MemoryType} ${_editor.SelectionStart:X} → {cpu} CPU ${address.Address:X}",
+							()=>EmuApi.GetRomInfo().CpuTypes.Contains(cpu) && EmuApi.GetRomHash(HashType.Sha1)==hash,
+							()=>MetaSpriteRuntimeLoader.Apply(MetaSpritePack.Load(packPath,hash,cpu.ToString()),packPath));
+						await new NamedConditionWindow(model).ShowDialog(this);
+					} catch(Exception ex) { await MesenMsgBox.ShowException(ex); }
 				}
 			};
 		}

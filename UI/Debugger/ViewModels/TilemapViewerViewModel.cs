@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Media;
@@ -37,17 +37,21 @@ namespace Mesen.Debugger.ViewModels
 				if(string.IsNullOrWhiteSpace(hash)) { throw new InvalidOperationException("Load a game before editing text replacements."); }
 				var tile=GetSelectedTileInfo();
 				if(GetBackgroundImportLayer().Layer is not int layer) { throw new InvalidOperationException("Select a hardware background tilemap before opening text replacements."); }
+				int sourceTileWidth=tile?.Width==6 ? 6 : 8;
+				if(tile==null && _data.PpuState!=null && _data.PpuToolsState!=null) {
+					sourceTileWidth=DebugApi.GetTilemapTileInfo(0,0,cpu,GetOptions(SelectedTab),_data.Vram,_data.PpuState,_data.PpuToolsState)?.Width==6 ? 6 : 8;
+				}
 				var editor = new TextReplacementViewModel(MetaSpriteRuntimeLoader.GetPackPath(hash,cpu),hash,cpu.ToString(),BackgroundEditor.HardwareLayerNames,layer,
 					tile?.TileIndex ?? -1,tile?.TileAddress ?? -1,tile?.PaletteIndex ?? -1,
 					() => CpuType==cpu && EmuApi.GetRomHash(HashType.Sha1)==hash,
-					pack => MetaSpriteRuntimeLoader.Apply(pack,MetaSpriteRuntimeLoader.GetPackPath(hash,cpu)));
+					pack => MetaSpriteRuntimeLoader.Apply(pack,MetaSpriteRuntimeLoader.GetPackPath(hash,cpu)),sourceTileWidth);
 				if(_data.PpuState!=null && _data.PpuToolsState!=null) {
 					editor.SetSourcePreview(CaptureBackgroundPngSnapshot(),SelectionRect);
 					var sourceTiles=new System.Collections.Generic.Dictionary<(int X,int Y),TextReplacementViewModel.SourceTile>();
 					var options=GetOptions(SelectedTab);
-					for(int y=0;y<editor.SourceHeight;y+=8) { for(int x=0;x<editor.SourceWidth;x+=8) {
+					for(int y=0;y<editor.SourceHeight;y+=8) { for(int x=0;x<editor.SourceWidth;x+=sourceTileWidth) {
 						var info=DebugApi.GetTilemapTileInfo((uint)x,(uint)y,cpu,options,_data.Vram,_data.PpuState,_data.PpuToolsState);
-						if(info is {} source && source.TileIndex>=0 && source.TileAddress>=0) {
+						if(info is {} source && source.TileAddress>=0) {
 							uint index=(uint)source.TileIndex,address=(uint)source.TileAddress;
 							if(cpu==CpuType.Snes && source.TileCount>1) {
 								int cx=source.Width>8 ? ((x&8)!=0 ? 1 : 0) : 0,cy=source.Height>8 ? ((y&8)!=0 ? 1 : 0) : 0;
@@ -111,7 +115,7 @@ namespace Mesen.Debugger.ViewModels
 			}
 			return (layer, CpuType == CpuType.Sms ? "Imported as SMS background (0). Supported Mode 4 and legacy graphics/text modes use the default filter."
 				: CpuType == CpuType.Ws ? "Imported for the selected WonderSwan background. Gameplay requires the default filter, frame blending off, and LCD icons off."
-				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer + 1} (native layer {layer}). Artwork follows scrolling, priority and windows.\nUse the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output.\nHires OBJ-interlace math and interlaced rewind replacements remain pending."
+				: CpuType == CpuType.Snes ? $"Imported as SNES BG{layer + 1} (native layer {layer}). Artwork follows scrolling, priority and windows.\nUse the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output.\nHires OBJ-interlace math and Current Field/Weave/Bob/Bob Blend rewind are supported."
 				: CpuType == CpuType.Gba ? $"Imported as GBA BG{layer}. Gameplay requires the default filter with color adjustment and frame blending disabled."
 				: "Definitions can be authored here; gameplay background integration for this system is pending.");
 		}

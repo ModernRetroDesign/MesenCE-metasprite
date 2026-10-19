@@ -303,7 +303,7 @@ internal static class GameplayFixture
 		RunSnesAdditionalBackgrounds(romPath);
 	}
 
-	public static void RunSnesHiRes(string dllPath, string romPath, bool includeInterlace = true, bool includeObjInterlace = true, bool onlyObjInterlace = false)
+	public static void RunSnesHiRes(string dllPath, string romPath, bool includeInterlace = true, bool includeObjInterlace = true, bool onlyObjInterlace = false, bool onlyHiresObjectMath = false, bool onlyBobBlendObjectMath = false, bool onlyWeaveObjectMath = false, string fixtureFilter = "", bool checkpointOnly = false)
 	{
 		NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, _, _) => name == "MesenCore.dll" ? NativeLibrary.Load(dllPath) : IntPtr.Zero);
 		// Hires uses per-phase assertions; ordinary woven OBJ uses a physical
@@ -315,7 +315,10 @@ internal static class GameplayFixture
 			"mode5-hires-math-both-screens", "mode6-hires-math-both-screens-window", "pseudo-hires-math",
 			"mode5-hires-math-operand-both-screens", "mode6-hires-math-operand-both-screens-window", "pseudo-hires-math-operand-both-screens",
 			"pseudo-hires-math-operand-both-screens-mixed-raster",
-			"mode5-hires-math-interlace-both-screens", "mode6-hires-math-operand-interlace-both-screens-window", "pseudo-hires-math-operand-interlace-both-screens",
+			"mode5-hires-math-obj-interlace", "mode6-hires-math-operand-obj-interlace-both-screens-window", "pseudo-hires-math-operand-obj-interlace-both-screens",
+            "mode5-hires-math-obj-interlace-current-field-both-screens", "mode6-hires-math-operand-obj-interlace-bob-field-both-screens", "pseudo-hires-math-operand-obj-interlace-bob-blend-field-both-screens",
+            "mode5-hires-math-obj-interlace-bob-blend-field-both-screens", "mode6-hires-math-operand-obj-interlace-bob-blend-field-both-screens-window",
+            "mode5-hires-math-interlace-both-screens", "mode6-hires-math-operand-interlace-both-screens-window", "pseudo-hires-math-operand-interlace-both-screens",
 			"mode5-hires-math-interlace-current-field-both-screens", "mode6-hires-math-operand-interlace-bob-field-both-screens", "pseudo-hires-math-operand-interlace-bob-blend-field-both-screens",
 			"interlace-bob-field-holes", "interlace-bob-blend-field-holes", "interlace-bob-field-first-picture-holes", "interlace-bob-blend-field-first-picture-holes",
 			"obj-interlace-holes", "obj-interlace-current-field-holes", "obj-interlace-bob-field-holes", "obj-interlace-bob-blend-field-holes",
@@ -324,9 +327,13 @@ internal static class GameplayFixture
 			"obj-interlace-rect-holes", "obj-interlace-rect-vflip-holes", "obj-interlace-window-holes", "obj-interlace-poses-holes", "obj-interlace-poses-conditions-holes", "obj-interlace-bg-holes", "obj-interlace-bg-fields-holes"
 		}) {
 			if(onlyObjInterlace && !fixture.StartsWith("obj-interlace")) { continue; }
+            if(onlyHiresObjectMath && !(fixture.Contains("hires-math") && fixture.Contains("obj-interlace"))) { continue; }
+            if(onlyBobBlendObjectMath && !(fixture.Contains("hires-math") && fixture.Contains("obj-interlace") && fixture.Contains("bob-blend"))) { continue; }
+            if(onlyWeaveObjectMath && !(fixture.Contains("hires-math") && fixture.Contains("obj-interlace") && !fixture.Contains("field"))) { continue; }
+            if(fixtureFilter.Length!=0 && fixture!=fixtureFilter) { continue; }
 			if(!includeInterlace && fixture.Contains("interlace")) { continue; }
 			if(!includeObjInterlace && fixture.Contains("obj-interlace")) { continue; }
-			try { RunSnes(Path.ChangeExtension(romPath, fixture + ".sfc"), holes: true, window: fixture.Contains("window") ? 1 : 0, math: fixture.Contains("math") ? 1 : 0, backgroundSub: fixture.Contains("hires-background")); }
+			try { RunSnes(Path.ChangeExtension(romPath, fixture + (checkpointOnly ? "-checkpoint-only" : "") + ".sfc"), holes: true, window: fixture.Contains("window") ? 1 : 0, math: fixture.Contains("math") ? 1 : 0, backgroundSub: fixture.Contains("hires-background")); }
 			catch(Exception ex) { failures.Add(ex); Console.WriteLine($"FAIL: {ex.Message}"); }
 		}
 		if(failures.Count != 0) { throw new AggregateException("SNES hires/interlace capture probes failed.", failures); }

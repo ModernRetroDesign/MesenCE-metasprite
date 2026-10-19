@@ -16,6 +16,7 @@ internal static class MetaSpriteRuntimeLoader
 
 	public static bool Apply(MetaSpritePack pack, string path)
 	{
+		pack.ResolveNamedConditions(Path.GetDirectoryName(Path.GetFullPath(path))!);
 		ValidateBackgroundSupport(pack);
 		string directory=Path.GetDirectoryName(path)!;
 		var decoded=new MetaPngDecodeCache(64L*1024*1024,128,(file,reserve) => DecodePng(file,1,reserve));
@@ -36,7 +37,11 @@ internal static class MetaSpriteRuntimeLoader
 		}, (frame,scale) => LoadCached(frame.Path,scale), sharedFrames:true);
 		var glyphBudget=new MetaTextRasterizer.Budget();
 		using var texts=MetaTextRuntimePacket.CreateFile(pack,p => glyphBudget.Rasterize(p,directory));
-		return DebugApi.SetMetaReplacementFilesWithText(pack.RomHash,packet.Path,backgrounds.Path,texts.Path);
+		if(!DebugApi.SetMetaReplacementFilesWithText(pack.RomHash,packet.Path,backgrounds.Path,texts.Path)) {
+			string reason=DebugApi.GetMetaReplacementErrorMessage();
+			throw new InvalidDataException(reason.Length>0 ? reason : "The emulator rejected the replacement pack.");
+		}
+		return true;
 	}
 
 	public static void ValidateBackgroundSupport(MetaSpritePack pack)

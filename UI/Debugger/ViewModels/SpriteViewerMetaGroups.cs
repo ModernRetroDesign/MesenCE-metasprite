@@ -409,9 +409,9 @@ public partial class SpriteViewerViewModel
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0) { return false; }
 		try {
-			if(SelectedMetaGroup is MetaSpriteGroup selected) { selected.MemoryConditions = MetaMemoryConditionText.Parse(MetaMemoryConditionsText); }
+			if(SelectedMetaGroup is MetaSpriteGroup selected) { selected.MemoryConditions = ParseMetaConditions(MetaMemoryConditionsText,selected); }
 			if(SelectedMetaAlternate is MetaAlternateArtwork alternate) {
-				alternate.MemoryConditions = MetaMemoryConditionText.Parse(MetaAlternateConditionsText); alternate.Validate();
+				alternate.MemoryConditions = ParseMetaConditions(MetaAlternateConditionsText,alternate); alternate.Validate();
 				if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateSpriteCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
 			}
 			foreach(var layer in _metaPack.BackgroundLayers) { layer.Validate(); }
@@ -440,6 +440,8 @@ public partial class SpriteViewerViewModel
 			});
 	}
 
+	private List<MetaMemoryCondition> ParseMetaConditions(string text,IMetaMemoryConditionOwner? owner=null) =>
+		MetaNamedConditionBindings.Parse(text,_metaPackPath,_metaPack.RomHash,CpuType.ToString(),owner);
 	public void ApplyMetaReplacements()
 	{
 		if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
@@ -457,7 +459,7 @@ public partial class SpriteViewerViewModel
 			if(CpuType == CpuType.Gba && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " GBA currently requires the default filter with color adjustment and frame blending disabled; NTSC and stereoscopic output are pending."; }
 			if(CpuType == CpuType.Ws && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " WonderSwan currently requires the default filter with frame blending and LCD icons disabled; other output modes are pending."; }
 			if(CpuType == CpuType.Nes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " NES currently requires the default filter and standard PPU; existing HD packs and VS dual-console layouts are excluded."; }
-			if(CpuType == CpuType.Snes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " SNES uses the default filter, neutral color settings, and no forced-resolution conversion. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and interlaced rewind replacements remain pending."; }
+			if(CpuType == CpuType.Snes && _metaPack.Groups.Any(g => g.Enabled)) { MetaStatus += " SNES uses the default filter, neutral color settings, and no forced-resolution conversion. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and Current Field/Weave/Bob/Bob Blend rewind are supported."; }
 		} catch(Exception ex) { MetaStatus = "Could not apply replacements: " + ex.Message; }
 	}
 
@@ -474,7 +476,7 @@ public partial class SpriteViewerViewModel
 		SelectedMetaAlternate = null; MetaAlternates.Clear();
 		if(value != null) { foreach(var alternate in value.AlternateArtwork) { MetaAlternates.Add(alternate); } }
 		RefreshMetaArtworkNavigation();
-		MetaMemoryConditionsText = value == null ? "" : _invalidMetaConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaMemoryConditionText.Format(value.MemoryConditions);
+		MetaMemoryConditionsText = value == null ? "" : _invalidMetaConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaNamedConditionBindings.Text(value);
 		MetaPreview?.Dispose();
 		MetaPreview = null;
 		if(value == null) { return; }
@@ -490,7 +492,7 @@ public partial class SpriteViewerViewModel
 	partial void OnMetaMemoryConditionsTextChanged(string value)
 	{
 		if(SelectedMetaGroup is not MetaSpriteGroup group) { return; }
-		try { group.MemoryConditions = MetaMemoryConditionText.Parse(value); _invalidMetaConditionDrafts.Remove(group); }
+		try { group.MemoryConditions = ParseMetaConditions(value,group); _invalidMetaConditionDrafts.Remove(group); }
 		catch(InvalidDataException ex) { _invalidMetaConditionDrafts[group] = value; MetaStatus = ex.Message; }
 	}
 

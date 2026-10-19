@@ -29,6 +29,9 @@ private:
 	atomic<bool> _frameChanged;
 	atomic<bool> _stopFlag;
 	atomic<bool> _resetBlendHistory { false };
+	SimpleLock _rewindBlendLock;
+	vector<uint32_t> _pendingRewindBlendHistory;
+	atomic<uint64_t> _replacementRevision {0}, _decodedReplacementRevision {UINT64_MAX};
 	uint32_t _frameCount = 0;
 	bool _forceFilterUpdate = false;
 
@@ -66,14 +69,16 @@ public:
 		if(pixels && capacity >= count) { std::copy(_textPreviewPixels.begin(), _textPreviewPixels.end(), pixels); }
 		return count;
 	}
-	void SetMetaSpriteGroups(std::vector<MetaSpriteReplacement> groups) { _metaSpriteCompositor.SetGroups(std::move(groups)); }
-	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); }
-	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); }
+	void SetMetaSpriteGroups(std::vector<MetaSpriteReplacement> groups) { _metaSpriteCompositor.SetGroups(std::move(groups)); _replacementRevision++; ResetFrameBlendHistory(); }
+	void SetMetaBackgroundLayers(std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetBackgroundLayers(std::move(layers)); _replacementRevision++; ResetFrameBlendHistory(); }
+	void SetMetaReplacements(std::vector<MetaSpriteReplacement> groups, std::vector<MetaBackgroundReplacement> layers) { _metaSpriteCompositor.SetReplacements(std::move(groups), std::move(layers)); _replacementRevision++; ResetFrameBlendHistory(); }
 	bool HasMetaReplacements() { return _metaSpriteCompositor.HasReplacements(); }
 	bool HasMetaTextProfiles() { return _metaSpriteCompositor.HasTextProfiles(); }
 	uint8_t GetMetaTextLayerMask() { return _metaSpriteCompositor.TextLayerMask(); }
-	void SetAllMetaReplacements(std::vector<MetaSpriteReplacement> groups,std::vector<MetaBackgroundReplacement> layers,std::vector<MetaTextReplacement> texts) { _metaSpriteCompositor.SetAllReplacements(std::move(groups),std::move(layers),std::move(texts)); }
+	void SetAllMetaReplacements(std::vector<MetaSpriteReplacement> groups,std::vector<MetaBackgroundReplacement> layers,std::vector<MetaTextReplacement> texts) { _metaSpriteCompositor.SetAllReplacements(std::move(groups),std::move(layers),std::move(texts)); _replacementRevision++; ResetFrameBlendHistory(); }
 	void CaptureMetaSpriteMemory(const MetaSpriteFrame& frame, const std::function<bool(uint32_t,uint8_t&)>& readByte, bool timing = true) { _metaSpriteCompositor.CaptureMemorySnapshot(frame,readByte,timing); }
+	bool CaptureSnesFieldCheckpoint(const MetaSpriteFrame& frame,std::vector<uint8_t>& bytes,uint64_t& revision);
+	bool RestoreSnesFieldCheckpoint(const std::vector<uint8_t>& bytes,uint64_t revision,std::shared_ptr<MetaSpriteFrame>& frame);
 	void SerializeReplacementAnimation(Serializer& s);
 	void ResetReplacementAnimation() { _metaSpriteCompositor.RestoreAnimationState({}); }
 	bool HasMetaBackgroundLayers() { return _metaSpriteCompositor.HasBackgroundLayers(); }
@@ -87,7 +92,9 @@ public:
 	void TakeScreenshot(std::stringstream& stream);
 
 	void ForceFilterUpdate() { _forceFilterUpdate = true; }
-	void ResetFrameBlendHistory() { _resetBlendHistory.store(true); }
+	void ResetFrameBlendHistory() { auto lock=_rewindBlendLock.AcquireSafe(); _pendingRewindBlendHistory.clear(); _resetBlendHistory.store(true); }
+	vector<uint32_t> CaptureRewindBlendHistory();
+	void RestoreRewindBlendHistory(vector<uint32_t> history) { auto lock=_rewindBlendLock.AcquireSafe(); _pendingRewindBlendHistory=std::move(history); }
 
 	uint32_t GetFrameCount();
 	FrameInfo GetBaseFrameInfo(bool removeOverscan);

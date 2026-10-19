@@ -50,6 +50,7 @@ namespace Mesen.Debugger.Windows
 		{
 			AvaloniaXamlLoader.Load(this);
 		}
+		private async void OnManageNamedConditions(object? sender,RoutedEventArgs e) => await NamedConditionWindow.OpenForCurrentGame(this);
 
 		protected override void OnOpened(EventArgs e)
 		{

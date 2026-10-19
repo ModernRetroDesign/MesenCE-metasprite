@@ -11,7 +11,7 @@
   </StackPanel>
   <ScrollViewer HorizontalScrollBarVisibility="Disabled">
    <StackPanel Spacing="8">
-    <TextBlock Text="Cached font overlays draw above the game and background PNG replacements. Original tiles remain; use a replacement PNG or the optional cell fill to cover old text. Source cells are made from 8×8 tiles. Gameplay supports native tile backgrounds: NES; GB/GBC BG/window; SMS Mode 4; PCE VDC1; GBA regular backgrounds; SNES normal-resolution tile modes; and WonderSwan backgrounds. Affine/bitmap, mosaic and SNES hires/interlace text capture remain guarded." TextWrapping="Wrap" />
+    <TextBlock Text="Cached font overlays draw above the game and background PNG replacements. Original tiles remain; use a replacement PNG or the optional cell fill to cover old text. Source tiles are 8×8, or 6×8 in SMS 40-column text mode. Gameplay supports native tile backgrounds: NES; GB/GBC BG/window; SMS Mode 4 and legacy graphics/text modes; PCE VDC1; GBA regular backgrounds; SNES normal-resolution tile modes; and WonderSwan backgrounds. Affine/bitmap, mosaic and SNES hires/interlace text capture remain guarded. Legacy SMS Graphics I/II inherit foreground ink at index 1 (background at 2); Multicolor uses graphics-address matching." TextWrapping="Wrap" />
     <Grid ColumnDefinitions="*,Auto,Auto">
      <ComboBox Name="textProfiles" ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile}" HorizontalAlignment="Stretch" />
      <Button Grid.Column="1" Content="+" Click="Add" Width="32" ToolTip.Tip="Add text profile" />
@@ -29,13 +29,14 @@
      <Grid ColumnDefinitions="*,*,*,*">
       <StackPanel><TextBlock Text="Font size" /><NumericUpDown Value="{Binding SelectedProfile.FontSize}" Minimum="1" Maximum="128" /></StackPanel>
       <StackPanel Grid.Column="1"><TextBlock Text="Raster scale" /><NumericUpDown Value="{Binding SelectedProfile.RasterScale}" Minimum="1" Maximum="8" /></StackPanel>
-      <StackPanel Grid.Column="2"><TextBlock Text="Source cell width" /><NumericUpDown Value="{Binding SelectedProfile.CellWidth}" Minimum="8" Maximum="128" Increment="8" /></StackPanel>
+      <StackPanel Grid.Column="2"><TextBlock Text="Source cell width" /><NumericUpDown Value="{Binding SelectedProfile.CellWidth}" Minimum="{Binding SelectedProfile.SourceTileWidth}" Maximum="{Binding SourceCellMaximum}" Increment="{Binding SelectedProfile.SourceTileWidth}" /></StackPanel>
       <StackPanel Grid.Column="3"><TextBlock Text="Source cell height" /><NumericUpDown Value="{Binding SelectedProfile.CellHeight}" Minimum="8" Maximum="128" Increment="8" /></StackPanel>
      </Grid>
      <TextBlock Text="Font size uses native pixels; it may exceed the source tile size. Raster scale controls cached font detail. Proportional layout uses real font advances and kerning for left-to-right text. Larger glyphs and effects extend beyond source cells and clip only at the screen/display region." TextWrapping="Wrap" />
      <CheckBox Name="textProportional" Content="Proportional text runs with font kerning" IsChecked="{Binding SelectedProfile.Proportional}" />
-     <StackPanel Orientation="Horizontal" Spacing="8"><TextBlock Text="Source grid origin X / Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginX}" Minimum="0" Maximum="120" Increment="8" Width="90" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginY}" Minimum="0" Maximum="120" Increment="8" Width="90" /></StackPanel>
-     <TextBlock Text="Source cells can be 8×8, 8×16, 16×16 or other multiples of 8 up to 128×128. The grid origin is the tilemap offset within one cell (for example Y=8 when 8×16 letters start on an odd tile row). Capturing a complete cell sets this origin automatically. Different source sizes use separate profiles." TextWrapping="Wrap" />
+     <StackPanel Orientation="Horizontal" Spacing="8"><TextBlock Text="Source tile width (6 or 8)" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.SourceTileWidth}" Minimum="6" Maximum="8" Increment="2" Width="85" /></StackPanel>
+     <StackPanel Orientation="Horizontal" Spacing="8"><TextBlock Text="Source grid origin X / Y" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginX}" Minimum="0" Maximum="126" Increment="{Binding SelectedProfile.SourceTileWidth}" Width="90" /><NumericUpDown Value="{Binding SelectedProfile.CellOriginY}" Minimum="0" Maximum="120" Increment="8" Width="90" /></StackPanel>
+     <TextBlock Text="Source cells contain complete source tiles: for example 6×8 or 12×16 in SMS text mode, or 8×8, 8×16 and 16×16 elsewhere. Maximum size is 128×128 (126 pixels wide on a 6-pixel grid). The grid origin is the tilemap offset within one cell (for example Y=8 when 8×16 letters start on an odd tile row). Capturing a complete cell sets this origin automatically. Different source sizes use separate profiles." TextWrapping="Wrap" />
      <StackPanel Orientation="Horizontal" Spacing="8">
       <TextBlock Text="Line height (0 = font default)" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.LineHeight}" Minimum="0" Maximum="512" Width="85" />
       <TextBlock Text="Letter spacing" VerticalAlignment="Center" /><NumericUpDown Value="{Binding SelectedProfile.LetterSpacing}" Minimum="-8" Maximum="32" Increment="0.25" Width="90" />
@@ -68,12 +69,14 @@
       <StackPanel Grid.Column="3"><TextBlock Text="Display height" /><NumericUpDown Value="{Binding SelectedProfile.DisplayHeight}" Minimum="1" Maximum="4096" /></StackPanel>
      </Grid>
      <CheckBox Content="Wrap text at the display region edge" IsChecked="{Binding SelectedProfile.WrapText}" IsEnabled="{Binding SelectedProfile.UseDisplayRegion}" />
+     <CheckBox Name="textWordWrap" Content="Prefer word boundaries when wrapping" IsChecked="{Binding SelectedProfile.WrapWords}" IsEnabled="{Binding SelectedProfile.WrapText}" />
+     <TextBlock Text="Word wrapping requires a display region and wrapping enabled. Map spaces as characters. Long words split at characters; spaces at an automatic line break are skipped. Explicit source rows remain separate lines. Nonbreaking spaces keep words together until character fallback is needed." TextWrapping="Wrap" />
      <TextBlock Text="The display region places and clips the overlay independently of source tile positions. Source rows become text lines; map spaces too. Kerning supports up to 256 distinct characters/profile. Ligatures and right-to-left shaping are not included." TextWrapping="Wrap" />
      <CheckBox Content="Limit matching to source tilemap region" IsChecked="{Binding SelectedProfile.UseRegion}" />
      <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="Use selection from Tilemap Viewer" Click="UseViewerSelection" /><ToggleButton Content="Draw new region" IsChecked="{Binding #textSourcePicker.DrawMode, Mode=TwoWay}" /></StackPanel>
-     <TextBlock Text="Cyan: source capture, snapped to 8×8 tiles. Draw, move or resize the rectangle below. Arrow keys move; Ctrl+arrows resize; Shift uses larger steps. Coordinates stay synchronized with both selectors." TextWrapping="Wrap" />
+     <TextBlock Text="Cyan: source capture, snapped to the selected source tile width and 8-pixel rows. Draw, move or resize the rectangle below. Arrow keys move; Ctrl+arrows resize; Shift uses larger steps. Coordinates stay synchronized with both selectors." TextWrapping="Wrap" />
      <TextBlock Text="{Binding SourcePreviewInfo}" TextWrapping="Wrap" />
-     <d:TextRegionSelector Name="textSourcePicker" Height="300" Image="{Binding SourcePreview}" CanvasWidth="{Binding SourceWidth}" CanvasHeight="{Binding SourceHeight}" Snap="8" Region="{Binding SourceRegion, Mode=TwoWay}" />
+     <d:TextRegionSelector Name="textSourcePicker" Height="300" Image="{Binding SourcePreview}" CanvasWidth="{Binding SourceWidth}" CanvasHeight="{Binding SourceHeight}" Snap="8" SnapX="{Binding SelectedProfile.SourceTileWidth}" Region="{Binding SourceRegion, Mode=TwoWay}" />
      <WrapPanel><Button Content="Cell size from selection" Click="SelectionCellSize" /><Button Content="Add selected source cell as character" Click="CaptureSelectedCell" /></WrapPanel>
      <TextBlock Text="To map a multi-tile character: select one complete letter, take its cell size from the selection, enter its character below, then add the selected source cell. Repeat for other letters. Afterwards select the full dialogue source region, or turn off the region limit. A palette-specific pattern requires the same palette on every tile; use * for mixed palettes." TextWrapping="Wrap" />
      <Grid ColumnDefinitions="*,*,*,*" IsEnabled="{Binding SelectedProfile.UseRegion}">
@@ -91,7 +94,9 @@
      <TextBlock Text="Character mappings: comma-separated hexadecimal tiles in reading order (left to right, then top to bottom), followed by optional palette. Example for 8×16: 0010,0020 * = A. Every tile in a source cell must match; one character is emitted. Use U+0020 for a space. Exact palette entries take precedence over *." TextWrapping="Wrap" />
      <TextBox Name="textMappings" Text="{Binding MappingText}" AcceptsReturn="True" MinHeight="120" MaxHeight="230" FontFamily="monospace" />
      <TextBlock Text="RAM conditions (all must match): hexadecimal ADDRESS OP VALUE / MASK. Operators: == != &gt; &lt; &gt;= &lt;=. Leave empty for unconditional text." TextWrapping="Wrap" />
-     <TextBox Text="{Binding ConditionsText}" AcceptsReturn="True" MinHeight="65" MaxHeight="160" FontFamily="monospace" />
+       <TextBox Text="{Binding ConditionsText}" AcceptsReturn="True" MinHeight="65" MaxHeight="160" FontFamily="monospace" />
+<d:NamedConditionPicker Expression="{Binding ConditionsText}" />
+       <Button Content="Manage conditions…" Click="OnManageNamedConditions" />
      <TextBox Text="{Binding PreviewText}" PlaceholderText="Preview text" />
      <Button Content="Refresh font preview" Click="Preview" />
      <Border Background="#404040" Padding="8"><Image Source="{Binding Preview}" Stretch="Uniform" MaxHeight="240" /></Border>

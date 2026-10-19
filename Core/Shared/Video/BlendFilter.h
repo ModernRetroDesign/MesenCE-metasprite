@@ -1,6 +1,8 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <vector>
 
 class BlendFilter
 {
@@ -17,6 +19,14 @@ private:
 	}
 
 public:
+	// Own the unblended previous frame, never a pointer into a decoder buffer.
+	// Checkpoints must restore this input rather than the displayed average.
+	struct History
+	{
+		uint32_t FrameNumber = 0;
+		std::vector<uint32_t> Pixels;
+	};
+
 	BlendFilter() {}
 	~BlendFilter()
 	{
@@ -33,6 +43,30 @@ public:
 		_enabled = enabled;
 	}
 	void ResetHistory() { _historyValid = false; }
+	History CaptureHistory() const
+	{
+		History history;
+		if(_enabled && _historyValid && _size) {
+			history.FrameNumber = _frameNumber;
+			history.Pixels.assign(_prevFrame, _prevFrame + _size);
+		}
+		return history;
+	}
+	bool RestoreHistory(const History& history)
+	{
+		ResetHistory();
+		if(!_enabled || history.Pixels.empty() || history.Pixels.size() > std::numeric_limits<uint32_t>::max()) { return false; }
+		uint32_t size = (uint32_t)history.Pixels.size();
+		if(_size != size) {
+			delete[] _prevFrame;
+			_prevFrame = new uint32_t[size];
+			_size = size;
+		}
+		std::copy(history.Pixels.begin(), history.Pixels.end(), _prevFrame);
+		_frameNumber = history.FrameNumber;
+		_historyValid = true;
+		return true;
+	}
 
 	void ApplyFilter(uint32_t* out, uint32_t size, uint32_t frameNumber)
 	{

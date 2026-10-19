@@ -25,10 +25,12 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 	public sealed record SourceTile(uint Index,uint Address,int Palette);
 	private IReadOnlyDictionary<(int X,int Y),SourceTile>? _sourceTiles;
 	private int _capturedX,_capturedY;
+	private readonly int _sourceTileWidth;
+	public int SourceCellMaximum => SelectedProfile?.SourceTileWidth==6 ? 126 : 128;
 	public void SetSourceTiles(IReadOnlyDictionary<(int X,int Y),SourceTile> tiles,int x,int y) { _sourceTiles=tiles; _capturedX=x; _capturedY=y; }
 	public void UseSelectionCellSize() {
 		if(SelectedProfile is not {} p) { return; }
-		if(p.Width is <8 or >128 || p.Height is <8 or >128 || p.Width%8!=0 || p.Height%8!=0) { Status="Select one character cell, in multiples of 8 pixels up to 128×128."; return; }
+		if(p.SourceTileWidth is not (6 or 8) || p.Width< p.SourceTileWidth || p.Width>128 || p.Height is <8 or >128 || p.Width%p.SourceTileWidth!=0 || p.Height%8!=0) { Status="Select complete source tiles: 6×8 for SMS text mode, otherwise 8×8; maximum cell size 128×128."; return; }
 		p.CellWidth=p.Width; p.CellHeight=p.Height; p.CellOriginX=p.X%p.CellWidth; p.CellOriginY=p.Y%p.CellHeight;
 		OnPropertyChanged(nameof(SelectedProfile)); Status="Source cell size and grid origin taken from the selection. Select the full dialogue region afterwards, or disable the region limit.";
 	}
@@ -65,15 +67,17 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 	}
 	public void UseViewerSelection() {
 		if(_viewerSelection.Width<=0 || _viewerSelection.Height<=0) { Status="Select a rectangle in Tilemap Viewer before opening this editor, or draw one in the source preview."; return; }
-		SourceRegion=SnapSource(_viewerSelection,SourceWidth,SourceHeight); Status="Viewer selection assigned as the source capture region.";
+		SourceRegion=SnapSource(_viewerSelection,SourceWidth,SourceHeight,SelectedProfile?.SourceTileWidth ?? 8); Status="Viewer selection assigned as the source capture region.";
 	}
-	public static Rect SnapSource(Rect selection,int width,int height) {
-		double x=Math.Clamp(Math.Floor(selection.X/8)*8,0,Math.Max(0,width-8)), y=Math.Clamp(Math.Floor(selection.Y/8)*8,0,Math.Max(0,height-8));
-		return new Rect(x,y,Math.Max(1,Math.Min(width-x,Math.Ceiling(selection.Right/8)*8-x)),Math.Max(1,Math.Min(height-y,Math.Ceiling(selection.Bottom/8)*8-y)));
+	public static Rect SnapSource(Rect selection,int width,int height,int tileWidth=8) {
+		tileWidth=tileWidth==6 ? 6 : 8;
+		double x=Math.Clamp(Math.Floor(selection.X/tileWidth)*tileWidth,0,Math.Max(0,width-tileWidth)), y=Math.Clamp(Math.Floor(selection.Y/8)*8,0,Math.Max(0,height-8));
+		return new Rect(x,y,Math.Max(1,Math.Min(width-x,Math.Ceiling(selection.Right/tileWidth)*tileWidth-x)),Math.Max(1,Math.Min(height-y,Math.Ceiling(selection.Bottom/8)*8-y)));
 	}
 	public void MatchSourceRegion() { DisplayRegion=SourceRegion; RefreshPreview(); }
 	private void RegionPropertyChanged(object? sender,PropertyChangedEventArgs e) {
 		if(_settingRegion) { return; }
+		if(e.PropertyName==nameof(MetaTextProfile.SourceTileWidth)) { OnPropertyChanged(nameof(SourceCellMaximum)); }
 		if(e.PropertyName is nameof(MetaTextProfile.X) or nameof(MetaTextProfile.Y) or nameof(MetaTextProfile.Width) or nameof(MetaTextProfile.Height)) { OnPropertyChanged(nameof(SourceRegion)); }
 		if(e.PropertyName is nameof(MetaTextProfile.DisplayX) or nameof(MetaTextProfile.DisplayY) or nameof(MetaTextProfile.DisplayWidth) or nameof(MetaTextProfile.DisplayHeight)) { OnPropertyChanged(nameof(DisplayRegion)); }
 	}
@@ -88,10 +92,11 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 	[ObservableProperty] public partial Bitmap? Preview { get; set; }
 	[ObservableProperty] public partial string Status { get; set; }="Cached font overlays support NES, GB/GBC, GBA, PCE, SMS and SNES/WonderSwan tile backgrounds.";
 	public TextReplacementViewModel(string packPath,string hash,string system,IReadOnlyList<string> layerNames,int layer,
-		int tileIndex,int tileAddress,int palette,Func<bool> sameGame,Func<MetaSpritePack,bool>? apply=null)
+		int tileIndex,int tileAddress,int palette,Func<bool> sameGame,Func<MetaSpritePack,bool>? apply=null,int sourceTileWidth=8)
 	{
 		_packPath=packPath; _hash=hash; _system=system; LayerNames=layerNames; _sameGame=sameGame;
 		_apply=apply;
+		_sourceTileWidth=sourceTileWidth==6 ? 6 : 8;
 		_tileIndex=tileIndex; _tileAddress=tileAddress; _palette=palette;
 		var pack=MetaSpritePack.Load(packPath,hash,system);
 		_savedDefinitions=pack.GetTextDefinitionsSnapshot();
@@ -103,7 +108,7 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 	{
 		if(Profiles.Count>=64) { Status="A pack supports up to 64 text profiles."; return; }
 		int id=1; while(Profiles.Any(p => p.Id==id)) { id++; }
-		var profile=new MetaTextProfile {Id=id,Name=$"Text {id}",NativeLayer=layer,Proportional=true};
+		var profile=new MetaTextProfile {Id=id,Name=$"Text {id}",NativeLayer=layer,Proportional=true,WrapWords=true,SourceTileWidth=_sourceTileWidth,CellWidth=_sourceTileWidth};
 		Profiles.Add(profile); SelectedProfile=profile;
 	}
 	public void RemoveProfile()
@@ -119,10 +124,11 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 		_loading=true;
 		try {
 			MappingText=value==null ? "" : _mappingDrafts.GetValueOrDefault(value) ?? MetaTextMappingText.Format(value.Mappings);
-			ConditionsText=value==null ? "" : _conditionDrafts.GetValueOrDefault(value) ?? MetaMemoryConditionText.Format(value.MemoryConditions);
+			ConditionsText=value==null ? "" : _conditionDrafts.GetValueOrDefault(value) ?? MetaNamedConditionBindings.Text(value);
 		} finally { _loading=false; }
 		OnPropertyChanged(nameof(HasProfile)); ClearPreview();
 		OnPropertyChanged(nameof(SourceRegion)); OnPropertyChanged(nameof(DisplayRegion));
+		OnPropertyChanged(nameof(SourceCellMaximum));
 	}
 	partial void OnMappingTextChanged(string value) { if(!_loading && SelectedProfile!=null) { _mappingDrafts[SelectedProfile]=value; } }
 	partial void OnConditionsTextChanged(string value) { if(!_loading && SelectedProfile!=null) { _conditionDrafts[SelectedProfile]=value; } }
@@ -133,18 +139,20 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 		if(SelectedProfile is not MetaTextProfile profile) { return; }
 		try {
 			int tile=profile.MatchKind==MetaTextMatchKind.TileIndex ? _tileIndex : _tileAddress;
-			if(tile<0 && !selected && profile.CellWidth==8 && profile.CellHeight==8) { throw new InvalidDataException("The captured tile has no identity for this match type."); }
+			if(tile<0 && !selected && profile.CellWidth==profile.SourceTileWidth && profile.CellHeight==8) { throw new InvalidDataException("The captured tile has no identity for this match type."); }
 			if(!MetaTextProfile.IsCharacter(CaptureCharacter)) { throw new InvalidDataException("Enter one printable character to map the captured tile."); }
 			int palette=CapturePalette && _palette>=0 ? _palette : -1;
 			uint[] pattern=new[] {(uint)tile};
-			if(selected || _sourceTiles!=null || profile.CellWidth!=8 || profile.CellHeight!=8) {
-				if(profile.CellWidth%8!=0 || profile.CellHeight%8!=0) { throw new InvalidDataException("Source cell dimensions must be multiples of 8."); }
+			if(selected || _sourceTiles!=null || profile.CellWidth!=profile.SourceTileWidth || profile.CellHeight!=8) {
+				if(profile.SourceTileWidth is not (6 or 8) || profile.CellWidth%profile.SourceTileWidth!=0 || profile.CellHeight%8!=0) { throw new InvalidDataException("Source cells must contain complete 6x8 or 8x8 source tiles."); }
 				int x=selected ? profile.X : _capturedX,y=selected ? profile.Y : _capturedY;
 				var parts=new List<uint>(); int? exactPalette=null;
-				for(int dy=0;dy<profile.CellHeight;dy+=8) { for(int dx=0;dx<profile.CellWidth;dx+=8) {
+				for(int dy=0;dy<profile.CellHeight;dy+=8) { for(int dx=0;dx<profile.CellWidth;dx+=profile.SourceTileWidth) {
 					if(_sourceTiles==null || !_sourceTiles.TryGetValue((x+dx,y+dy),out var source)) { throw new InvalidDataException("The full source cell is unavailable in this tilemap snapshot. Refresh the viewer and reopen the editor."); }
 					if(CapturePalette && exactPalette.HasValue && exactPalette!=source.Palette) { throw new InvalidDataException("This source cell uses different palettes. Disable palette matching to capture it as a wildcard."); }
-					exactPalette=source.Palette; parts.Add(profile.MatchKind==MetaTextMatchKind.TileIndex ? source.Index : source.Address);
+						uint identity=profile.MatchKind==MetaTextMatchKind.TileIndex ? source.Index : source.Address;
+						if(identity==uint.MaxValue) { throw new InvalidDataException("This source tile has no identity for the selected match type. Try graphics-address matching."); }
+						exactPalette=source.Palette; parts.Add(identity);
 				} }
 				pattern=parts.ToArray(); tile=(int)pattern[0]; palette=CapturePalette ? exactPalette!.Value : -1;
 				profile.CellOriginX=x%profile.CellWidth; profile.CellOriginY=y%profile.CellHeight; OnPropertyChanged(nameof(SelectedProfile));
@@ -158,7 +166,7 @@ public partial class TextReplacementViewModel : ObservableObject, IDisposable
 	private void UpdateDraft(MetaTextProfile profile)
 	{
 		profile.Mappings=MetaTextMappingText.Parse(_mappingDrafts.GetValueOrDefault(profile) ?? MetaTextMappingText.Format(profile.Mappings));
-		profile.MemoryConditions=MetaMemoryConditionText.Parse(_conditionDrafts.GetValueOrDefault(profile) ?? MetaMemoryConditionText.Format(profile.MemoryConditions));
+		profile.MemoryConditions=MetaNamedConditionBindings.Parse(_conditionDrafts.GetValueOrDefault(profile) ?? MetaNamedConditionBindings.Text(profile),_packPath,_hash,_system,profile);
 		profile.Validate();
 		if(profile.NativeLayer>=LayerNames.Count) { throw new InvalidDataException($"{profile.Name}: select a hardware layer available on this system."); }
 	}

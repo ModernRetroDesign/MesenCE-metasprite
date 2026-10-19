@@ -16,7 +16,9 @@ public sealed class TextRegionSelector : Control
 	public static readonly StyledProperty<int> CanvasWidthProperty = AvaloniaProperty.Register<TextRegionSelector,int>(nameof(CanvasWidth),256);
 	public static readonly StyledProperty<int> CanvasHeightProperty = AvaloniaProperty.Register<TextRegionSelector,int>(nameof(CanvasHeight),240);
 	public static readonly StyledProperty<int> SnapProperty = AvaloniaProperty.Register<TextRegionSelector,int>(nameof(Snap),1);
-	public static readonly StyledProperty<bool> DrawModeProperty = AvaloniaProperty.Register<TextRegionSelector,bool>(nameof(DrawMode),true,defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
+	public static readonly StyledProperty<int> SnapXProperty = AvaloniaProperty.Register<TextRegionSelector,int>(nameof(SnapX),0);
+    public static readonly StyledProperty<int> SnapYProperty = AvaloniaProperty.Register<TextRegionSelector,int>(nameof(SnapY),0);
+    public static readonly StyledProperty<bool> DrawModeProperty = AvaloniaProperty.Register<TextRegionSelector,bool>(nameof(DrawMode),true,defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
 	public static readonly StyledProperty<bool> ShowOverlayProperty = AvaloniaProperty.Register<TextRegionSelector,bool>(nameof(ShowOverlay),true);
 	public Bitmap? Image { get => GetValue(ImageProperty); set => SetValue(ImageProperty,value); }
 	public Bitmap? Overlay { get => GetValue(OverlayProperty); set => SetValue(OverlayProperty,value); }
@@ -24,19 +26,23 @@ public sealed class TextRegionSelector : Control
 	public int CanvasWidth { get => GetValue(CanvasWidthProperty); set => SetValue(CanvasWidthProperty,value); }
 	public int CanvasHeight { get => GetValue(CanvasHeightProperty); set => SetValue(CanvasHeightProperty,value); }
 	public int Snap { get => GetValue(SnapProperty); set => SetValue(SnapProperty,value); }
-	public bool DrawMode { get => GetValue(DrawModeProperty); set => SetValue(DrawModeProperty,value); }
+	public int SnapX { get => GetValue(SnapXProperty); set => SetValue(SnapXProperty,value); }
+    public int SnapY { get => GetValue(SnapYProperty); set => SetValue(SnapYProperty,value); }
+    private int StepX => Math.Max(1,SnapX>0 ? SnapX : Snap);
+    private int StepY => Math.Max(1,SnapY>0 ? SnapY : Snap);
+    public bool DrawMode { get => GetValue(DrawModeProperty); set => SetValue(DrawModeProperty,value); }
 	public bool ShowOverlay { get => GetValue(ShowOverlayProperty); set => SetValue(ShowOverlayProperty,value); }
 	public event EventHandler? EditCompleted;
 	private Point _start;
 	private Rect _original;
 	private bool _drag;
 	private int _edges; // left/right/top/bottom; 0 moves, -1 creates
-	static TextRegionSelector() { AffectsRender<TextRegionSelector>(ImageProperty,OverlayProperty,RegionProperty,CanvasWidthProperty,CanvasHeightProperty,SnapProperty,ShowOverlayProperty); }
+	static TextRegionSelector() { AffectsRender<TextRegionSelector>(ImageProperty,OverlayProperty,RegionProperty,CanvasWidthProperty,CanvasHeightProperty,SnapProperty,SnapXProperty,SnapYProperty,ShowOverlayProperty); }
 	public TextRegionSelector() { Focusable=true; ClipToBounds=true; MinHeight=180; }
 	private double Scale => Math.Max(.001,Math.Min(Bounds.Width/Math.Max(1,CanvasWidth),Bounds.Height/Math.Max(1,CanvasHeight)));
 	private Point Origin => new((Bounds.Width-CanvasWidth*Scale)/2,(Bounds.Height-CanvasHeight*Scale)/2);
 	private Point Native(Point point) => new(Math.Clamp((point.X-Origin.X)/Scale,0,CanvasWidth),Math.Clamp((point.Y-Origin.Y)/Scale,0,CanvasHeight));
-	private double Round(double value) => Math.Round(value/Math.Max(1,Snap))*Math.Max(1,Snap);
+	private static double Round(double value,double step) => Math.Round(value/step)*step;
 	public override void Render(DrawingContext context)
 	{
 		base.Render(context); context.FillRectangle(Brushes.DimGray,new Rect(Bounds.Size));
@@ -47,7 +53,7 @@ public sealed class TextRegionSelector : Control
 		var visible=new Rect(Origin.X+r.X*Scale,Origin.Y+r.Y*Scale,r.Width*Scale,r.Height*Scale);
 		using(context.PushClip(canvas)) {
 			if(ShowOverlay && Overlay!=null) { context.DrawImage(Overlay,new Rect(Overlay.Size),visible); }
-			var color=Snap>1 ? Brushes.Cyan : Brushes.Orange;
+			var color=StepX>1 || StepY>1 ? Brushes.Cyan : Brushes.Orange;
 			context.DrawRectangle(null,new Pen(color,2),visible);
 			foreach(var p in new[] {visible.TopLeft,visible.TopRight,visible.BottomLeft,visible.BottomRight,
 				new Point(visible.Center.X,visible.Top),new Point(visible.Center.X,visible.Bottom),new Point(visible.Left,visible.Center.Y),new Point(visible.Right,visible.Center.Y)}) {
@@ -71,21 +77,21 @@ public sealed class TextRegionSelector : Control
 	protected override void OnPointerMoved(PointerEventArgs e)
 	{
 		base.OnPointerMoved(e); if(!_drag) { return; }
-		Point p=Native(e.GetPosition(this)); double step=Math.Max(1,Snap);
-		double dx=Round(p.X-_start.X),dy=Round(p.Y-_start.Y);
+		Point p=Native(e.GetPosition(this)); double stepX=StepX,stepY=StepY;
+		double dx=Round(p.X-_start.X,stepX),dy=Round(p.Y-_start.Y,stepY);
 		Rect r=_original;
 		if(_edges==-1) {
-			double x=Math.Floor((Math.Min(_start.X,p.X)+1e-7)/step)*step,y=Math.Floor((Math.Min(_start.Y,p.Y)+1e-7)/step)*step;
-			double right=Math.Ceiling((Math.Max(_start.X,p.X)-1e-7)/step)*step,bottom=Math.Ceiling((Math.Max(_start.Y,p.Y)-1e-7)/step)*step;
-			r=new Rect(x,y,Math.Max(step,right-x),Math.Max(step,bottom-y));
+            double x=Math.Floor((Math.Min(_start.X,p.X)+1e-7)/stepX)*stepX,y=Math.Floor((Math.Min(_start.Y,p.Y)+1e-7)/stepY)*stepY;
+            double right=Math.Ceiling((Math.Max(_start.X,p.X)-1e-7)/stepX)*stepX,bottom=Math.Ceiling((Math.Max(_start.Y,p.Y)-1e-7)/stepY)*stepY;
+			r=new Rect(x,y,Math.Max(stepX,right-x),Math.Max(stepY,bottom-y));
 		} else if(_edges==0) {
-			r=new Rect(Math.Clamp(Round(r.X+dx),0,Math.Max(0,CanvasWidth-r.Width)),Math.Clamp(Round(r.Y+dy),0,Math.Max(0,CanvasHeight-r.Height)),r.Width,r.Height);
+			r=new Rect(Math.Clamp(Round(r.X+dx,stepX),0,Math.Max(0,CanvasWidth-r.Width)),Math.Clamp(Round(r.Y+dy,stepY),0,Math.Max(0,CanvasHeight-r.Height)),r.Width,r.Height);
 		} else {
 			double left=r.Left,top=r.Top,right=r.Right,bottom=r.Bottom;
-			if((_edges&1)!=0) { left=Math.Clamp(Round(left+dx),0,Math.Max(0,right-step)); }
-			if((_edges&2)!=0) { right=Math.Clamp(Round(right+dx),left+step,Math.Max(left+step,CanvasWidth)); }
-			if((_edges&4)!=0) { top=Math.Clamp(Round(top+dy),0,Math.Max(0,bottom-step)); }
-			if((_edges&8)!=0) { bottom=Math.Clamp(Round(bottom+dy),top+step,Math.Max(top+step,CanvasHeight)); }
+			if((_edges&1)!=0) { left=Math.Clamp(Round(left+dx,stepX),0,Math.Max(0,right-stepX)); }
+			if((_edges&2)!=0) { right=Math.Clamp(Round(right+dx,stepX),left+stepX,Math.Max(left+stepX,CanvasWidth)); }
+			if((_edges&4)!=0) { top=Math.Clamp(Round(top+dy,stepY),0,Math.Max(0,bottom-stepY)); }
+			if((_edges&8)!=0) { bottom=Math.Clamp(Round(bottom+dy,stepY),top+stepY,Math.Max(top+stepY,CanvasHeight)); }
 			r=new Rect(left,top,right-left,bottom-top);
 		}
 		SetCurrentValue(RegionProperty,new Rect(r.X,r.Y,Math.Min(r.Width,CanvasWidth-r.X),Math.Min(r.Height,CanvasHeight-r.Y)));
@@ -99,9 +105,9 @@ public sealed class TextRegionSelector : Control
 	protected override void OnKeyDown(KeyEventArgs e)
 	{
 		base.OnKeyDown(e); int dx=e.Key==Key.Left ? -1 : e.Key==Key.Right ? 1 : 0,dy=e.Key==Key.Up ? -1 : e.Key==Key.Down ? 1 : 0;
-		if(dx==0 && dy==0) { return; } int step=Math.Max(1,Snap)*(e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? 10 : 1); Rect r=Region;
-		if(e.KeyModifiers.HasFlag(KeyModifiers.Control)) { r=new Rect(r.X,r.Y,Math.Clamp(r.Width+dx*step,Math.Max(1,Snap),Math.Max(Math.Max(1,Snap),CanvasWidth-r.X)),Math.Clamp(r.Height+dy*step,Math.Max(1,Snap),Math.Max(Math.Max(1,Snap),CanvasHeight-r.Y))); }
-		else { r=new Rect(Math.Clamp(r.X+dx*step,0,Math.Max(0,CanvasWidth-r.Width)),Math.Clamp(r.Y+dy*step,0,Math.Max(0,CanvasHeight-r.Height)),r.Width,r.Height); }
+		if(dx==0 && dy==0) { return; } int multiplier=e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? 10 : 1,stepX=StepX*multiplier,stepY=StepY*multiplier; Rect r=Region;
+		if(e.KeyModifiers.HasFlag(KeyModifiers.Control)) { r=new Rect(r.X,r.Y,Math.Clamp(r.Width+dx*stepX,StepX,Math.Max(StepX,CanvasWidth-r.X)),Math.Clamp(r.Height+dy*stepY,StepY,Math.Max(StepY,CanvasHeight-r.Y))); }
+		else { r=new Rect(Math.Clamp(r.X+dx*stepX,0,Math.Max(0,CanvasWidth-r.Width)),Math.Clamp(r.Y+dy*stepY,0,Math.Max(0,CanvasHeight-r.Height)),r.Width,r.Height); }
 		SetCurrentValue(RegionProperty,r); EditCompleted?.Invoke(this,EventArgs.Empty); e.Handled=true;
 	}
 }

@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Mesen.Debugger.ViewModels"
+        x:Class="Mesen.Debugger.Windows.NamedConditionWindow"
+        x:DataType="vm:NamedConditionEditorViewModel"
+        Title="Named RAM conditions" Width="620" Height="620" MinWidth="520" MinHeight="540">
+  <Grid Margin="14" RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="10">
+    <TextBlock Text="{Binding SelectionInfo}" TextWrapping="Wrap" />
+    <ListBox Grid.Row="1" ItemsSource="{Binding Entries}" SelectedItem="{Binding SelectedEntry}" MinHeight="100" />
+    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+      <Button Content="+ New" Click="NewClicked" />
+      <Button Content="− Remove" Click="RemoveClicked" />
+      <Button Content="Reload saved" Click="ReloadClicked" />
+    </StackPanel>
+    <Grid Grid.Row="3" ColumnDefinitions="120,*" RowDefinitions="Auto,Auto" RowSpacing="8">
+      <TextBlock Text="Name" VerticalAlignment="Center" />
+      <TextBox Grid.Column="1" Text="{Binding ConditionName}" MaxLength="64" PlaceholderText="DialogBoxOpen" />
+      <TextBlock Grid.Row="1" Text="CPU address (hex)" VerticalAlignment="Center" />
+      <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding AddressHex}" />
+    </Grid>
+    <CheckBox Grid.Row="4" Content="Address alias — supply the value in the condition box" IsChecked="{Binding AddressAlias}" />
+    <Grid Grid.Row="5" ColumnDefinitions="100,*,*" ColumnSpacing="10" RowDefinitions="Auto,Auto" RowSpacing="4">
+      <TextBlock Text="Comparison" /><TextBlock Grid.Column="1" Text="Value (hex)" /><TextBlock Grid.Column="2" Text="Mask (hex, optional)" />
+      <ComboBox Grid.Row="1" ItemsSource="{Binding Operators}" SelectedIndex="{Binding OperatorIndex}" HorizontalAlignment="Stretch" />
+      <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ValueHex}" IsEnabled="{Binding !AddressAlias}" />
+      <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding MaskHex}" />
+    </Grid>
+    <TextBlock Grid.Row="6" Text="{Binding ResolvedPreview}" TextWrapping="Wrap" />
+    <TextBlock Grid.Row="7" Text="{Binding Status}" TextWrapping="Wrap" />
+    <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="Save named condition" Click="SaveClicked" />
+      <Button Content="Close" Click="CloseClicked" />
+    </StackPanel>
+  </Grid>
+</Window>

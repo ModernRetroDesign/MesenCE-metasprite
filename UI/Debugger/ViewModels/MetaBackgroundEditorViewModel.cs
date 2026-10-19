@@ -20,6 +20,8 @@ namespace Mesen.Debugger.ViewModels;
 
 public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposable
 {
+	private List<MetaMemoryCondition> ParseNamedMemoryConditions(string text,IMetaMemoryConditionOwner? owner=null) =>
+		MetaNamedConditionBindings.Parse(text,_metaPackPath,_metaPack.RomHash,_cpuType.ToString(),owner);
  public ObservableCollection<MetaBackgroundLayer> MetaBackgrounds { get; } = new();
  [ObservableProperty] public partial MetaBackgroundLayer? SelectedMetaBackground { get; set; }
  [ObservableProperty] public partial Bitmap? MetaBackgroundPreview { get; set; }
@@ -34,7 +36,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
   SavedCameraInfo = HasSavedCamera ? $"Saved camera\nX: {Describe(_metaPack.SavedCamera!.X)}\nY: {Describe(_metaPack.SavedCamera.Y)}" : "No saved CPU camera for this game.";
  }
  private void SaveCameraChanges() {
-  if(SelectedMetaBackground is MetaBackgroundLayer layer) { layer.MemoryConditions = MetaMemoryConditionText.Parse(MemoryConditionsText); }
+  if(SelectedMetaBackground is MetaBackgroundLayer layer) { layer.MemoryConditions = ParseNamedMemoryConditions(MemoryConditionsText,layer); }
   SavePack();
  }
  public void SaveCpuCamera() {
@@ -120,6 +122,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
  {
   _metaPack.ValidateSavedCamera();
   if(EmuApi.GetRomHash(HashType.Sha1) != _metaPack.RomHash) { throw new InvalidDataException("The ROM changed. Reopen the background editor."); }
+  _metaPack.ResolveNamedConditions(Path.GetDirectoryName(Path.GetFullPath(_metaPackPath))!);
   foreach(var layer in _metaPack.BackgroundLayers) {
    layer.Validate();
    if(layer.Enabled && layer.MemoryConditions.Count == 0) { throw new InvalidDataException($"Background {layer.Id:D3} requires at least one CPU memory condition before enabling gameplay replacement."); }
@@ -137,7 +140,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
  {
   if(_metaLoadFailed || _metaPackPath.Length == 0) { return; }
   try {
-   if(SelectedMetaBackground is MetaBackgroundLayer layer) { layer.MemoryConditions = MetaMemoryConditionText.Parse(MemoryConditionsText); }
+   if(SelectedMetaBackground is MetaBackgroundLayer layer) { layer.MemoryConditions = ParseNamedMemoryConditions(MemoryConditionsText,layer); }
    SavePack(); ApplyMetaReplacements(); RefreshMetaBackgroundPreview();
   }
   catch(Exception ex) { MetaStatus = "Could not save backgrounds: " + ex.Message; }
@@ -149,7 +152,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 		return new PngAnimationViewModel($"PNG Animation — Background {layer.Id:D3}",Path.GetDirectoryName(_metaPackPath)!,layer.Animation,layer.ArtworkScale,0,0,true,animation => {
 			if(!ReferenceEquals(pack,_metaPack) || !pack.BackgroundLayers.Contains(layer) || EmuApi.GetRomHash(HashType.Sha1)!=pack.RomHash) { return (false,"The game or background changed. Reopen the animation editor."); }
 			var previous=layer.Animation; layer.Animation=animation; bool saved=false;
-			try { layer.MemoryConditions=MetaMemoryConditionText.Parse(MemoryConditionsText); SavePack(); saved=true; ApplyMetaReplacements(); RefreshMetaBackgroundPreview(); }
+			try { layer.MemoryConditions=ParseNamedMemoryConditions(MemoryConditionsText,layer); SavePack(); saved=true; ApplyMetaReplacements(); RefreshMetaBackgroundPreview(); }
 			catch(Exception ex) { if(!saved) { layer.Animation=previous; } MetaStatus="Could not save background animation: "+ex.Message; }
 			return (saved,MetaStatus);
 		});
@@ -160,7 +163,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
    var latest = MetaSpritePack.Load(_metaPackPath, _metaPack.RomHash, _cpuType.ToString());
    MetaStatus = MetaSpriteRuntimeLoader.Apply(latest, _metaPackPath) ? "Background definitions saved and applied." : "Saved; could not apply for this console layout.";
 			if(_cpuType == CpuType.Snes && latest.BackgroundLayers.Any(layer => layer.Enabled)) {
-				MetaStatus += " SNES uses the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and interlaced rewind replacements remain pending. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
+				MetaStatus += " SNES uses the default filter and neutral color settings. Color math supports normal-width fields and mode 5/6 or pseudo-hires output. Hires OBJ-interlace math and Current Field/Weave/Bob/Bob Blend rewind are supported. Artwork follows enabled background layers, including transparent texels, with native priority and windows.";
 			}
   } catch(Exception ex) { MetaStatus = "Saved; could not apply backgrounds: " + ex.Message; }
  }
@@ -246,7 +249,7 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 		string? createdPath = null;
 		bool saved = false;
 		try {
-			layer.MemoryConditions = MetaMemoryConditionText.Parse(MemoryConditionsText);
+			layer.MemoryConditions = ParseNamedMemoryConditions(MemoryConditionsText,layer);
 			using Bitmap bitmap = new(path);
 			MetaSpritePlacement.ValidateCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, layer.ArtworkScale);
 			string destination = PrepareBackgroundArtwork(path, ref createdPath);
@@ -277,14 +280,14 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 	partial void OnSelectedMetaBackgroundChanged(MetaBackgroundLayer? value)
 	{
 		if(value != null) { value.PropertyChanged += BackgroundPlacementChanged; value.CameraX.PropertyChanged += BackgroundPlacementChanged; value.CameraY.PropertyChanged += BackgroundPlacementChanged; }
-		MemoryConditionsText = value == null ? "" : _invalidConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaMemoryConditionText.Format(value.MemoryConditions);
+		MemoryConditionsText = value == null ? "" : _invalidConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaNamedConditionBindings.Text(value);
 		RefreshMetaBackgroundPreview();
 		RefreshCameraReadout();
 	}
 	partial void OnMemoryConditionsTextChanged(string value)
 	{
 		if(SelectedMetaBackground is not MetaBackgroundLayer layer) { return; }
-		try { layer.MemoryConditions = MetaMemoryConditionText.Parse(value); _invalidConditionDrafts.Remove(layer); }
+		try { layer.MemoryConditions = ParseNamedMemoryConditions(value,layer); _invalidConditionDrafts.Remove(layer); }
 		catch(InvalidDataException ex) { _invalidConditionDrafts[layer] = value; MetaStatus = ex.Message; }
 	}
 
@@ -314,7 +317,6 @@ public partial class MetaBackgroundEditorViewModel : ObservableObject, IDisposab
 		if(index < 0) { return; }
 		_metaPack.BackgroundLayers.RemoveAt(index);
 		try {
-			foreach(var remaining in _metaPack.BackgroundLayers) { remaining.Validate(); }
 			SavePack();
 		} catch(Exception ex) {
 			_metaPack.BackgroundLayers.Insert(index, layer);

@@ -11,6 +11,7 @@ namespace Mesen.Utilities;
 
 class DependencyHelper
 {
+	[System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("SingleFile", "IL3000", Justification = "Unbundled builds use the assembly directory; single-file builds explicitly fall back to AppContext.BaseDirectory.")]
 	public static void ExtractNativeDependencies(string dest)
 	{
 		using(Stream? depStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Mesen.Dependencies.zip")) {
@@ -18,21 +19,24 @@ class DependencyHelper
 				throw new Exception("Missing dependencies.zip");
 			}
 
-#if DEBUG
+			using ZipArchive zip = new(depStream);
 			try {
-				//In builds done via VS (without the "OptimizeUi" flag), the core is not embedded in the .exe (to improve build performance)
-				//Copy it directly from the bin folder to the home folder
-				string[] extensions = new string[] { ".dll", ".so", "dylib" };
+				// Unbundled Debug and Release builds both ship an adjacent core.
+				// Refresh the home-folder copy before the resolver loads it. Bundled
+				// builds extract their own core from the archive below.
+				string sourceFolder = Path.GetDirectoryName(typeof(DependencyHelper).Assembly.Location) ?? "";
+				if(sourceFolder.Length == 0) { sourceFolder = AppContext.BaseDirectory; }
+				string[] extensions = new string[] { ".dll", ".so", ".dylib" };
 				foreach(string ext in extensions) {
-					string src = Path.Join(Program.OriginalFolder, "MesenCore" + ext);
-					if(File.Exists(src)) {
-						File.Copy(src, Path.Join(dest, "MesenCore" + ext), true);
+					if(zip.Entries.Any(entry => entry.FullName == "MesenCore" + ext)) { continue; }
+					string src = Path.Join(sourceFolder, "MesenCore" + ext);
+					string target = Path.Join(dest, "MesenCore" + ext);
+					if(File.Exists(src) && !Path.GetFullPath(src).Equals(Path.GetFullPath(target), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) {
+						File.Copy(src, target, true);
 					}
 				}
 			} catch { }
-#endif
 
-			using ZipArchive zip = new(depStream);
 			foreach(ZipArchiveEntry entry in zip.Entries) {
 				try {
 					if(entry.FullName.StartsWith("Internal")) {

@@ -474,6 +474,7 @@ foreach(string invalidCondition in new[] { "C000", "C000 = 100", "C000 = 01 / 10
 	try { MetaMemoryConditionText.Parse(invalidCondition); } catch(InvalidDataException) { invalidEditorInput = true; }
 	Check(invalidEditorInput, "Condition editor must reject invalid input before saving.");
 }
+NamedConditionTests.Run();
 var runtimeGroup = new MetaSpriteGroup { Id = 22, Width = 8, Height = 8, Enabled = true };
 runtimeGroup.Members.Add(new() { Width = 8, Height = 8, Pixels = Enumerable.Repeat(0xFFFF0000u, 64).ToArray() });
 runtimePack.Groups.Add(runtimeGroup);
@@ -745,6 +746,28 @@ runtimeGroup.Enabled = false;
 byte[] disabledPacket = MetaSpriteRuntimePacket.Create(runtimePack, _ => throw new Exception("Disabled groups must not load PNG assets."));
 Check(disabledPacket.Length == 8 && BitConverter.ToInt32(disabledPacket, 4) == 0, "An all-disabled pack must clear native definitions without reading artwork.");
 Console.WriteLine("PASS: all-disabled pack clears runtime definitions without loading PNG assets.");
+if(args.Length >= 3 && args[1] == "--snes-hires-obj-math") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), onlyHiresObjectMath: true);
+}
+if(args.Length >= 3 && args[1] == "--snes-bob-blend-rewind") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), onlyBobBlendObjectMath: true);
+}
+if(args.Length >= 3 && (args[1] == "--snes-bob-blend-rewind-mode5" || args[1] == "--snes-bob-blend-rewind-mode6")) {
+    string fixture = args[1].EndsWith("mode5") ? "mode5-hires-math-obj-interlace-bob-blend-field-both-screens" : "mode6-hires-math-operand-obj-interlace-bob-blend-field-both-screens-window";
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), fixtureFilter: fixture);
+}
+if(args.Length >= 3 && args[1] == "--snes-weave-rewind") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), onlyWeaveObjectMath: true);
+}
+if(args.Length >= 3 && args[1] == "--snes-weave-checkpoint") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), onlyWeaveObjectMath: true, checkpointOnly: true);
+}
+if(args.Length >= 3 && args[1] == "--snes-weave-checkpoint-pseudo") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), fixtureFilter: "pseudo-hires-math-operand-obj-interlace-both-screens", checkpointOnly: true);
+}
+if(args.Length >= 3 && args[1] == "--snes-weave-rewind-pseudo") {
+    GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")), fixtureFilter: "pseudo-hires-math-operand-obj-interlace-both-screens");
+}
 if(args.Length >= 3 && args[1] == "--snes-hires") {
 	GameplayFixture.RunSnesHiRes(Path.GetFullPath(args[2]), Path.GetFullPath(Path.Combine("Tests", "MetaSprites", "obj", "gameplay-fixture.gb")));
 }

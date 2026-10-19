@@ -3,6 +3,10 @@
 #include "Shared/Emulator.h"
 #include "Shared/SaveStateManager.h"
 #include "Utilities/CompressionHelper.h"
+#include "Shared/Video/VideoDecoder.h"
+#include "SNES/SnesConsole.h"
+#include "SNES/SnesPpu.h"
+#include "Shared/Video/MetaSnesFieldCheckpoint.h"
 
 void RewindData::GetStateData(stringstream& stateData, deque<RewindData>& prevStates, int32_t position)
 {
@@ -60,13 +64,52 @@ void RewindData::LoadState(Emulator* emu, deque<RewindData>& prevStates, int32_t
 	stream.write((char*)data.data(), data.size());
 	stream.seekg(0, ios::beg);
 
-	emu->Deserialize(stream, SaveStateManager::FileFormatVersion, true, std::nullopt, sendNotification);
+	emu->GetVideoDecoder()->WaitForAsyncFrameDecode();
+	if(emu->Deserialize(stream, SaveStateManager::FileFormatVersion, true, std::nullopt, sendNotification)==DeserializeResult::Success) {
+		vector<uint32_t> history;
+		for(auto& chunk:_frameBlendData) {
+			vector<uint8_t> decoded;
+			if(!CompressionHelper::Decompress(chunk,decoded) || decoded.size()%sizeof(uint32_t)) { history.clear(); break; }
+			size_t offset=history.size(); history.resize(offset+decoded.size()/sizeof(uint32_t));
+			memcpy(history.data()+offset,decoded.data(),decoded.size());
+		}
+		emu->GetVideoDecoder()->RestoreRewindBlendHistory(std::move(history));
+		if(!_ppuCaptureData.empty() && emu->GetConsoleType()==ConsoleType::Snes) {
+			vector<uint8_t> capture;
+			for(auto& chunk:_ppuCaptureData) {
+				vector<uint8_t> decoded;
+				if(!CompressionHelper::Decompress(chunk,decoded) || decoded.size()>MetaSnesFieldCheckpoint::MaxBytes-capture.size()) { capture.clear(); break; }
+				capture.insert(capture.end(),decoded.begin(),decoded.end());
+			}
+			if(!capture.empty()) { static_cast<SnesConsole*>(emu->GetConsole().get())->GetPpu()->RestoreReplacementRewindState(capture); }
+		}
+	}
 }
 
 void RewindData::SaveState(Emulator* emu, deque<RewindData>& prevStates, int32_t position)
 {
 	std::stringstream state;
 	emu->Serialize(state, true, 0);
+	_ppuCaptureData.clear();
+	if(emu->GetConsoleType()==ConsoleType::Snes) {
+		auto capture=static_cast<SnesConsole*>(emu->GetConsole().get())->GetPpu()->CaptureReplacementRewindState();
+		constexpr size_t ChunkBytes=FrameBlendChunkPixels*sizeof(uint32_t);
+		for(size_t offset=0;offset<capture.size();offset+=ChunkBytes) {
+			size_t count=std::min(ChunkBytes,capture.size()-offset); vector<uint8_t> chunk;
+			CompressionHelper::Compress(string((const char*)(capture.data()+offset),count),1,chunk);
+			_ppuCaptureData.push_back(std::move(chunk));
+		}
+	}
+	_frameBlendData.clear();
+	auto history=emu->GetVideoDecoder()->CaptureRewindBlendHistory();
+	// CompressionHelper bounds each decoded chunk to 10 MiB. Smaller chunks
+	// retain that bound even when full-canvas PNG scaling enlarges the frame.
+	for(size_t offset=0;offset<history.size();offset+=FrameBlendChunkPixels) {
+		size_t count=std::min(FrameBlendChunkPixels,history.size()-offset);
+		vector<uint8_t> chunk;
+		CompressionHelper::Compress(string((const char*)(history.data()+offset),count*sizeof(uint32_t)),1,chunk);
+		_frameBlendData.push_back(std::move(chunk));
+	}
 
 	string data = state.str();
 

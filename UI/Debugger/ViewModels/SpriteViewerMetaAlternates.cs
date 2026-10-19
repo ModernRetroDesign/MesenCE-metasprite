@@ -45,7 +45,7 @@ public partial class SpriteViewerViewModel
 	{
 		if(SelectedMetaAlternate is not MetaAlternateArtwork alternate) { return true; }
 		try {
-			MetaMemoryConditionText.Parse(MetaAlternateConditionsText); alternate.Validate();
+			ParseMetaConditions(MetaAlternateConditionsText); alternate.Validate();
 			if(MetaAlternatePreview != null) { MetaSpritePlacement.ValidateSpriteCanvas(MetaAlternatePreview.PixelSize.Width, MetaAlternatePreview.PixelSize.Height, alternate.Scale); }
 			return true;
 		} catch(InvalidDataException ex) { MetaStatus = "Correct the alternate settings before changing PNG: " + ex.Message; return false; }
@@ -58,14 +58,14 @@ public partial class SpriteViewerViewModel
 	partial void OnSelectedMetaAlternateChanged(MetaAlternateArtwork? value)
 	{
 		if(value != null) { value.PropertyChanged += MetaAlternatePropertyChanged; }
-		MetaAlternateConditionsText = value == null ? "" : _invalidAlternateConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaMemoryConditionText.Format(value.MemoryConditions);
+		MetaAlternateConditionsText = value == null ? "" : _invalidAlternateConditionDrafts.TryGetValue(value, out string? draft) ? draft : MetaNamedConditionBindings.Text(value);
 		RefreshMetaAlternatePreview();
 		RefreshMetaArtworkNavigation();
 	}
 	partial void OnMetaAlternateConditionsTextChanged(string value)
 	{
 		if(SelectedMetaAlternate is not MetaAlternateArtwork alternate) { return; }
-		try { alternate.MemoryConditions = MetaMemoryConditionText.Parse(value); _invalidAlternateConditionDrafts.Remove(alternate); }
+		try { alternate.MemoryConditions = ParseMetaConditions(value,alternate); _invalidAlternateConditionDrafts.Remove(alternate); }
 		catch(InvalidDataException ex) { _invalidAlternateConditionDrafts[alternate] = value; MetaStatus = ex.Message; }
 	}
 	private void RefreshMetaAlternatePreview()
@@ -111,7 +111,7 @@ public partial class SpriteViewerViewModel
 		var previousSelection = SelectedMetaAlternate;
 		string previousConditions = MetaAlternateConditionsText;
 		try {
-			var conditions = useCurrentConditions ? MetaMemoryConditionText.Parse(MetaAlternateConditionsText) : new System.Collections.Generic.List<MetaMemoryCondition>();
+			var conditions = useCurrentConditions ? ParseMetaConditions(MetaAlternateConditionsText) : new System.Collections.Generic.List<MetaMemoryCondition>();
 			if(group.AlternateArtwork.Count >= 64) { MetaStatus = "A group can contain up to 64 alternate PNGs."; return; }
 			using Bitmap bitmap = new(path);
 			int scale = Math.Max(1, group.ReplacementScale);
@@ -125,6 +125,8 @@ public partial class SpriteViewerViewModel
 			}
 			var alternate = new MetaAlternateArtwork { Name = Path.GetFileNameWithoutExtension(path), Path = Path.GetFileName(destination), Scale = scale,
 				OriginX = group.ReplacementOriginX, OriginY = group.ReplacementOriginY, MemoryConditions = conditions };
+			alternate.MemoryConditionExpression=useCurrentConditions ? MetaNamedConditionBindings.SavedExpression(previousConditions) : null;
+			alternate.NamedConditionsResolved=true;
 			addedAlternate = alternate;
 			group.AlternateArtwork.Add(alternate); MetaAlternates.Add(alternate); SelectedMetaAlternate = alternate;
 			saved = TrySaveMetaGroups();
@@ -156,7 +158,7 @@ public partial class SpriteViewerViewModel
 		bool saved = false;
 		try {
 			// Keep this alternate's name, conditions, scale and alignment when changing its artwork.
-			MetaMemoryConditionText.Parse(MetaAlternateConditionsText);
+			ParseMetaConditions(MetaAlternateConditionsText);
 			using Bitmap bitmap = new(path);
 			MetaSpritePlacement.ValidateSpriteCanvas(bitmap.PixelSize.Width, bitmap.PixelSize.Height, alternate.Scale);
 			string destination = Path.Combine(Path.GetDirectoryName(_metaPackPath)!, $"meta-{group.Id:D3}-alternate-{Guid.NewGuid():N}.png");

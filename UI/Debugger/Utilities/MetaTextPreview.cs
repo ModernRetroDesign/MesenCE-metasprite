@@ -8,29 +8,57 @@ using System.Text;
 
 namespace Mesen.Debugger.Utilities;
 
+public readonly record struct MetaTextPlacement(int Glyph,long X,long Y);
+
 public static class MetaTextPreview
 {
-	public static byte[] Render(MetaTextProfile profile,string directory,string text)
+	public static IReadOnlyList<MetaTextPlacement> Layout(MetaTextProfile profile,MetaTextGlyphSet atlas,string text)
 	{
 		var runes=text.EnumerateRunes().Take(128).ToArray();
-		var characters=runes.Where(r => !Rune.IsControl(r)).Select(r => r.ToString()).ToArray();
-		var atlas=(MetaTextGlyphSet)new MetaTextRasterizer.Budget().Rasterize(profile,directory,characters);
 		int scale=profile.RasterScale;
 		var indices=atlas.Select((g,i) => (g.Character,i)).ToDictionary(g => g.Character,g => g.i);
+		var ids=runes.Select(r => Rune.IsControl(r) ? -1 : indices[r.ToString()]).ToArray();
+		var separators=atlas.Select(g => MetaTextProfile.IsWordSeparator(g.Character)).ToArray();
+		int spacing=(int)Math.Round(profile.LetterSpacing*64);
+		bool words=profile.WrapWords && profile.WrapText && profile.UseDisplayRegion;
+		var wordWidths=words ? new long[ids.Length] : Array.Empty<long>();
+		if(words) { for(int i=ids.Length-1;i>=0;i--) { int id=ids[i]; if(id<0 || separators[id]) { continue; }
+			wordWidths[i]=profile.Proportional ? atlas[id].Advance64 : profile.CellWidth*64;
+			if(i+1<ids.Length && ids[i+1]>=0 && !separators[ids[i+1]]) {
+				wordWidths[i]+=spacing+wordWidths[i+1];
+				if(profile.Proportional && atlas.Kerning.TryGetValue(((ulong)id<<32)|(uint)ids[i+1],out int k)) { wordWidths[i]+=k; }
+			}
+		} }
 		int marginX=profile.UseDisplayRegion ? 0 : Math.Max(0,-atlas.Select(g => g.OffsetX).DefaultIfEmpty(0).Min());
 		int marginY=profile.UseDisplayRegion ? 0 : Math.Max(0,-atlas.Select(g => g.OffsetY).DefaultIfEmpty(0).Min());
 		long start=(long)marginX*64/scale,cursor=start,line=(long)marginY*64/scale;
-		int previous=-1;
-		var positions=new List<(int Glyph,long X,long Y)>();
-		foreach(var rune in runes) {
-			if(rune.Value=='\n') { cursor=start; line+=atlas.LineHeight64; previous=-1; continue; }
+		int previous=-1; bool pendingWrap=false;
+		var positions=new List<MetaTextPlacement>();
+		for(int i=0;i<runes.Length;i++) { var rune=runes[i];
+			if(rune.Value=='\n') { cursor=start; line+=atlas.LineHeight64; previous=-1; pendingWrap=false; continue; }
 			if(Rune.IsControl(rune)) { continue; }
-			int id=indices[rune.ToString()]; var g=atlas[id];
-			if(profile.Proportional && previous>=0 && atlas.Kerning.TryGetValue(((ulong)previous<<32)|(uint)id,out int kern)) { cursor+=kern; }
+			int id=ids[i]; var g=atlas[id];
+			int kern=0; if(profile.Proportional && previous>=0) { atlas.Kerning.TryGetValue(((ulong)previous<<32)|(uint)id,out kern); }
 			int advance=profile.Proportional ? g.Advance64 : profile.CellWidth*64;
+			if(words) {
+				bool separator=separators[id];
+				if(separator && (pendingWrap || (cursor+kern+advance>profile.DisplayWidth*64L && cursor>0))) { pendingWrap=true; previous=-1; continue; }
+				if(pendingWrap) { cursor=0; line+=atlas.LineHeight64; kern=0; pendingWrap=false; }
+				bool wordStart=!separator && (previous<0 || (i>0 && ids[i-1]>=0 && separators[ids[i-1]]));
+				if(wordStart && cursor>0 && cursor+kern+wordWidths[i]>profile.DisplayWidth*64L) { cursor=0; line+=atlas.LineHeight64; kern=0; }
+			}
+			cursor+=kern;
 			if(profile.UseDisplayRegion && profile.WrapText && cursor+advance>profile.DisplayWidth*64L && cursor>0) { cursor=0; line+=atlas.LineHeight64; }
-			positions.Add((id,cursor,line)); cursor+=advance+(int)Math.Round(profile.LetterSpacing*64); previous=id;
+			positions.Add(new(id,cursor,line)); cursor+=advance+spacing; previous=id;
 		}
+		return positions;
+	}
+	public static byte[] Render(MetaTextProfile profile,string directory,string text)
+	{
+		var characters=text.EnumerateRunes().Take(128).Where(r => !Rune.IsControl(r)).Select(r => r.ToString()).ToArray();
+		var atlas=(MetaTextGlyphSet)new MetaTextRasterizer.Budget().Rasterize(profile,directory,characters);
+		int scale=profile.RasterScale;
+		var positions=Layout(profile,atlas,text);
 		int width=profile.UseDisplayRegion ? profile.DisplayWidth*scale : Math.Min(2048,Math.Max(1,(int)Math.Ceiling(positions.Select(p => p.X*scale/64.0+atlas[p.Glyph].OffsetX+atlas[p.Glyph].Width).DefaultIfEmpty(1).Max())));
 		int height=profile.UseDisplayRegion ? profile.DisplayHeight*scale : Math.Min(2048,Math.Max(1,(int)Math.Ceiling(positions.Select(p => p.Y*scale/64.0+atlas[p.Glyph].OffsetY+atlas[p.Glyph].Height).DefaultIfEmpty(1).Max())));
 		if((long)width*height>8*1024*1024) { throw new InvalidDataException("Preview region exceeds 8 million pixels; reduce its dimensions or raster scale."); }

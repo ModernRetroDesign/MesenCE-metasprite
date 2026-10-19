@@ -611,6 +611,43 @@ public:
 		if(timing) { CaptureAnimationTiming(frame,groups,backgrounds,revision); }
 		else { frame.AnimationTiming.reset(); }
 	}
+	// Opposite-field rewind snapshots retain their original elapsed ticks. Resolve
+	// IDs against one locked definition revision, without observing live RAM or
+	// advancing/restoring the compositor's current activation clocks.
+	bool CaptureFieldAnimationBindings(const MetaSpriteFrame& frame,std::vector<uint64_t>& data,uint64_t& revision)
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		std::vector<std::pair<uint64_t,uint64_t>> entries;
+		if(frame.AnimationTiming) {
+			const auto& timing=*frame.AnimationTiming;
+			if(timing.Groups.get()!=_groups.get() || timing.Backgrounds.get()!=_backgroundLayers.get() || timing.Elapsed.size()>65536) { return false; }
+			std::unordered_map<const MetaPngArtworkAnimation*,uint64_t> ids;
+			for(const auto& binding:AnimationBindings()) { if(!ids.emplace(binding.second,binding.first).second) { return false; } }
+			for(const auto& elapsed:timing.Elapsed) {
+				auto found=ids.find(elapsed.first); if(found==ids.end()) { return false; }
+				entries.emplace_back(found->second,elapsed.second);
+			}
+		}
+		std::sort(entries.begin(),entries.end());
+		std::vector<uint64_t> result; result.reserve(entries.size()*2);
+		for(const auto& entry:entries) { result.push_back(entry.first); result.push_back(entry.second); }
+		data=std::move(result); revision=_animationRevision; return true;
+	}
+	bool RestoreFieldAnimationBindings(MetaSpriteFrame& frame,bool hasTiming,const std::vector<uint64_t>& data,uint64_t revision)
+	{
+		std::lock_guard<std::mutex> lock(_lock);
+		if(revision!=_animationRevision || data.size()%2 || data.size()>131072 || (!hasTiming && !data.empty())) { return false; }
+		std::shared_ptr<MetaPngAnimationSnapshot> timing;
+		if(hasTiming) {
+			timing=std::make_shared<MetaPngAnimationSnapshot>(); timing->Groups=_groups; timing->Backgrounds=_backgroundLayers;
+			auto bindings=AnimationBindings();
+			for(size_t i=0;i<data.size();i+=2) {
+				auto found=bindings.find(data[i]);
+				if(found==bindings.end() || !timing->Elapsed.emplace(found->second,data[i+1]).second) { return false; }
+			}
+		}
+		frame.AnimationTiming=std::move(timing); return true;
+	}
 	// Optional state section: only clocks and pack identities, never artwork or RAM.
 	std::vector<uint64_t> SaveAnimationState()
 	{
@@ -774,10 +811,14 @@ public:
 		auto candidates = !frame.NesRows.empty() ? BuildNesCandidates(frame, backgroundColor)
 			: frame.DecodedRows.empty() ? BuildGameboyCandidates(frame) : BuildDecodedCandidates(frame);
 		for(const auto& group : *groups) {
+			// Hires OBJ-interlace keeps full source rows in half-height fields.
+			// Preserve vertical PNG detail independently of the doubled X grid.
+			bool hiresObjectRows=frame.SnesColorEffects && frame.SpriteCoordinateScale==2 && !group.Members.empty() && std::any_of(candidates.begin(),candidates.end(),[&](const auto& c) { return c.SnesRowStep==2 && MatchesGraphic(c,group.Members[0]); });
 			auto includeScale = [&](const MetaMemorySnapshot& snapshot, uint32_t emulatedFrame, const MetaPngAnimationSnapshot* timing) {
 				if(MetaMemoryCondition::Matches(group.MemoryConditions, snapshot)) {
 					auto artwork = group.SelectArtwork(snapshot,emulatedFrame,timing);
-					_outputScale = std::max(_outputScale, (uint32_t)((std::clamp(artwork.ArtworkScale, 1, 10) + frame.SpriteCoordinateScale - 1) / frame.SpriteCoordinateScale));
+					int coordinateScale=hiresObjectRows ? 1 : frame.SpriteCoordinateScale;
+					_outputScale = std::max(_outputScale, (uint32_t)((std::clamp(artwork.ArtworkScale, 1, 10) + coordinateScale - 1) / coordinateScale));
 				}
 			};
 			includeScale(frame.MemorySnapshot,frame.FrameNumber,frame.AnimationTiming.get());
@@ -1283,7 +1324,7 @@ public:
 			struct PhaseOutcome { SnesResolvedScreen Screen; double Weight; };
 			std::vector<PhaseObject> objects;
 			std::vector<PhaseOutcome> primary,secondary,controlMain,controlSub;
-			auto replaced=[&](int id) { for(size_t i=0;i<candidates.size();i++) { if(consumed[i] && candidates[i].HardwareSprite==id) { return true; } } return false; };
+			auto replaced=[&](int id,const MetaSpritePixel& pixel) { for(size_t i=0;i<candidates.size();i++) { if(consumed[i] && candidates[i].HardwareSprite==id && (candidates[i].SnesRowStep==1 || pixel.SnesObjectSourceY>=0)) { return true; } } return false; };
 			auto readPlane=[&](int nx,int ny,bool mainPlane,int ordinaryPhase,int dy,uint32_t sx,uint32_t sy,std::vector<PhaseOutcome>& outcomes) {
 				const auto& raw=*source;
 				outcomes.clear(); const auto& pixel=raw.Pixels[(size_t)ny*raw.Width+nx];
@@ -1293,11 +1334,15 @@ public:
 				if(mainPlane ? pixel.SnesObjectsMain : pixel.SnesObjectsSub) {
 					for(const auto& canvas : snesCanvases) {
 						if(candidates[canvas.Members.front()].SnesField!=fieldTag) { continue; }
+						bool sourceRows=candidates[canvas.Members.front()].SnesRowStep==2;
+						if(sourceRows && pixel.SnesObjectSourceY<0) { continue; }
 						const auto& image=canvas.Image;
 						int64_t ax=((int64_t)(px-canvas.Left*2)*_outputScale+sx)*image.ArtworkScale/(2*_outputScale);
-						int64_t ay=((int64_t)(py-canvas.Top*2)*_outputScale+sy)*image.ArtworkScale/(2*_outputScale);
-						if(px<canvas.Left*2 || py<canvas.Top*2 || ax<0 || ay<0 || ax>=image.ArtworkWidth || ay>=image.ArtworkHeight) { continue; }
-						auto distance=[&](size_t index) { const auto& m=candidates[index]; int64_t dx=std::max({(int64_t)m.X-nx,(int64_t)nx-m.X-m.Width+1,int64_t(0)}),ddy=std::max({(int64_t)m.Y-ny,(int64_t)ny-m.Y-m.Height+1,int64_t(0)}); return dx*dx+ddy*ddy; };
+						int64_t relativeY=sourceRows ? (int64_t)(pixel.SnesObjectSourceY-canvas.Top)*_outputScale+sy : (int64_t)(py-canvas.Top*2)*_outputScale+sy;
+						int64_t ay=relativeY*image.ArtworkScale/((sourceRows ? 1 : 2)*_outputScale);
+						if(px<canvas.Left*2 || relativeY<0 || ax<0 || ay<0 || ax>=image.ArtworkWidth || ay>=image.ArtworkHeight) { continue; }
+						int logicalY=sourceRows ? pixel.SnesObjectSourceY : ny;
+						auto distance=[&](size_t index) { const auto& m=candidates[index]; int64_t dx=std::max({(int64_t)m.X-nx,(int64_t)nx-m.X-m.Width+1,int64_t(0)}),ddy=std::max({(int64_t)m.Y-logicalY,(int64_t)logicalY-m.Y-m.Height+1,int64_t(0)}); return dx*dx+ddy*ddy; };
 						auto member=*std::min_element(canvas.Members.begin(),canvas.Members.end(),[&](size_t a,size_t b) { auto da=distance(a),db=distance(b); return da!=db ? da<db : order(candidates[a].HardwareSprite)>order(candidates[b].HardwareSprite); });
 						const auto& m=candidates[member]; if(m.SnesPriorityCode>3) { continue; } objects.push_back({image.Artwork[ay*image.ArtworkWidth+ax],order(m.HardwareSprite),pixel.SnesObjectPriorities[m.SnesPriorityCode],pixel.SnesObjectMath && m.SnesPalette>3,true}); changed=true;
 					}
@@ -1305,11 +1350,11 @@ public:
 					for(const auto& object : pixel.SnesNativeObjects) {
 						if(object.Sprite<0 || object.PriorityCode>3 || object.Palette>7) { continue; }
 						sampled|=object.Sprite==pixel.SnesObjectSprite;
-						if(replaced(object.Sprite+idOffset)) { changed=true; continue; }
+						if(replaced(object.Sprite+idOffset,pixel)) { changed=true; continue; }
 						objects.push_back({Rgb555(object.Color),order(object.Sprite),pixel.SnesObjectPriorities[object.PriorityCode],pixel.SnesObjectMath && object.Palette>3,false});
 					}
 					if(!sampled && pixel.SnesObjectSprite>=0 && pixel.SnesObjectPriorityCode<=3) {
-						if(replaced(pixel.SnesObjectSprite+idOffset)) { changed=true; }
+						if(replaced(pixel.SnesObjectSprite+idOffset,pixel)) { changed=true; }
 						else { objects.push_back({Rgb555(pixel.SnesObjectColor),order(pixel.SnesObjectSprite),pixel.SnesObjectPriorities[pixel.SnesObjectPriorityCode],pixel.SnesObjectMath && pixel.SnesObjectPalette>3,false}); }
 					}
 				}

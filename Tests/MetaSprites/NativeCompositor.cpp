@@ -1,5 +1,6 @@
 #include "../../Core/Shared/Video/MetaSpriteCompositor.h"
 #include "../../Core/Shared/Video/MetaSnesCapture.h"
+#include "../../Core/Shared/Video/MetaSnesFieldCheckpoint.h"
 #include "../../Core/Shared/Video/MetaPngAnimation.h"
 #include "../../Core/Shared/Video/MetaSpritePacket.h"
 #include "../../Core/Shared/Video/MetaBackgroundReplacement.h"
@@ -143,6 +144,17 @@ static void BenchmarkTextComposition(bool proportional=false)
 
 int main(int argc, char** argv)
 {
+	{
+		MetaTextReplacement profile; profile.Glyphs.resize(1); profile.Mappings[MetaTextReplacement::Key(UINT32_MAX,-1)]=0;
+		MetaTextPixel tile; tile.Valid=true; tile.TileIndex=UINT32_MAX; tile.GraphicsAddress=0x28;
+		MetaBackgroundSample sample; sample.Valid=true;
+		assert(!profile.Find(tile,sample));
+		profile.MatchKind=1; profile.Mappings[MetaTextReplacement::Key(0x28,-1)]=0; assert(profile.Find(tile,sample));
+		tile.GraphicsAddress=UINT32_MAX; assert(!profile.Find(tile,sample));
+		profile.MatchKind=0; profile.SourceTileWidth=6; profile.CellWidth=6; profile.Mappings[MetaTextReplacement::Key(1,-1)]=0; tile.TileIndex=1;
+		assert(!profile.Find(tile,sample)); tile.TileWidth=6; assert(profile.Find(tile,sample));
+		std::cout<<"PASS: unavailable source identities never match, while address-only sources remain usable."<<std::endl;
+	}
 	if(argc>1 && std::string(argv[1])=="--benchmark-text") { BenchmarkTextComposition(); return 0; }
 	if(argc>1 && std::string(argv[1])=="--benchmark-text-proportional") { BenchmarkTextComposition(true); return 0; }
 	{
@@ -217,7 +229,39 @@ int main(int argc, char** argv)
 		assert(result[28*32+10]==0xFF445566 && result[30*32+10]==0xFF101010);
 		std::cout<<"PASS: proportional kerning, full glyph/effect bounds beyond 8x8, independent decoration colors, display-region clipping, font line height, wrapping and region fill."<<std::endl;
 	}
+    for(int unit:{6,8}) {
+        int width=unit*5; MetaSpriteFrame frame(width,16); frame.TextPixels.resize(width*16); std::vector<uint32_t> base(width*16,0xFF101010);
+        auto rows=[&](std::vector<int> first,std::vector<int> second=std::vector<int>{}) {
+            std::fill(frame.TextPixels.begin(),frame.TextPixels.end(),MetaTextPixel{});
+            for(int row=0;row<2;row++) { const auto& ids=row ? second : first;
+                for(int y=row*8;y<row*8+8;y++) { for(int x=0;x<int(ids.size())*unit;x++) { auto& tile=frame.TextPixels[y*width+x];
+                    tile.Valid=true; tile.TileWidth=uint8_t(unit); tile.LocalX=uint8_t(x%unit); tile.LocalY=y%8; tile.TileIndex=ids[x/unit]; frame.Pixels[y*width+x].BackgroundSample={x,y,0,true};
+                } }
+            }
+        };
+        MetaTextReplacement p; p.Id=1; p.SourceTileWidth=p.CellWidth=unit; p.Proportional=true; p.UseDisplayRegion=true; p.Unclipped=true; p.WrapWords=true;
+        p.DisplayWidth=7; p.DisplayHeight=16; p.LineHeight64=4*64; p.PaletteColor=false; p.Color=0xFF00FF00; p.Glyphs.resize(3);
+        for(auto& g:p.Glyphs) { g.Width=g.Height=1; g.Pixels={0}; g.Advance64=2*64; }
+        p.Glyphs[0].Pixels={0xFFFFFFFF}; p.Glyphs[1].Decorations={0xFF0000FF}; p.Glyphs[2].WordSeparator=true; p.Glyphs[2].Advance64=64;
+        for(int id=1;id<=3;id++) { p.Mappings[MetaTextReplacement::Key(id,-1)]=id-1; }
+        MetaTextOverlay overlay; auto native=[](uint16_t) { return 0xFFFFFFFFu; };
+        auto draw=[&]() { uint32_t scale=1; auto output=overlay.Apply(base.data(),width,16,frame,0,0,scale,{p},native); assert(scale==1); return output; };
+        rows({1,1,3,2,2}); auto output=draw(); assert(output[0]==0xFF00FF00 && output[2]==0xFF00FF00 && output[4*width]==0xFF0000FF && output[4*width+2]==0xFF0000FF && output[5]==0xFF101010);
+        p.WrapWords=false; output=draw(); assert(output[5]==0xFF0000FF && output[4*width]==0xFF0000FF); p.WrapWords=true;
+        p.Kerning[(uint64_t(1)<<32)|1]=-64; p.DisplayWidth=8; output=draw(); assert(output[5]==0xFF0000FF && output[6]==0xFF0000FF && output[4*width]==0xFF101010); p.Kerning.clear();
+        p.DisplayWidth=12; p.LetterSpacing64=64; output=draw(); assert(output[4*width]==0xFF0000FF && output[4*width+3]==0xFF0000FF); p.LetterSpacing64=0;
+        p.DisplayWidth=7; p.Glyphs[2].WordSeparator=false; output=draw(); assert(output[5]==0xFF0000FF); p.Glyphs[2].WordSeparator=true;
+        p.DisplayWidth=4; rows({1,1,3,3,3},{2,2}); output=draw(); assert(output[4*width]==0xFF0000FF && output[8*width]==0xFF101010);
+        rows({1,1,1,1,1}); output=draw(); assert(output[0]==0xFF00FF00 && output[2]==0xFF00FF00 && output[4*width]==0xFF00FF00 && output[4*width+2]==0xFF00FF00 && output[8*width]==0xFF00FF00);
+        std::cout<<"PASS: word wrapping on "<<unit<<"x8 sources, whole words, kerning/spacing, nonbreaking spaces, trailing-space/newline handling, character fallback and legacy character wrapping."<<std::endl;
+    }
 	if(argc>1 && argv[1][0]!='-') {
+		std::ifstream words(std::string(argv[1])+".text-words",std::ios::binary); if(words) {
+			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(words)),{}); auto parsed=MetaTextPacket(bytes.data(),bytes.size()).Parse();
+			assert(parsed[0].WrapWords && parsed[0].Glyphs[2].WordSeparator && !parsed[0].Glyphs[0].WordSeparator);
+			bytes[bytes.size()-4]=3; bool rejected=false; try { MetaTextPacket(bytes.data(),bytes.size()).Parse(); } catch(...) { rejected=true; } assert(rejected);
+			std::cout<<"PASS: MXT6 word-wrap flags, separator glyphs and invalid separator rejection."<<std::endl;
+		}
 		std::ifstream input(std::string(argv[1])+".text",std::ios::binary); std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),{}); assert(!bytes.empty());
 		auto text=MetaTextPacket(bytes.data(),bytes.size()).Parse(); assert(text.size()==1 && text[0].Glyphs.size()==2 && text[0].Mappings.size()==2 && text[0].Conditions[0].Address==0x652);
 		assert(text[0].FillEnabled && text[0].FillColor==0x80102030);
@@ -264,11 +308,40 @@ int main(int argc, char** argv)
 		std::cout << "PASS: complete multi-tile source recognition, shifted grid origin, fine scrolling, one glyph per cell, lower-half disambiguation, full-pattern palette checks, graphics addresses and incomplete-cell rejection." << std::endl;
 	}
 	{
-		std::ifstream input(std::string(argc>1 ? argv[1] : "Tests/MetaSprites/obj/runtime-packet.bin")+".text-multi",std::ios::binary); if(input) {
+		for(const auto* suffix:{".text-multi",".text-multi-v4",".text-multi-v5"}) {
+		std::ifstream input(std::string(argc>1 ? argv[1] : "Tests/MetaSprites/obj/runtime-packet.bin")+suffix,std::ios::binary); if(input) {
 			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),{}); auto profiles=MetaTextPacket(bytes.data(),bytes.size()).Parse();
 			assert(profiles.size()==1 && profiles[0].CellHeight==16 && profiles[0].CellOriginY==8 && profiles[0].Patterns.size()==3 && profiles[0].Patterns[0].Tiles[1]==0x20);
-			std::cout << "PASS: managed/native MXT4 source-cell pattern and origin transport." << std::endl;
+			assert(profiles[0].SourceTileWidth==8);
+			std::cout << "PASS: managed/native source-cell transport and legacy MXT4 grid compatibility." << std::endl;
 		}
+		}
+	}
+	{
+		std::ifstream input(std::string(argc>1 ? argv[1] : "Tests/MetaSprites/obj/runtime-packet.bin")+".text-six",std::ios::binary); if(input) {
+			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),{}); auto profiles=MetaTextPacket(bytes.data(),bytes.size()).Parse();
+			assert(profiles.size()==1 && profiles[0].SourceTileWidth==6 && profiles[0].CellWidth==12 && profiles[0].CellOriginX==6 && profiles[0].Patterns[0].Tiles.size()==4);
+			bytes[100]=0; bool rejected=false; try { MetaTextPacket(bytes.data(),bytes.size()).Parse(); } catch(...) { rejected=true; } assert(rejected);
+			std::cout<<"PASS: MXT5 native 6x8 source-width transport and invalid-width rejection."<<std::endl;
+		}
+		MetaSpriteFrame frame(24,16); frame.TextPixels.resize(384); std::vector<uint32_t> base(384,0xFFFF0000);
+		std::ifstream maximum(std::string(argc>1 ? argv[1] : "Tests/MetaSprites/obj/runtime-packet.bin")+".text-six-max",std::ios::binary); if(maximum) {
+			std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(maximum)),{}); auto profiles=MetaTextPacket(bytes.data(),bytes.size()).Parse();
+			assert(profiles[0].CellWidth==126 && profiles[0].CellHeight==128 && profiles[0].Patterns[0].Tiles.size()==336);
+		}
+		for(int y=0;y<16;y++) { for(int x=0;x<24;x++) { auto& t=frame.TextPixels[y*24+x]; t.Valid=true; t.TileWidth=6; t.LocalX=x%6; t.LocalY=y%8; t.TileIndex=1+x/6+y/8*4;
+			frame.Pixels[y*24+x].BackgroundSample={x,y,0,true};
+		} }
+		MetaTextReplacement p; p.Id=1; p.SourceTileWidth=6; p.CellWidth=12; p.CellHeight=16; p.CellOriginX=6; p.Scale=2; p.Unclipped=true; p.UseDisplayRegion=true;
+		p.DisplayWidth=24; p.DisplayHeight=16; p.UseRegion=true; p.X=6; p.Y=0; p.Width=12; p.Height=16; p.PaletteColor=false; p.Color=0xFF00FF00;
+		p.Glyphs.resize(1); p.Glyphs[0].Width=2; p.Glyphs[0].Height=2; p.Glyphs[0].Pixels.assign(4,0xFFFFFFFF);
+		p.Patterns={{{2,3,6,7},-1,0}}; p.PatternStarts[MetaTextReplacement::Key(2,-1)]={0};
+		MetaTextOverlay overlay; auto native=[](uint16_t) { return 0xFFFFFFFFu; };
+		uint32_t scale=1; auto pixels=overlay.Apply(base.data(),24,16,frame,0,0,scale,{p},native); assert(scale==2 && pixels[0]==0xFF00FF00 && pixels[2]==0xFFFF0000);
+		p.SourceTileWidth=8; scale=1; assert(overlay.Apply(base.data(),24,16,frame,0,0,scale,{p},native)==base.data()); p.SourceTileWidth=6;
+		for(int y=8;y<16;y++) { for(int x=12;x<18;x++) { frame.TextPixels[y*24+x].Valid=false; } }
+		scale=1; assert(overlay.Apply(base.data(),24,16,frame,0,0,scale,{p},native)==base.data());
+		std::cout<<"PASS: 6x8 source matching, 12x16 complete patterns, one glyph per cell, grid phase, incompatible-width and missing-component rejection."<<std::endl;
 	}
 	{
 		MetaSpriteFrame frame(8,8); frame.TextLayerMask=3; std::vector<uint32_t> base(64,0xFF101010);
@@ -458,6 +531,79 @@ int main(int argc, char** argv)
 		assert(!MetaSnesCapture::CanExpandHiresMath(*raw));
 		assert(bgCompositor.Apply(original.data(),8,2,bgExpanded)==original.data());
 	}
+    {
+        auto field=[](int phase) {
+            auto raw=std::make_shared<MetaSpriteFrame>(3,4); raw->SnesColorEffects=true; raw->FrameNumber=100+phase; raw->MemorySnapshot[9]=uint8_t(phase); raw->SnesSubOutput.resize(12);
+            for(int y=phase;y<4;y+=2) { MetaSpriteDecodedRow row {0,1,2,y,1,4,{0xFFFF0000}}; row.SnesPriorityCode=3; row.SnesPalette=4; row.SnesRowStep=2; row.SnesRowPhase=uint8_t(phase); raw->DecodedRows.push_back(row); }
+            for(int y=0;y<4;y++) { for(int x=0;x<3;x++) { auto& p=raw->Pixels[y*3+x];
+                p.SnesFallbackCaptured=true; p.SnesFallbackMainColor=p.SnesFallbackSubColor=0x7C00; p.Brightness=15;
+                p.SnesMathEnabled=p.SnesWindowMathAllowed=p.SnesHalf=p.SnesHalfRequested=p.SnesObjectsMain=p.SnesObjectMath=true; p.SnesFixedColor=0x7C00; p.SnesObjectPriorities[3]=6;
+                p.SnesObjectSourceY=int16_t(y*2+phase); p.SnesObjectPriorityCode=3; p.SnesObjectPalette=4; p.SnesObjectColor=31;
+                p.SnesObjectSprite=p.VisibleSprite=(x==1 && y>=1 && y<=2) ? 0 : -1;
+            } }
+            for(int y=0;y<4;y++) { for(int x=0;x<3;x++) { raw->SnesSubOutput[y*3+x]=MetaSnesCapture::CaptureSubOutputPhase(raw->Pixels[y*3+x],raw->Pixels[y*3+(x ? x-1 : 0)],x,0x7C00,0x7C00,true); } }
+            return raw;
+        };
+        auto even=field(0),odd=field(1);
+        std::vector<uint32_t> colors={0,0x8000FF00,0xFF00FF00,0xFFFFFF00,0xFF00FFFF,0xFFFF00FF};
+        auto expected=[](uint32_t color,bool math=true) {
+            uint32_t a=color>>24,result=0xFF000000;
+            for(int shift:{0,8,16}) { uint32_t base=shift==0 ? 255 : 0,c=(color>>shift)&255; if(math) { c=(c+base)/2; } result|=((c*a+base*(255-a)+127)/255)<<shift; }
+            return result;
+        };
+        MetaSpriteReplacement group; group.Id=1; group.ArtworkWidth=3; group.ArtworkHeight=6; group.ArtworkOriginX=group.ArtworkOriginY=1;
+        group.Members={{0,0,1,4,-1,std::vector<uint32_t>(4,0xFFFF0000)}};
+        for(auto color:colors) { for(int x=0;x<3;x++) { group.Artwork.push_back(color); } }
+        MetaSpriteCompositor compositor; compositor.SetGroups({group}); std::vector<uint32_t> blue(48,0xFF0000FF);
+        auto sample=[&](int ny,int phase) { int row=ny*2+phase-1; return row>=0 && row<6 ? expected(colors[row]) : 0xFF0000FFu; };
+        MetaSpriteFrame woven(6,8); assert(MetaSnesCapture::WeaveFieldsWithoutMath(*even,*odd,woven,true,true)); woven.SnesHiresSource=even; woven.SnesHiresOddSource=odd;
+        auto pixels=compositor.Apply(blue.data(),6,8,woven); assert(compositor.GetOutputScale()==1);
+        for(int y=0;y<8;y++) { for(int x=0;x<6;x++) { assert(pixels[y*6+x]==(x&1 ? sample(y/2,y&1) : 0xFF0000FFu)); } }
+        auto ordinary=std::make_shared<MetaSpriteFrame>(*odd); ordinary->SnesSubOutput.clear(); MetaSpriteFrame mixed(6,8);
+        assert(MetaSnesCapture::WeaveFieldsWithoutMath(*even,*ordinary,mixed,true,true)); mixed.SnesHiresSource=even; mixed.SnesHiresOddSource=ordinary;
+        pixels=compositor.Apply(blue.data(),6,8,mixed);
+        for(int y=0;y<8;y++) { for(int x=0;x<6;x++) { assert(pixels[y*6+x]==((y&1) || (x&1) ? sample(y/2,y&1) : 0xFF0000FFu)); } }
+        MetaAlternateArtwork alternate; alternate.ArtworkWidth=3; alternate.ArtworkHeight=6; alternate.ArtworkOriginX=alternate.ArtworkOriginY=1; alternate.Artwork.assign(18,0xFFFFFFFF); alternate.MemoryConditions={{9,1,255}};
+        auto conditional=group; conditional.AlternateArtwork={alternate}; compositor.SetGroups({conditional}); pixels=compositor.Apply(blue.data(),6,8,woven);
+        assert(pixels[3*6+1]==expected(0xFFFFFFFF) && pixels[2*6+1]==sample(1,0)); compositor.SetGroups({group});
+        for(int phase=0;phase<2;phase++) {
+            auto raw=phase ? odd : even; MetaSpriteFrame current(6,8); assert(MetaSnesCapture::MapFieldWithoutMath(*raw,current,phase!=0,true,true)); current.SnesHiresSource=raw;
+            pixels=compositor.Apply(blue.data(),6,8,current);
+            for(int y=0;y<8;y++) { for(int x=0;x<6;x++) { assert(pixels[y*6+x]==((y&1)==phase && (x&1) ? sample(y/2,phase) : 0xFF0000FFu)); } }
+            MetaSpriteFrame bob(6,8); assert(MetaSnesCapture::MapBobWithoutMath(*raw,bob,phase!=0,0,true,true)); bob.SnesHiresSource=raw; pixels=compositor.Apply(blue.data(),6,8,bob);
+            for(int y=0;y<8;y++) { for(int x=0;x<6;x++) { int ny=phase && y>0 ? (y-1)/2 : y/2; assert(pixels[y*6+x]==(x&1 ? sample(ny,phase) : 0xFF0000FFu)); } }
+        }
+        auto hd=group; hd.ArtworkScale=2; hd.ArtworkWidth=6; hd.ArtworkHeight=12; hd.Artwork.clear();
+        for(int y=0;y<12;y++) { for(int x=0;x<6;x++) { hd.Artwork.push_back(y&1 ? 0xFFFFFFFFu : colors[y/2]); } }
+        compositor.SetGroups({hd}); pixels=compositor.Apply(blue.data(),6,8,woven); assert(compositor.GetOutputScale()==2);
+        for(int y=0;y<16;y++) { for(int x=0;x<12;x++) { int py=y/2,row=(py/2)*2+(py&1)-1; uint32_t color=row>=0 && row<6 ? expected(y&1 ? 0xFFFFFFFFu : colors[row]) : 0xFF0000FFu; assert(pixels[y*12+x]==((x/2)&1 ? color : 0xFF0000FFu)); } }
+        auto noMath=*even; for(auto& p:noMath.Pixels) { p.SnesMathEnabled=p.SnesObjectMath=p.SnesWindowMathAllowed=false; }
+        for(auto& phase:noMath.SnesSubOutput) { phase.SnesMathEnabled=false; }
+        MetaSpriteFrame noMathOutput(6,8); assert(MetaSnesCapture::ExpandWithoutMath(noMath,noMathOutput));
+        pixels=compositor.Apply(blue.data(),6,8,noMathOutput); assert(compositor.GetOutputScale()==2);
+        for(int y=0;y<16;y++) { for(int x=0;x<12;x++) { int row=(y/4)*2-1; uint32_t color=row>=0 && row<6 ? expected(y&1 ? 0xFFFFFFFFu : colors[row],false) : 0xFF0000FFu; assert(pixels[y*12+x]==((x/2)&1 ? color : 0xFF0000FFu)); } }
+        auto multiEven=std::make_shared<MetaSpriteFrame>(*even),multiOdd=std::make_shared<MetaSpriteFrame>(*odd);
+        for(int phase=0;phase<2;phase++) { auto raw=phase ? multiOdd : multiEven;
+            MetaSpriteDecodedRow row {1,1,6,phase,1,2,{0xFFFF0000}}; row.SnesPriorityCode=0; row.SnesPalette=3; row.SnesRowStep=2; row.SnesRowPhase=uint8_t(phase); raw->DecodedRows.push_back(row);
+            for(auto& p:raw->Pixels) { p.SnesObjectPriorities[0]=2; } auto& p=raw->Pixels[10]; p.VisibleSprite=p.SnesObjectSprite=1; p.SnesObjectPriorityCode=0; p.SnesObjectPalette=3;
+        }
+        auto multi=group; multi.Members.push_back({0,4,1,2,-1,std::vector<uint32_t>(2,0xFFFF0000)}); compositor.SetGroups({multi}); MetaSpriteFrame multiWoven(6,8);
+        assert(MetaSnesCapture::WeaveFieldsWithoutMath(*multiEven,*multiOdd,multiWoven,true,true)); multiWoven.SnesHiresSource=multiEven; multiWoven.SnesHiresOddSource=multiOdd;
+        auto originalObjects=blue; originalObjects[6*6+3]=originalObjects[7*6+3]=0xFFFF0000; pixels=compositor.Apply(originalObjects.data(),6,8,multiWoven);
+        assert(pixels[6*6+1]==0xFFFF00FF && pixels[6*6+3]==0xFFFF00FF && pixels[7*6+3]==0xFF0000FF);
+        multiEven=std::make_shared<MetaSpriteFrame>(*multiEven); multiOdd=std::make_shared<MetaSpriteFrame>(*multiOdd);
+        for(auto raw:{multiEven,multiOdd}) { for(auto& p:raw->Pixels) { p.SnesFallbackMainFlags=3; } }
+        assert(MetaSnesCapture::WeaveFieldsWithoutMath(*multiEven,*multiOdd,multiWoven,true,true)); multiWoven.SnesHiresSource=multiEven; multiWoven.SnesHiresOddSource=multiOdd;
+        pixels=compositor.Apply(blue.data(),6,8,multiWoven); assert(pixels[6*6+1]==0xFF0000FF && pixels[2*6+1]==sample(1,0));
+        std::cout<<"PASS: hires OBJ-interlace mixed-member full-row priority, palette math exemption, margins and native suppression outside the PNG."<<std::endl;
+        auto missing=std::make_shared<MetaSpriteFrame>(*even); missing->Pixels[4].SnesObjectSourceY=-1;
+        MetaSpriteFrame projected(6,8); assert(MetaSnesCapture::ExpandWithoutMath(*missing,projected,true)); projected.SnesHiresSource=missing;
+        auto native=blue; native[2*6+3]=native[3*6+3]=0xFF7B007B; compositor.SetGroups({group}); pixels=compositor.Apply(native.data(),6,8,projected);
+        assert(pixels[2*6+3]==0xFF7B007B && pixels[2*6+1]==sample(1,0));
+        auto invalid=*even; invalid.DecodedRows[0].SnesRowStep=3; assert(!MetaSnesCapture::CanExpandHiresMath(invalid));
+        invalid=*even; invalid.DecodedRows[0].SnesRowPhase=2; assert(!MetaSnesCapture::CanExpandHiresMath(invalid));
+        std::cout<<"PASS: hires OBJ-interlace source rows, both parities, weave/current/bob, full PNG alpha/origins/margins, per-field alternate artwork, 2x vertical detail and missing-geometry fallback."<<std::endl;
+    }
 	{
         std::shared_ptr<const std::vector<uint32_t>> retained;
         {
@@ -1903,6 +2049,143 @@ int main(int argc, char** argv)
 		std::cout << "PASS: NES uniform reference scroll, native split tracking, multipliers, cropping, missing reference fallback and clipping." << std::endl;
 	}
 	{
+		MetaSpriteFrame field(256,239); field.SnesColorEffects=true; field.FrameNumber=77;
+		field.MemorySnapshot={{0x7E1234u,uint8_t(2)},{0x7E4321u,uint8_t(9)}};
+		field.SnesBackgrounds.resize(field.Pixels.size()); field.SnesSubOutput.resize(field.Pixels.size());
+		field.BackgroundUnderlays.resize(field.Pixels.size()); field.TextPixels.resize(field.Pixels.size());
+		field.TextLayerMask=1; field.TextLayers[0].resize(field.Pixels.size());
+		for(size_t i=0;i<field.Pixels.size();i++) {
+			auto& p=field.Pixels[i]; p.SnesFallbackCaptured=true; p.SnesFallbackMainColor=0x7C00;
+			p.Brightness=15; p.SnesObjectsMain=true; p.SnesObjectPriorities[0]=7;
+			p.BackgroundSample.Valid=true; p.BackgroundSample.X=(int)(i%256); p.BackgroundSample.Y=(int)(i/256);
+		}
+		field.Pixels[0].SnesCoverage.push_back({8,3,5,4,true,false,true,2});
+		field.Pixels[0].SnesNativeObjects.push_back({8,0x1234,2,4});
+		field.Pixels[0].SnesObjectSourceY=13;
+		field.SnesBackgrounds[0].Captured=true; field.SnesBackgrounds[0].Layers[2].Sample.ScrollX=-17;
+		field.SnesBackgrounds[0].Layers[2].SeparateSub=true; field.SnesBackgrounds[0].Layers[2].SubColor=0x456;
+		field.SnesSubOutput[0].Captured=true; field.SnesSubOutput[0].SecondarySampleX=-1;
+		field.BackgroundUnderlays[0].ForegroundColor=0x321;
+		field.TextPixels[0].GraphicsAddress=0x1234; field.TextLayers[0][0].X=-8;
+		field.Rows.push_back({}); field.Rows.back().PatternAddress=0x1234;
+		field.DecodedRows={{7,10,10,0,2,2,{0xFFFF0000,0}},{7,10,10,1,2,2,{0xFFFF0000,0}}};
+		for(auto& row:field.DecodedRows) { row.SnesPriorityCode=0; row.SnesFetchOrder=1; }
+		field.DecodedRows[1].SnesRowStep=2; field.DecodedRows[1].SnesRowPhase=1;
+		for(int y=10;y<12;y++) {
+			auto& p=field.Pixels[y*256+10]; p.VisibleSprite=p.SnesObjectSprite=7;
+			p.SnesObjectPriorityCode=0; p.SnesObjectColor=p.SpriteColor=31; p.AllowReplacementSprite(7);
+		}
+		auto animation=std::make_shared<MetaPngArtworkAnimation>();
+		auto timing=std::make_shared<MetaPngAnimationSnapshot>(); timing->Elapsed.emplace(animation.get(),19); timing->Groups=animation; field.AnimationTiming=timing;
+		std::vector<uint64_t> bindings={42,19}; std::vector<uint8_t> bytes;
+		assert(MetaSnesFieldCheckpoint::Encode(field,bindings,bytes));
+		MetaSnesFieldCheckpoint::Snapshot restored; assert(MetaSnesFieldCheckpoint::Decode(bytes,restored));
+		const auto& copy=*restored.Frame;
+		assert(copy.FrameNumber==77 && copy.MemorySnapshot==field.MemorySnapshot && restored.HasAnimationTiming && restored.AnimationBindings==bindings);
+		assert(!copy.AnimationTiming && !copy.SnesHiresSource && !copy.SnesHiresOddSource);
+		for(size_t i=0;i<field.Pixels.size();i++) {
+			assert(!memcmp(static_cast<const MetaSpritePixelState*>(&field.Pixels[i]),static_cast<const MetaSpritePixelState*>(&copy.Pixels[i]),sizeof(MetaSpritePixelState)));
+		}
+		assert(copy.Pixels[0].SnesCoverage.size()==1 && copy.Pixels[0].SnesCoverage[0].Sprite==8 && copy.Pixels[0].SnesCoverage[0].Math);
+		assert(copy.Pixels[0].SnesNativeObjects.size()==1 && copy.Pixels[0].SnesNativeObjects[0].Color==0x1234);
+		assert(copy.SnesBackgrounds[0].Layers[2].SubColor==0x456 && copy.SnesBackgrounds[0].Layers[2].Sample.ScrollX==-17);
+		assert(copy.SnesSubOutput[0].Captured && copy.SnesSubOutput[0].SecondarySampleX==-1);
+		assert(copy.BackgroundUnderlays[0].ForegroundColor==0x321 && copy.TextPixels[0].GraphicsAddress==0x1234 && copy.TextLayers[0][0].X==-8);
+		assert(copy.Rows[0].PatternAddress==0x1234 && copy.DecodedRows[1].Pixels==field.DecodedRows[1].Pixels && copy.DecodedRows[1].SnesRowPhase==1);
+		assert(!MetaSnesFieldCheckpoint::Encode(field,{},bytes)); // Active clocks cannot disappear silently.
+		assert(!MetaSnesFieldCheckpoint::Encode(field,{42,19,42,20},bytes));
+		const auto retained=restored.Frame;
+		for(size_t length:{size_t(0),size_t(11),bytes.size()/2,bytes.size()-1}) {
+			auto truncated=bytes; truncated.resize(length); assert(!MetaSnesFieldCheckpoint::Decode(truncated,restored)); assert(restored.Frame==retained);
+		}
+		auto invalid=bytes; invalid[0]^=1; assert(!MetaSnesFieldCheckpoint::Decode(invalid,restored));
+		invalid=bytes; invalid.push_back(0); assert(!MetaSnesFieldCheckpoint::Decode(invalid,restored));
+		invalid=bytes; memcpy(invalid.data()+invalid.size()-5,invalid.data()+invalid.size()-10,4);
+		assert(!MetaSnesFieldCheckpoint::Decode(invalid,restored)); // Duplicate RAM addresses.
+		std::vector<uint8_t> unchanged={1,2,3}; field.Width=512;
+		assert(!MetaSnesFieldCheckpoint::Encode(field,bindings,unchanged) && unchanged==std::vector<uint8_t>({1,2,3})); field.Width=256;
+		field.Pixels[0].GbaCoverage.push_back({}); assert(!MetaSnesFieldCheckpoint::Encode(field,bindings,unchanged)); field.Pixels[0].GbaCoverage.clear();
+		field.SnesHiresSource=retained; assert(!MetaSnesFieldCheckpoint::Encode(field,bindings,unchanged)); field.SnesHiresSource.reset();
+		field.Pixels[0].SnesField=1; assert(!MetaSnesFieldCheckpoint::Encode(field,bindings,unchanged)); field.Pixels[0].SnesField=0;
+		field.DecodedRows[1].SnesRowPhase=0; assert(!MetaSnesFieldCheckpoint::Encode(field,bindings,unchanged)); field.DecodedRows[1].SnesRowPhase=1;
+		// Exercise the restored recognition/composition path, not just metadata copies.
+		field.DecodedRows[1].SnesRowStep=1; field.DecodedRows[1].SnesRowPhase=0;
+		assert(MetaSnesFieldCheckpoint::Encode(field,bindings,bytes)); assert(MetaSnesFieldCheckpoint::Decode(bytes,restored));
+		auto candidates=MetaSpriteCompositor::BuildDecodedCandidates(field); assert(!candidates.empty());
+		auto member=candidates[0]; member.X=member.Y=0; member.HardwareSprite=-1;
+		MetaSpriteReplacement group; group.Id=1; group.Members={member}; group.ArtworkWidth=group.ArtworkHeight=3;
+		group.Artwork.assign(9,0xFF00FF00); group.ArtworkOriginX=group.ArtworkOriginY=1;
+		std::vector<uint32_t> native(field.Pixels.size(),0xFF0000FF); MetaSpriteCompositor before,after; before.SetGroups({group}); after.SetGroups({group});
+		auto color=[](uint16_t value) { return 0xFF000000u|((uint32_t(value&31)*255/31)<<16)|((uint32_t((value>>10)&31)*255/31)); };
+		const auto* first=before.Apply(native.data(),256,239,field,0,0,color);
+		std::vector<uint32_t> expected(first,first+native.size()); assert(expected!=native);
+		assert(expected[9*256+9]==0xFF00FF00 && expected[10*256+11]==0xFF00FF00);
+		const auto* second=after.Apply(native.data(),256,239,*restored.Frame,0,0,color);
+		assert(std::equal(expected.begin(),expected.end(),second));
+		std::cout<<"PASS: bounded SNES field checkpoint round trip retains fetched rows, native coverage, backgrounds, text, RAM and stable animation IDs with identical replacement composition; truncated/invalid snapshots fail transactionally."<<std::endl;
+	}
+	{
+		MetaPngPixelPool pool;
+		auto sequence=[&](uint64_t id,uint32_t first,uint32_t second) {
+			MetaPngArtworkAnimation result; result.RestartOnActivation=true; result.SourceIdentity={123,id};
+			result.Timeline=MetaPngTimeline(MetaPngPlayback::Loop,{1,1});
+			for(uint32_t color:{first,second}) { MetaPngArtworkFrame image; image.Width=image.Height=1;
+				image.Pixels=pool.Intern(std::vector<uint32_t>{color}); result.Frames.push_back(std::move(image)); }
+			return result;
+		};
+		MetaSpriteReplacement group; group.Id=3; group.ArtworkWidth=group.ArtworkHeight=1; group.Artwork={0xFF000000};
+		group.MemoryConditions={{1u,uint8_t(1),uint8_t(255)}}; group.Animation=sequence(1,0xFFFF0000,0xFF00FF00);
+		MetaAlternateArtwork alternate; alternate.ArtworkWidth=alternate.ArtworkHeight=1; alternate.Artwork={0xFF000000};
+		alternate.MemoryConditions={{2u,uint8_t(9),uint8_t(255)}}; alternate.Animation=sequence(2,0xFF112233,0xFF445566); group.AlternateArtwork={alternate};
+		MetaBackgroundReplacement background; background.Id=3; background.Width=background.Height=1; background.Artwork={0xFF000000};
+		background.MemoryConditions={{3u,uint8_t(7),uint8_t(255)}}; background.Animation=sequence(3,0xFF778899,0xFFAABBCC);
+		MetaSpriteCompositor compositor; compositor.SetReplacements({group},{background});
+		MetaSpriteFrame even(256,239),odd(256,239),later(256,239); even.SnesColorEffects=odd.SnesColorEffects=later.SnesColorEffects=true;
+		even.FrameNumber=100; odd.FrameNumber=101; later.FrameNumber=104;
+		uint32_t reads=0;
+		auto read=[&](uint32_t address,uint8_t& value) { reads++; value=address==1 ? 1 : address==2 ? 9 : 7; return true; };
+		compositor.CaptureMemorySnapshot(even,read); assert(reads==3 && even.AnimationTiming->Elapsed.size()==3);
+		compositor.CaptureMemorySnapshot(odd,[&](uint32_t address,uint8_t& value) { reads++; value=address==1 ? 1 : address==2 ? 0 : 7; return true; });
+		compositor.CaptureMemorySnapshot(later,read); assert(reads==9);
+		const auto liveClocks=compositor.SaveAnimationState();
+		std::vector<uint64_t> evenIds,oddIds; uint64_t evenRevision=0,oddRevision=0;
+		assert(compositor.CaptureFieldAnimationBindings(even,evenIds,evenRevision));
+		assert(compositor.CaptureFieldAnimationBindings(odd,oddIds,oddRevision));
+		assert(evenRevision==oddRevision && evenIds==std::vector<uint64_t>({768,0,769,0,(uint64_t(1)<<63)|3,0}));
+		assert(oddIds==std::vector<uint64_t>({768,0,769,0,(uint64_t(1)<<63)|3,1}));
+		std::vector<uint8_t> bytes; MetaSnesFieldCheckpoint::Snapshot evenCopy,oddCopy;
+		assert(MetaSnesFieldCheckpoint::Encode(even,evenIds,bytes) && MetaSnesFieldCheckpoint::Decode(bytes,evenCopy));
+		assert(MetaSnesFieldCheckpoint::Encode(odd,oddIds,bytes) && MetaSnesFieldCheckpoint::Decode(bytes,oddCopy));
+		assert(compositor.RestoreFieldAnimationBindings(*evenCopy.Frame,evenCopy.HasAnimationTiming,evenCopy.AnimationBindings,evenRevision));
+		assert(compositor.RestoreFieldAnimationBindings(*oddCopy.Frame,oddCopy.HasAnimationTiming,oddCopy.AnimationBindings,oddRevision));
+		assert(reads==9 && compositor.SaveAnimationState()==liveClocks);
+		auto evenGroups=std::static_pointer_cast<const std::vector<MetaSpriteReplacement>>(evenCopy.Frame->AnimationTiming->Groups);
+		auto oddGroups=std::static_pointer_cast<const std::vector<MetaSpriteReplacement>>(oddCopy.Frame->AnimationTiming->Groups);
+		auto layers=std::static_pointer_cast<const std::vector<MetaBackgroundReplacement>>(oddCopy.Frame->AnimationTiming->Backgrounds);
+		assert(evenGroups->front().SelectArtwork(evenCopy.Frame->MemorySnapshot,100,evenCopy.Frame->AnimationTiming.get()).Artwork[0]==0xFF112233);
+		assert(oddGroups->front().SelectArtwork(oddCopy.Frame->MemorySnapshot,101,oddCopy.Frame->AnimationTiming.get()).Artwork[0]==0xFFFF0000);
+		assert((*layers->front().Animation.Select(101,oddCopy.Frame->AnimationTiming.get())->Pixels)[0]==0xFFAABBCC);
+		assert(evenCopy.Frame->MemorySnapshot.at(2)==9 && oddCopy.Frame->MemorySnapshot.at(2)==0);
+		const auto retained=evenCopy.Frame->AnimationTiming;
+		for(const auto& invalid:std::vector<std::vector<uint64_t>>{{769},{769,0,769,1},{UINT64_MAX,0}}) {
+			assert(!compositor.RestoreFieldAnimationBindings(*evenCopy.Frame,true,invalid,evenRevision)); assert(evenCopy.Frame->AnimationTiming==retained);
+		}
+		assert(!compositor.RestoreFieldAnimationBindings(*evenCopy.Frame,false,evenIds,evenRevision));
+		assert(!compositor.RestoreFieldAnimationBindings(*evenCopy.Frame,true,evenIds,evenRevision+1));
+		assert(compositor.RestoreFieldAnimationBindings(*oddCopy.Frame,true,{},oddRevision) && oddCopy.Frame->AnimationTiming->Elapsed.empty());
+		assert(compositor.RestoreFieldAnimationBindings(*oddCopy.Frame,false,{},oddRevision) && !oddCopy.Frame->AnimationTiming);
+		assert(compositor.SaveAnimationState()==liveClocks && reads==9);
+		// The same numeric IDs do not authorize historical pointers after a pack edit.
+		group.AlternateArtwork[0].Animation=sequence(4,0xFF010203,0xFF040506); compositor.SetReplacements({group},{background});
+		assert(!compositor.RestoreFieldAnimationBindings(*evenCopy.Frame,true,evenIds,evenRevision) && evenCopy.Frame->AnimationTiming==retained);
+		std::vector<uint64_t> untouched={123}; uint64_t untouchedRevision=999;
+		assert(!compositor.CaptureFieldAnimationBindings(even,untouched,untouchedRevision) && untouched==std::vector<uint64_t>({123}) && untouchedRevision==999);
+		compositor.SetReplacements({},{});
+		assert(evenGroups->front().SelectArtwork(evenCopy.Frame->MemorySnapshot,100,retained.get()).Artwork[0]==0xFF112233);
+		assert(reads==9);
+		std::cout<<"PASS: checkpoint animation IDs rebind independent field clocks and owners, preserve captured RAM without new reads or changing live clocks, and reject stale packs/malformed bindings transactionally."<<std::endl;
+	}
+	{
 		BlendFilter blend; blend.SetEnabled(true);
 		uint32_t pixels[] = {0xFFFF0000, 0xFF0000FF};
 		blend.ApplyFilter(pixels, 2, 10);
@@ -1918,6 +2201,45 @@ int main(int argc, char** argv)
 		pixels[0] = 0xFF00FF00; blend.ApplyFilter(pixels, 2, 17);
 		assert(pixels[0] == 0xFF00FF00);
 		std::cout << "PASS: final-frame blend averages consecutive PNG colors and clears history on explicit reset, disable and discontinuity." << std::endl;
+	}
+	{
+		BlendFilter blend; blend.SetEnabled(true);
+		assert(blend.CaptureHistory().Pixels.empty());
+		std::vector<uint32_t> first={0xFFFF0000,0xFF0000FF,0x80010203,0x00000000};
+		std::vector<uint32_t> second={0xFF00FF00,0xFFFFFF00,0xFF030201,0xFFFFFFFF};
+		std::vector<uint32_t> third={0xFF0000FF,0xFFFF00FF,0x00000000,0x80000000};
+		auto pixels=first; blend.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),40);
+		pixels=second; blend.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),41);
+		auto saved=blend.CaptureHistory();
+		assert(saved.FrameNumber==41 && saved.Pixels==second && saved.Pixels!=pixels);
+		// BaseVideoFilter clears/reselects the enabled flag for every frame.
+		// That transient selection must not discard valid temporal input.
+		blend.SetEnabled(false); assert(blend.CaptureHistory().Pixels.empty());
+		blend.SetEnabled(true); assert(blend.CaptureHistory().Pixels==second);
+		pixels=third; blend.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),42);
+		const auto expected=pixels;
+		assert(blend.RestoreHistory(saved));
+		pixels=third; blend.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),42); assert(pixels==expected);
+		assert(blend.RestoreHistory(saved));
+		pixels=third; blend.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),42); assert(pixels==expected);
+		assert(saved.Pixels==second); // Playback never mutates the checkpoint.
+		BlendFilter restored; restored.SetEnabled(true); assert(restored.RestoreHistory(saved));
+		saved.Pixels.assign(4,0); // Restored storage is independent of its input.
+		pixels=third; restored.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),42); assert(pixels==expected);
+		auto checkpoint=restored.CaptureHistory(); assert(checkpoint.FrameNumber==42 && checkpoint.Pixels==third);
+		assert(restored.RestoreHistory(checkpoint)); pixels=first;
+		restored.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),99); assert(pixels==first);
+		assert(restored.RestoreHistory(checkpoint));
+		uint32_t resized[]={0xFF123456,0xFF789ABC}; restored.ApplyFilter(resized,2,43);
+		assert(resized[0]==0xFF123456 && resized[1]==0xFF789ABC);
+		assert(!restored.RestoreHistory({})); assert(restored.CaptureHistory().Pixels.empty());
+		assert(restored.RestoreHistory(checkpoint)); restored.SetEnabled(false);
+		assert(restored.CaptureHistory().Pixels.empty() && !restored.RestoreHistory(checkpoint));
+		restored.SetEnabled(true); pixels=first; restored.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),43); assert(pixels==first);
+		checkpoint.FrameNumber=UINT32_MAX; assert(restored.RestoreHistory(checkpoint)); pixels=first;
+		restored.ApplyFilter(pixels.data(),(uint32_t)pixels.size(),0);
+		for(size_t i=0;i<pixels.size();i++) { uint32_t a=first[i],b=third[i]; assert(pixels[i]==(((a^b)&0xFFFEFEFEu)>>1)+(a&b)); }
+		std::cout<<"PASS: owned unblended frame checkpoints restore exact temporal averages, preserve alpha, isolate storage and reject stale/incompatible history."<<std::endl;
 	}
 	{
 		MetaSpriteFrame logicalField(2, 2), mappedField(4, 4);

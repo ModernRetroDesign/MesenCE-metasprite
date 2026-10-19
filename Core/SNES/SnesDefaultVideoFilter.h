@@ -24,6 +24,7 @@ private:
 protected:
 	void OnBeforeApplyFilter() override;
 	bool DeferFrameBlend() const override { return _frame.MetaSprites && SupportsMetaSprites(); }
+	bool AllowRewindFrameBlend() const override { return DeferFrameBlend(); }
 	FrameInfo GetFrameInfo() override;
 
 public:

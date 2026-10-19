@@ -1042,6 +1042,11 @@ namespace Mesen.ViewModels
 					OnClick = () => DebugWindowManager.OpenDebugWindow(() => new MemoryToolsWindow())
 				},
 				new ContextMenuAction() {
+					ActionType = ActionType.Custom, CustomText = "Named RAM Conditions…",
+					IsEnabled = () => IsGameRunning && NamedConditionWindow.CanOpenForCurrentGame(),
+					OnClick = async () => await NamedConditionWindow.OpenForCurrentGame(wnd)
+				},
+				new ContextMenuAction() {
 					ActionType = ActionType.OpenRegisterViewer,
 					Shortcut = () => ConfigManager.Config.Debug.Shortcuts.Get(DebuggerShortcut.OpenRegisterViewer),
 					IsEnabled = () => IsGameRunning,

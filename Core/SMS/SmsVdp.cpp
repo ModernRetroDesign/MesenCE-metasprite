@@ -460,6 +460,13 @@ void SmsVdp::LoadBgTilesSg()
 				//Mode 0 - "Graphic 1"
 				_bgTileAddr = (_state.BgPatternTableAddress & 0x3800) + (_bgTileIndex * 8) + tileRow;
 			}
+			if(_metaFrame && _metaFrame->TextLayerMask) {
+				_textFetch={}; _textFetch.Valid=true;
+				// Multicolor addresses identify a pair of 4x4 color blocks, not a conventional pattern index.
+				_textFetch.TileIndex=_state.M3_Use240LineMode ? UINT32_MAX : _bgTileIndex;
+				_textFetch.GraphicsAddress=_bgTileAddr-(_state.M3_Use240LineMode ? (tileRow>=4 ? 1 : 0) : tileRow);
+				_textFetch.LocalY=tileRow;
+			}
 			break;
 		}
 
@@ -501,6 +508,11 @@ void SmsVdp::LoadBgTilesSg()
 				_bgPatternData <<= 1;
 				PushBgPixel(pixelColor, i);
 				if(_metaFrame) { auto& sample = _metaBgSamples[_pixelsAvailable + i]; sample = {}; sample.Valid = !_disableBackground; sample.Layer = 0; sample.X = cycle - 6 + i; sample.Y = _state.Scanline; sample.ScrollWrapX = 256; sample.ScrollWrapY = 192; }
+				if(_metaFrame && _metaFrame->TextLayerMask) {
+					auto& text=_textSamples[_pixelsAvailable+i]; text=_textFetch; text.LocalX=uint8_t(i);
+					// Keep fetched color indices until output-time palette conversion. Color zero uses the backdrop.
+					text.InkColors[0]=color>>4; text.InkColors[1]=color&15; text.InkColors[2]=color>>4;
+				}
 			}
 
 			if(_disableBackground) {
@@ -531,6 +543,10 @@ void SmsVdp::LoadBgTilesSgTextMode()
 			uint8_t tileRow = (y & 0x07);
 			_bgTileIndex = ReadVram(ntAddr, SmsVdpMemAccess::BgLoadTable);
 			_bgTileAddr = (_state.BgPatternTableAddress & 0x3800) + (_bgTileIndex * 8) + tileRow;
+			if(_metaFrame && _metaFrame->TextLayerMask) {
+				_textFetch={}; _textFetch.Valid=true; _textFetch.TileWidth=6; _textFetch.TileIndex=_bgTileIndex;
+				_textFetch.GraphicsAddress=_bgTileAddr-tileRow; _textFetch.LocalY=tileRow;
+			}
 			break;
 		}
 
@@ -542,6 +558,10 @@ void SmsVdp::LoadBgTilesSgTextMode()
 				_bgPatternData <<= 1;
 				PushBgPixel(color, i);
 				if(_metaFrame) { auto& sample = _metaBgSamples[_pixelsAvailable + i]; sample = {}; sample.Valid = !_disableBackground; sample.Layer = 0; sample.X = _state.Cycle - 2 + i; sample.Y = _state.Scanline; sample.ScrollWrapX = 240; sample.ScrollWrapY = 192; }
+				if(_metaFrame && _metaFrame->TextLayerMask) {
+					auto& text=_textSamples[_pixelsAvailable+i]; text=_textFetch; text.LocalX=uint8_t(i);
+					text.InkColors[0]=_state.TextColorIndex; text.InkColors[1]=_state.BackgroundColorIndex; text.InkColors[2]=_state.TextColorIndex;
+				}
 			}
 
 			if(_disableBackground) {
@@ -714,6 +734,7 @@ void SmsVdp::ProcessEndOfScanline()
 
 	_pixelsAvailable = 0;
 	if(_metaFrame) { for(auto& sample : _metaBgSamples) { sample = {}; } }
+	if(_metaFrame && _metaFrame->TextLayerMask) { for(auto& text:_textSamples) { text={}; } _textFetch={}; }
 	for(int i = 0; i < borderWidth; i++) {
 		PushBgPixel(_state.BackgroundColorIndex, i);
 		_bgPalette |= 0x800000 >> i;
@@ -1271,8 +1292,11 @@ uint16_t SmsVdp::GetPixelColor()
 		pixel.NativeBackdropColor = _state.UseMode4 ? _internalPaletteRam[0x10 | _state.BackgroundColorIndex] : _activeSgPalette[_state.BackgroundColorIndex]; pixel.NativeBackdropCaptured = true;
 		pixel.BackgroundColorIndex = color;
 		pixel.BackgroundSample = _metaBgSamples[0];
-		if(_state.UseMode4 && _metaFrame->TextLayerMask) {
-			auto text=_textSamples[0]; for(int ink=1;ink<=3;ink++) { text.InkColors[ink-1]=_internalPaletteRam[text.Palette*16+ink]; }
+		if(_metaFrame->TextLayerMask) {
+			auto text=_textSamples[0]; for(int ink=1;ink<=3;ink++) {
+				text.InkColors[ink-1]=_state.UseMode4 ? _internalPaletteRam[text.Palette*16+ink]
+					: _activeSgPalette[text.InkColors[ink-1] ? text.InkColors[ink-1] : _state.BackgroundColorIndex];
+			}
 			_metaFrame->CaptureText(0,xPos,_state.Scanline+GetViewportYOffset(),text,pixel.BackgroundSample);
 		}
 		pixel.BackgroundOverlayOccludesClasses = highPriority ? 1 : 0;
